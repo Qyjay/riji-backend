@@ -27,9 +27,12 @@ app/
 ├── anniversary/      # 纪念日管理
 ├── derivative/       # 衍生内容（漫画/小说/分享卡）
 ├── social/           # 社交匹配 + 搭子
-├── chat/             # AI 对话（SSE 流式）
+├── chat/             # AI 对话（SSE 流式，三层降级）
 ├── study/            # 学习（番茄钟/Todo）
-├── ai/               # MiniMax AI 客户端
+├── ai/               # MiniMax AI 客户端（直连，不修改）
+├── openclaw/         # OpenClaw Gateway 客户端（带记忆对话）
+│   ├── client.py     # OpenClawClient + get_openclaw_client()
+│   └── prompt_builder.py  # build_chat_system_prompt()
 └── models/           # SQLAlchemy 数据模型
 ```
 
@@ -51,6 +54,12 @@ app/
 - 统一响应：`{"code": 0, "data": {...}, "message": "ok"}`
 - 错误码：`ok/success()` 返回 code=0，`ApiException` 抛出业务错误
 - Mock 模式：`MINIMAX_MOCK=true` 时不消耗 API
+
+## OpenClaw Gateway（带记忆 AI 对话）
+- 配置：`OPENCLAW_ENABLED=true` + `OPENCLAW_GATEWAY_TOKEN` + `OPENCLAW_GATEWAY_URL`（默认 http://127.0.0.1:18789）
+- 三层降级：OpenClaw → 直连 MiniMax → Mock
+- `OPENCLAW_ENABLED` 默认 `False`，Mock 模式下不调 OpenClaw
+- `user` 字段设为 `riji-{user_id}` 实现 per-user session 隔离
 
 ## 开发命令
 ```bash
