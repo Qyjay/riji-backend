@@ -22,8 +22,14 @@ async def create_material(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """创建一条素材记录"""
+    """创建一条素材记录，自动触发 AI 情绪提取"""
     result = service.create_material(db, current_user.id, body.model_dump())
+    # 自动触发情绪提取（异步，不阻塞返回）
+    try:
+        emotion = await service.extract_emotion(db, current_user.id, result["id"])
+        result["emotion"] = emotion
+    except Exception:
+        pass  # 情绪提取失败不影响素材创建
     return ok(result)
 
 

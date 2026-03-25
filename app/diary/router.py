@@ -13,6 +13,17 @@ from app.diary import schemas, service
 router = APIRouter(prefix="/diaries", tags=["日记管理"])
 
 
+@router.get("/today-summary", summary="今日概要")
+def get_today_summary(
+    date: str = Query(..., description="日期 YYYY-MM-DD"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """首页用：今日素材数 + 是否已生成日记 + 日记ID"""
+    result = service.get_today_summary(db, current_user.id, date)
+    return ok(result)
+
+
 @router.post("/generate", summary="AI 生成当日日记")
 async def generate_diary(
     body: schemas.GenerateDiaryRequest,

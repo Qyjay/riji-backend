@@ -379,3 +379,32 @@ async def generate_derivative(db: Session, user_id: str, diary_id: str, dtype: s
         "share_scope": "private",
         "created_at": now,
     }
+
+
+def get_today_summary(db: Session, user_id: str, date: str) -> dict:
+    """今日概要：素材数 + 素材列表 + 是否已生成日记"""
+    # 今日素材
+    materials = (
+        db.query(RawMaterial)
+        .filter(RawMaterial.user_id == user_id, RawMaterial.date == date)
+        .order_by(RawMaterial.created_at)
+        .all()
+    )
+    from app.material.service import material_to_dict
+    material_list = [material_to_dict(m) for m in materials]
+
+    # 今日日记
+    diary = (
+        db.query(Diary)
+        .filter(Diary.user_id == user_id, Diary.date == date)
+        .first()
+    )
+
+    return {
+        "date": date,
+        "material_count": len(materials),
+        "materials": material_list,
+        "has_diary": diary is not None,
+        "diary_id": diary.id if diary else None,
+        "diary_status": diary.status if diary else None,
+    }
