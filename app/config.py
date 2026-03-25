@@ -16,7 +16,8 @@ class Settings(BaseSettings):
     # MiniMax AI（TokenPlan Plus）
     MINIMAX_API_KEY: str = ""
     MINIMAX_API_BASE: str = "https://api.minimaxi.com"
-    MINIMAX_MODEL: str = "MiniMax-M2.7"
+    MINIMAX_MODEL: str = "MiniMax-M2.7-highspeed"
+    MINIMAX_MOCK: bool = True  # True=返回模拟数据不调真实API，False=调真实API
 
     # 文件上传
     UPLOAD_DIR: str = "./uploads"
