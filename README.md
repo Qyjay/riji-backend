@@ -123,28 +123,39 @@ def get_profile(
     return success(data={"name": current_user.name})
 ```
 
-### 调用 AI
+### 调用 AI（5 个模态，一个 Key）
 
 ```python
 from app.ai.minimax_client import get_minimax_client
 
 client = get_minimax_client()
 
-# 非流式对话
+# 1. 非流式对话（M2.7）
 text = await client.chat_completion(
     messages=[{"role": "user", "content": "你好"}],
     system_prompt="你是一个友好的 AI 助手"
 )
 
-# 流式对话（SSE）
+# 2. 流式对话 SSE（M2.7）
 async for chunk in client.stream_chat(messages, system_prompt):
     yield f"data: {chunk}\n\n"
 
-# 文生图
-url = await client.generate_image("一只可爱的猫咪")
+# 3. 文生图（image-01）
+url = await client.generate_image("一只可爱的猫咪", aspect_ratio="1:1")
 
-# TTS
-audio_bytes = await client.text_to_speech("你好世界")
+# 4. TTS（speech-2.8-hd）
+audio_bytes = await client.text_to_speech("你好世界", voice_id="male-qn-qingse")
+
+# 5. 音乐生成（music-2.5+）
+music_url = await client.generate_music(
+    prompt="流行音乐, 开心, 校园生活",
+    lyrics="[verse]\n阳光洒在操场上\n青春的风轻轻吹",
+)
+# 纯音乐（无人声）
+bgm_url = await client.generate_music(
+    prompt="轻柔钢琴曲, 温暖, 日记背景",
+    is_instrumental=True,
+)
 ```
 
 ## 运行测试

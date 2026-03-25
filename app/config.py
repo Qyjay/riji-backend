@@ -13,10 +13,10 @@ class Settings(BaseSettings):
     JWT_SECRET: str = "dev-secret-key-please-change-in-production"
     JWT_EXPIRE_DAYS: int = 7
 
-    # MiniMax AI
+    # MiniMax AI（TokenPlan Plus）
     MINIMAX_API_KEY: str = ""
-    MINIMAX_API_BASE: str = "https://api.minimax.chat/v1"
-    MINIMAX_MODEL: str = "MiniMax-M1"
+    MINIMAX_API_BASE: str = "https://api.minimaxi.com"
+    MINIMAX_MODEL: str = "MiniMax-M2.7"
 
     # 文件上传
     UPLOAD_DIR: str = "./uploads"
