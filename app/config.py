@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
 
+    # OpenClaw Gateway（AI 对话带记忆）
+    OPENCLAW_GATEWAY_URL: str = "http://127.0.0.1:18789"
+    OPENCLAW_GATEWAY_TOKEN: str = ""
+    OPENCLAW_AGENT_ID: str = "riji"
+    OPENCLAW_ENABLED: bool = False
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
