@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     MAX_FILE_SIZE: int = 10485760  # 10MB
 
     # 服务器
-    HOST: str = "0.0.0.0"
+    HOST: str = "127.0.0.1"
     PORT: int = 8000
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
