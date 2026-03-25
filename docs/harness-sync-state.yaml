@@ -1,0 +1,15 @@
+# Harness Sync State
+#
+# 记录 harness 文档上次同步到的 commit。
+# detect_drift.sh 用这个基线做增量漂移检测。
+# 每次 /hub 开发完成或 /hub-sync 后自动更新。
+#
+# 不要手动编辑此文件。
+
+last_sync_commit: 7be5b7f6258aaecec226bc1ab963c1141c8092d6
+last_sync_time: 2026-03-25T07:15:09Z
+synced_files:
+  - CLAUDE.md
+  - docs/architecture.md
+  - docs/golden-rules.md
+  - .claude/skills/
