@@ -29,7 +29,7 @@ app/
 ├── social/           # 社交匹配 + 搭子
 ├── chat/             # AI 对话（SSE 流式，三层降级）
 ├── study/            # 学习（番茄钟/Todo）
-├── ai/               # MiniMax AI 客户端（直连，不修改）
+├── ai/               # MiniMax AI 客户端 + AI 功能路由（fortune/comic/share-card/bgm/tts/novel-chapter）
 ├── openclaw/         # OpenClaw Gateway 客户端（带记忆对话）
 │   ├── client.py     # OpenClawClient + get_openclaw_client()
 │   └── prompt_builder.py  # build_chat_system_prompt()
@@ -54,6 +54,14 @@ app/
 - 统一响应：`{"code": 0, "data": {...}, "message": "ok"}`
 - 错误码：`ok/success()` 返回 code=0，`ApiException` 抛出业务错误
 - Mock 模式：`MINIMAX_MOCK=true` 时不消耗 API
+
+## AI 功能路由（app/ai/router.py）
+- `GET /ai/fortune`：根据最近 3 篇日记情绪趋势生成今日运势
+- `POST /ai/comic`：日记内容 → AI 场景提取 → 漫画图片生成（3:4）
+- `POST /ai/share-card`：查日记 → 并行生成金句 + 卡片背景图
+- `POST /ai/bgm`：情绪关键词 → 映射音乐风格 → generate_music()
+- `POST /ai/tts`：文字转语音 → 保存 uploads/tts/*.mp3 → 返回 URL
+- `POST /ai/novel-chapter`：日记改编为指定风格小说章节
 
 ## OpenClaw Gateway（带记忆 AI 对话）
 - 配置：`OPENCLAW_ENABLED=true` + `OPENCLAW_GATEWAY_TOKEN` + `OPENCLAW_GATEWAY_URL`（默认 http://127.0.0.1:18789）
