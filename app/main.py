@@ -65,6 +65,10 @@ from app.ai.router import router as ai_router
 from app.chat.router import router as chat_router
 from app.study.router import router as study_router
 from app.social.router import router as social_router
+# v2 新增路由
+from app.material.router import router as material_router
+from app.anniversary.router import router as anniversary_router
+from app.derivative.router import router as derivative_router
 
 app.include_router(auth_router, prefix="/api")
 app.include_router(upload_router, prefix="/api")
@@ -74,6 +78,10 @@ app.include_router(ai_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(study_router, prefix="/api")
 app.include_router(social_router, prefix="/api")
+# v2 新增路由注册
+app.include_router(material_router, prefix="/api")
+app.include_router(anniversary_router, prefix="/api")
+app.include_router(derivative_router, prefix="/api")
 
 
 @app.get("/")

@@ -15,6 +15,7 @@ AUTH_TOKEN_EXPIRED = 40004         # Token 过期
 
 # 参数相关 401xx
 PARAM_INVALID = 40101              # 参数无效
+PARAM_ERROR = 40102                # 参数错误（如超过限制）
 
 # 业务相关 402xx
 BUSINESS_ERROR = 40201             # 业务错误
@@ -42,6 +43,10 @@ class ApiException(Exception):
 def success(data: Any = None, message: str = "ok") -> dict:
     """构造成功响应"""
     return {"code": 0, "data": data, "message": message}
+
+
+# ok 是 success 的别名，供新模块使用
+ok = success
 
 
 def error(code: int, message: str) -> dict:

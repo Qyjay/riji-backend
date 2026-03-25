@@ -47,6 +47,7 @@ def setup_database():
     """每个测试前重建所有表，测试后删除（自动隔离）"""
     # 导入所有模型确保 Base 知道它们
     from app.models import user, diary, chat, study, social  # noqa
+    from app.models import material, anniversary, user_profile, derivative  # noqa
     Base.metadata.create_all(bind=test_engine)
     yield
     Base.metadata.drop_all(bind=test_engine)

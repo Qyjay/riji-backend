@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from sqlalchemy import (
     BigInteger, Boolean, Column, ForeignKey,
-    Integer, String, UniqueConstraint
+    Integer, String, Text, UniqueConstraint
 )
 
 from app.database import Base
@@ -39,6 +39,11 @@ class User(Base):
     pomodoro_count = Column(Integer, default=0)
     created_at = Column(BigInteger, nullable=False)  # 毫秒时间戳
     updated_at = Column(BigInteger, nullable=False)  # 毫秒时间戳
+
+    # v2 新增字段
+    openclaw_agent_id = Column(String, default="")      # OpenClaw AI 代理 ID
+    style_tags = Column(Text, default="[]")             # JSON: 用户写作风格标签
+    custom_style_prompt = Column(Text, default="")      # 自定义写作风格 Prompt
 
 
 class UserSettings(Base):

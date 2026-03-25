@@ -56,3 +56,23 @@ async def upload_diary_image(
     """
     url = await save_file(file, current_user.id, "diary-image", max_size=DIARY_IMAGE_MAX_SIZE)
     return success(data={"url": url}, message="图片上传成功")
+
+
+# v2 新增：语音上传
+VOICE_MAX_SIZE = 20 * 1024 * 1024  # 20MB
+
+
+@router.post("/voice", summary="上传语音素材")
+async def upload_voice(
+    file: UploadFile = File(..., description="语音文件（mp3/wav/m4a，最大 20MB）"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    上传语音素材文件
+    - 支持格式：mp3/wav/m4a/ogg
+    - 最大大小：20MB
+    """
+    url = await save_file(file, current_user.id, "voice", max_size=VOICE_MAX_SIZE)
+    return success(data={"url": url}, message="语音上传成功")
+

@@ -19,6 +19,11 @@ class Match(Base):
     status = Column(String, default="pending")  # pending / accepted / rejected
     created_at = Column(BigInteger, nullable=False)
 
+    # v2 新增字段
+    match_type = Column(String, default="long_term")        # "long_term" | "buddy"
+    match_report = Column(Text, default="")                 # AI 匹配报告文本
+    user_portrait_snapshot = Column(Text, default="{}")     # JSON: 匹配时的用户画像快照
+
 
 class SocialMessage(Base):
     """搭子聊天消息表"""

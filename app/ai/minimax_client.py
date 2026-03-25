@@ -448,6 +448,209 @@ class MiniMaxClient:
                 status_code=502,
             )
 
+    # ==================== v2 新增方法 ====================
+
+    async def extract_emotion(self, text: str) -> dict:
+        """
+        AI 情绪提取，输出 JSON {label, score, emoji}
+
+        Mock 模式：返回固定情绪数据
+        真实模式：调用 chat_completion，要求输出 JSON
+        """
+        if self.mock:
+            await asyncio.sleep(0.2)
+            import random
+            emotions = [
+                {"label": "开心", "score": 0.88, "emoji": "😊"},
+                {"label": "平静", "score": 0.75, "emoji": "😌"},
+                {"label": "感动", "score": 0.82, "emoji": "🥹"},
+                {"label": "期待", "score": 0.70, "emoji": "🤩"},
+            ]
+            return random.choice(emotions)
+
+        system = (
+            "你是情绪分析助手。分析用户文本的主要情绪，"
+            "严格返回如下 JSON 格式（无其他文字）：\n"
+            '{"label": "情绪名称", "score": 0.85, "emoji": "😊"}\n'
+            "情绪类型：开心、悲伤、愤怒、平静、感动、焦虑、期待、无聊。"
+        )
+        messages = [{"role": "user", "content": f"分析这段文字的情绪：{text}"}]
+        try:
+            resp = await self.chat_completion(messages, system_prompt=system, temperature=0.3)
+            return json.loads(resp.strip())
+        except Exception:
+            return {"label": "平静", "score": 0.5, "emoji": "😌"}
+
+    async def polish_text(self, text: str, style: str) -> str:
+        """
+        按风格润色文字
+
+        Mock 模式：返回固定润色文本
+        真实模式：调用 chat_completion
+        """
+        if self.mock:
+            await asyncio.sleep(0.3)
+            style_prefix = {
+                "文艺": "在某个平凡而特别的午后，",
+                "幽默": "好嘛，",
+                "简洁": "",
+                "温暖": "轻轻地，",
+            }
+            prefix = style_prefix.get(style, "")
+            return f"{prefix}{text}（{style}风格·Mock）"
+
+        system = (
+            f"你是专业的文字润色师，擅长将普通文字改写成{style}风格。"
+            "直接输出润色后的文字，不要解释，不要前缀。"
+        )
+        messages = [{"role": "user", "content": f"请将以下文字润色为{style}风格：\n\n{text}"}]
+        return await self.chat_completion(messages, system_prompt=system, temperature=0.9)
+
+    async def generate_diary(
+        self,
+        materials_text: str,
+        weather: str = "",
+        special_date: str = "",
+        user_style: str = "",
+    ) -> dict:
+        """
+        根据素材生成日记，返回 {title, content, emotion_summary}
+
+        Mock 模式：返回固定日记数据
+        """
+        if self.mock:
+            await asyncio.sleep(0.5)
+            return {
+                "title": "平凡日子里的小确幸",
+                "content": MOCK_DIARY_EXPANSION,
+                "emotion_summary": {
+                    "dominant": "平静",
+                    "distribution": {"开心": 0.4, "平静": 0.4, "感动": 0.2},
+                },
+            }
+
+        style_hint = f"用户偏好{user_style}风格。" if user_style else ""
+        weather_hint = f"今天天气：{weather}。" if weather else ""
+        special_hint = f"今天是特殊的日子：{special_date}。" if special_date else ""
+
+        system = (
+            "你是日记写作助手，帮助用户将零散的生活素材整理成有温度的日记。\n"
+            f"{style_hint}{weather_hint}{special_hint}\n"
+            "请返回如下 JSON（无其他文字）：\n"
+            '{"title": "日记标题", "content": "正文（300字以上）", '
+            '"emotion_summary": {"dominant": "主要情绪", "distribution": {"情绪": 0.5}}}'
+        )
+        messages = [{"role": "user", "content": f"请根据以下素材生成今天的日记：\n\n{materials_text}"}]
+        try:
+            resp = await self.chat_completion(messages, system_prompt=system, temperature=0.85)
+            return json.loads(resp.strip())
+        except Exception:
+            return {
+                "title": "今日记录",
+                "content": materials_text,
+                "emotion_summary": {"dominant": "平静", "distribution": {}},
+            }
+
+    async def extract_info(self, diary_content: str) -> dict:
+        """
+        从日记提取纪念日/人物/偏好，返回 {anniversaries, persons, preferences}
+
+        Mock 模式：返回固定提取结果
+        """
+        if self.mock:
+            await asyncio.sleep(0.3)
+            return {
+                "anniversaries": [
+                    {"title": "和朋友聚餐", "date": "03-25", "related_person": "室友"}
+                ],
+                "persons": [
+                    {"name": "小明", "relation": "室友"}
+                ],
+                "preferences": ["美食", "散步", "图书馆"],
+            }
+
+        system = (
+            "你是信息提取助手。从日记中提取关键信息，"
+            "严格返回如下 JSON（无其他文字）：\n"
+            '{"anniversaries": [{"title": "事件名", "date": "MM-DD", "related_person": ""}], '
+            '"persons": [{"name": "姓名", "relation": "关系"}], '
+            '"preferences": ["偏好1", "偏好2"]}'
+        )
+        messages = [{"role": "user", "content": f"从以下日记中提取信息：\n\n{diary_content}"}]
+        try:
+            resp = await self.chat_completion(messages, system_prompt=system, temperature=0.3)
+            return json.loads(resp.strip())
+        except Exception:
+            return {"anniversaries": [], "persons": [], "preferences": []}
+
+    async def generate_portrait(
+        self, diary_summaries: str, chat_summaries: str = ""
+    ) -> dict:
+        """
+        根据日记+聊天记录生成用户画像
+
+        Mock 模式：返回固定画像
+        """
+        if self.mock:
+            await asyncio.sleep(0.5)
+            return {
+                "personality": "开朗、细腻、对生活充满热情的理想主义者",
+                "writing_style": "喜欢用细节描写日常，语言温暖而富有诗意",
+                "interests": ["读书", "散步", "美食", "音乐"],
+                "preferences": {"food": "日料", "activity": "图书馆", "music": "轻音乐"},
+                "relations": {"室友小明": "好友", "导师": "亦师亦友"},
+            }
+
+        system = (
+            "你是用户画像分析师。根据用户的日记和聊天记录，"
+            "生成用户画像，严格返回如下 JSON：\n"
+            '{"personality": "性格描述", "writing_style": "写作风格", '
+            '"interests": ["兴趣1"], "preferences": {}, "relations": {}}'
+        )
+        content = f"日记摘要：\n{diary_summaries}"
+        if chat_summaries:
+            content += f"\n\n聊天摘要：\n{chat_summaries}"
+        messages = [{"role": "user", "content": content}]
+        try:
+            resp = await self.chat_completion(messages, system_prompt=system, temperature=0.7)
+            return json.loads(resp.strip())
+        except Exception:
+            return {
+                "personality": "", "writing_style": "",
+                "interests": [], "preferences": {}, "relations": {},
+            }
+
+    async def generate_match_report(self, portrait_a: dict, portrait_b: dict) -> str:
+        """
+        生成两个用户的 AI 匹配报告
+
+        Mock 模式：返回固定报告
+        """
+        if self.mock:
+            await asyncio.sleep(0.3)
+            return (
+                "🌟 你们的匹配度非常高！\n\n"
+                "**共同兴趣：** 都喜欢读书和美食探店，很容易找到共同话题。\n"
+                "**性格互补：** 一个沉稳细腻，一个活泼开朗，相处起来会很有趣。\n"
+                "**建议：** 可以一起去试试新开的那家日料店，或者在图书馆相约自习。"
+            )
+
+        system = (
+            "你是社交匹配分析师，根据两个用户的画像分析匹配度，"
+            "给出友好、有温度的匹配报告（200字以内）。"
+        )
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    f"用户A画像：{json.dumps(portrait_a, ensure_ascii=False)}\n"
+                    f"用户B画像：{json.dumps(portrait_b, ensure_ascii=False)}\n"
+                    "请分析两人的匹配度并给出建议。"
+                ),
+            }
+        ]
+        return await self.chat_completion(messages, system_prompt=system, temperature=0.8)
+
 
 # ==================== 全局单例 ====================
 
