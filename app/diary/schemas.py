@@ -4,33 +4,17 @@
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
-
-
-class CreateDiaryRequest(BaseModel):
-    """创建日记请求（手动创建，保留向后兼容）"""
-    content: str
-    images: Optional[List[str]] = []
-    emotion: Optional[dict] = {}
-    tags: Optional[List[str]] = []
-    location: Optional[str] = ""
-    weather: Optional[str] = ""
-    style: Optional[str] = "日记式"
+from app.serializers import CamelModel
 
 
 class UpdateDiaryRequest(BaseModel):
-    """更新日记请求"""
-    content: Optional[str] = None
-    images: Optional[List[str]] = None
-    emotion: Optional[dict] = None
-    tags: Optional[List[str]] = None
-    location: Optional[str] = None
-    weather: Optional[str] = None
-    title: Optional[str] = None
+    """更新日记请求（只允许更新 content）"""
+    content: str
 
 
 class GenerateDiaryRequest(BaseModel):
     """AI 生成日记请求"""
-    date: str                   # "2026-03-25"
+    date: str
     weather: Optional[str] = ""
 
 
@@ -39,28 +23,53 @@ class DerivativeRequest(BaseModel):
     type: str = "share_card"    # "comic" | "novel" | "share_card"
 
 
-class DiaryOut(BaseModel):
-    """日记响应"""
+class ShareRequest(BaseModel):
+    """设置分享范围"""
+    scope: str = "private"      # "private" | "friends" | "public"
+
+
+class DiaryOut(CamelModel):
+    """日记响应（camelCase 输出）"""
     id: str
     user_id: str
-    content: str
     title: str
-    images: List[str]
-    emotion: Dict[str, Any]
-    tags: List[str]
-    location: str
+    content: str
+    date: str
     weather: str
-    style: str
-    has_comic: bool
-    has_bgm: bool
-    comic_url: str
-    bgm_url: str
-    created_at: int
-    updated_at: int
     special_date: str
     emotion_summary: Dict[str, Any]
     material_ids: List[str]
+    style: str
     edit_count: int
     max_edits: int
     status: str
+    created_at: int
+    updated_at: int
+    # legacy 兼容字段
+    emotion: Dict[str, Any]
+    images: List[str]
+    tags: List[str]
+    location: str
+    has_comic: bool
+    has_bgm: bool
+
+
+class DerivativeOut(CamelModel):
+    """衍生内容响应（camelCase 输出）"""
+    id: str
+    diary_id: str
+    type: str
+    content: str
+    media_url: str
+    share_scope: str
+    created_at: int
+
+
+class TodaySummaryOut(CamelModel):
+    """今日概览响应"""
     date: str
+    material_count: int
+    materials: List[Dict[str, Any]]
+    has_diary: bool
+    diary_id: Optional[str] = None
+    diary_status: Optional[str] = None

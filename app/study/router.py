@@ -1,30 +1,64 @@
 """
-学习模块路由骨架（番茄钟 + 待办）
-组员 A 负责实现
+学习模块路由（番茄钟 + 待办）
 """
+import time
+from uuid import uuid4
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.dependencies import get_current_user, get_db
 from app.models.user import User
-from app.study.schemas import CreatePomodoroRequest, CreateTodoRequest
+from app.models.study import Pomodoro, Todo
+from app.response import success, ApiException, NOT_FOUND
+from app.study.schemas import CreatePomodoroRequest, CreateTodoRequest, PomodoroOut, TodoOut
 
 router = APIRouter(prefix="/study", tags=["学习"])
 
 
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _uuid() -> str:
+    return str(uuid4())
+
+
+def _pomo_to_out(p: Pomodoro) -> dict:
+    return PomodoroOut(
+        id=p.id,
+        task=p.task or "新任务",
+        subject=p.subject or "其他",
+        duration=p.duration or 25,
+        completed_at=p.completed_at,
+        created_at=p.created_at,
+    ).model_dump(by_alias=True)
+
+
+def _todo_to_out(t: Todo) -> dict:
+    return TodoOut(
+        id=t.id,
+        content=t.content or "",
+        completed=t.completed or False,
+        priority=t.priority or "medium",
+        created_at=t.created_at,
+    ).model_dump(by_alias=True)
+
+
 # ==================== 番茄钟 ====================
 
-@router.get("/pomodoros", summary="获取番茄钟列表")
+@router.get("/pomodoros", summary="获取番茄钟列表（裸数组）")
 def list_pomodoros(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    TODO: 组员 A 实现 - 接口 E1（GET）
-    获取当前用户的番茄钟历史记录
-    按 created_at DESC 排序
-    """
-    pass
+    items = (
+        db.query(Pomodoro)
+        .filter(Pomodoro.user_id == current_user.id)
+        .order_by(Pomodoro.created_at.desc())
+        .all()
+    )
+    return success([_pomo_to_out(p) for p in items])
 
 
 @router.post("/pomodoros", summary="创建番茄钟")
@@ -33,12 +67,19 @@ def create_pomodoro(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    TODO: 组员 A 实现 - 接口 E1（POST）
-    创建新的番茄钟记录
-    completed_at 初始为 None（表示进行中）
-    """
-    pass
+    p = Pomodoro(
+        id=_uuid(),
+        user_id=current_user.id,
+        task=req.task,
+        subject=req.subject or "其他",
+        duration=req.duration or 25,
+        completed_at=None,
+        created_at=_now_ms(),
+    )
+    db.add(p)
+    db.commit()
+    db.refresh(p)
+    return success(_pomo_to_out(p))
 
 
 @router.post("/pomodoros/{pomodoro_id}/complete", summary="完成番茄钟")
@@ -47,30 +88,35 @@ def complete_pomodoro(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    TODO: 组员 A 实现 - 接口 E1（完成）
-    标记番茄钟为已完成
-    1. 查询并验证归属
-    2. 设置 completed_at 为当前时间戳
-    3. 更新 User.pomodoro_count += 1
-    4. 可触发成就检查（如完成第 10 个番茄）
-    """
-    pass
+    p = db.query(Pomodoro).filter(
+        Pomodoro.id == pomodoro_id, Pomodoro.user_id == current_user.id
+    ).first()
+    if not p:
+        raise ApiException(code=NOT_FOUND, message="番茄钟不存在", status_code=404)
+
+    p.completed_at = _now_ms()
+    # 更新用户番茄钟数量
+    user = db.query(User).filter(User.id == current_user.id).first()
+    if user:
+        user.pomodoro_count = (user.pomodoro_count or 0) + 1
+    db.commit()
+    return success(None)
 
 
 # ==================== 待办 ====================
 
-@router.get("/todos", summary="获取待办列表")
+@router.get("/todos", summary="获取待办列表（裸数组）")
 def list_todos(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    TODO: 组员 A 实现 - 接口 E2（GET）
-    获取当前用户的待办列表
-    按 priority（high > medium > low）和 created_at 排序
-    """
-    pass
+    items = (
+        db.query(Todo)
+        .filter(Todo.user_id == current_user.id)
+        .order_by(Todo.created_at.desc())
+        .all()
+    )
+    return success([_todo_to_out(t) for t in items])
 
 
 @router.post("/todos", summary="创建待办")
@@ -79,11 +125,18 @@ def create_todo(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    TODO: 组员 A 实现 - 接口 E2（POST）
-    创建新待办事项
-    """
-    pass
+    t = Todo(
+        id=_uuid(),
+        user_id=current_user.id,
+        content=req.content,
+        completed=False,
+        priority=req.priority or "medium",
+        created_at=_now_ms(),
+    )
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+    return success(_todo_to_out(t))
 
 
 @router.post("/todos/{todo_id}/toggle", summary="切换待办完成状态")
@@ -92,8 +145,13 @@ def toggle_todo(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    TODO: 组员 A 实现 - 接口 E2（切换）
-    切换待办的完成状态（completed: False → True 或 True → False）
-    """
-    pass
+    t = db.query(Todo).filter(
+        Todo.id == todo_id, Todo.user_id == current_user.id
+    ).first()
+    if not t:
+        raise ApiException(code=NOT_FOUND, message="待办不存在", status_code=404)
+
+    t.completed = not (t.completed or False)
+    db.commit()
+    db.refresh(t)
+    return success(_todo_to_out(t))

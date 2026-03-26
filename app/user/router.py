@@ -1,5 +1,5 @@
 """
-用户模块路由（含 v2 画像接口）
+用户模块路由
 """
 import json
 import time
@@ -9,24 +9,129 @@ from sqlalchemy.orm import Session
 
 from app.dependencies import get_current_user, get_db
 from app.models.user import User
-from app.response import ok
-from app.user.schemas import UpdateProfileRequest, UpdateSettingsRequest
+from app.response import success
+from app.user.schemas import (
+    UpdateProfileRequest, UpdateSettingsRequest,
+    UserProfileOut, AchievementOut, GrowthDataOut, SettingsOut, SemesterReportOut,
+)
+from app.user import service
 
 router = APIRouter(prefix="/user", tags=["用户"])
 
 
-# ==================== v2 新增：用户画像 ====================
+@router.get("/profile", summary="获取用户资料")
+def get_profile(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    data = service.get_user_profile(db, current_user.id)
+    out = UserProfileOut(**data)
+    return success(out.model_dump(by_alias=True))
 
-@router.get("/portrait", summary="获取 AI 画像（v2）")
+
+@router.post("/profile", summary="更新用户资料")
+def update_profile(
+    req: UpdateProfileRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    data = req.model_dump(exclude_unset=True)
+    result = service.update_user_profile(db, current_user.id, data)
+    out = UserProfileOut(**result)
+    return success(out.model_dump(by_alias=True))
+
+
+@router.get("/agent-portrait", summary="获取 AI 画像图")
+async def get_agent_portrait(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """生成/获取 AI 用户画像图片 URL"""
+    from app.models.user_profile import UserProfile
+    from app.ai.minimax_client import get_minimax_client
+
+    profile = db.query(UserProfile).filter(UserProfile.user_id == current_user.id).first()
+    if profile and profile.personality:
+        prompt = f"为一个性格{profile.personality}的大学生绘制一幅温暖的 AI 肖像画，风格：水彩插画"
+    else:
+        prompt = "为一个阳光开朗的大学生绘制一幅温暖的 AI 肖像画，风格：水彩插画"
+
+    client = get_minimax_client()
+    url = await client.generate_image(prompt, aspect_ratio="1:1")
+    return success(url)
+
+
+@router.get("/growth", summary="获取成长数据")
+def get_growth(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    data = service.get_growth_data(db, current_user.id)
+    out = GrowthDataOut(**data)
+    return success(out.model_dump(by_alias=True))
+
+
+@router.get("/achievements", summary="获取成就列表（裸数组）")
+def get_achievements(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    items = service.get_achievements(db, current_user.id)
+    return success([AchievementOut(**item).model_dump(by_alias=True) for item in items])
+
+
+@router.get("/settings", summary="获取用户设置")
+def get_settings(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    data = service.get_settings(db, current_user.id)
+    # SettingsOut 的 auto_bgm 有 alias="autoBGM"
+    out = SettingsOut(
+        theme=data["theme"],
+        notifications=data["notifications"],
+        auto_bgm=data["auto_bgm"],
+        diary_privacy=data["diary_privacy"],
+        language=data["language"],
+    )
+    return success(out.model_dump(by_alias=True))
+
+
+@router.post("/settings", summary="更新用户设置")
+def update_settings(
+    req: UpdateSettingsRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    data = req.model_dump(exclude_unset=True)
+    result = service.update_settings(db, current_user.id, data)
+    out = SettingsOut(
+        theme=result["theme"],
+        notifications=result["notifications"],
+        auto_bgm=result["auto_bgm"],
+        diary_privacy=result["diary_privacy"],
+        language=result["language"],
+    )
+    return success(out.model_dump(by_alias=True))
+
+
+@router.get("/semester-report", summary="获取学期报告")
+def get_semester_report(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    data = service.get_semester_report(db, current_user.id)
+    out = SemesterReportOut(**data)
+    return success(out.model_dump(by_alias=True))
+
+
+@router.get("/portrait", summary="获取用户画像")
 def get_portrait(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """获取用户 AI 画像（从 user_profiles 取）"""
     from app.models.user_profile import UserProfile
-    profile = db.query(UserProfile).filter(UserProfile.user_id == current_user.id).first()
-    if not profile:
-        return ok(None)
 
     def _decode(s, default):
         try:
@@ -34,17 +139,53 @@ def get_portrait(
         except Exception:
             return default
 
-    return ok({
-        "personality": profile.personality or "",
-        "writing_style": profile.writing_style or "",
-        "interests": _decode(profile.interests, []),
-        "preferences": _decode(profile.preferences, {}),
-        "relations": _decode(profile.relations, {}),
-        "updated_at": profile.updated_at,
+    profile = db.query(UserProfile).filter(UserProfile.user_id == current_user.id).first()
+    if not profile:
+        return success({
+            "preferences": [],
+            "personality": [],
+            "relations": [],
+            "interests": [],
+        })
+
+    # 转换 preferences: dict -> list of {category, items}
+    raw_prefs = _decode(profile.preferences, {})
+    if isinstance(raw_prefs, dict):
+        prefs_list = [{"category": k, "items": v if isinstance(v, list) else [v]} for k, v in raw_prefs.items()]
+    elif isinstance(raw_prefs, list):
+        prefs_list = raw_prefs
+    else:
+        prefs_list = []
+
+    # 转换 personality: str -> list
+    personality = profile.personality or ""
+    if isinstance(personality, str):
+        personality_list = [p.strip() for p in personality.split("、") if p.strip()] if personality else []
+    else:
+        personality_list = personality
+
+    # 转换 relations: dict -> list of {name, relation}
+    raw_relations = _decode(profile.relations, {})
+    if isinstance(raw_relations, dict):
+        relations_list = [{"name": k, "relation": v} for k, v in raw_relations.items()]
+    elif isinstance(raw_relations, list):
+        relations_list = raw_relations
+    else:
+        relations_list = []
+
+    interests = _decode(profile.interests, [])
+    if not isinstance(interests, list):
+        interests = []
+
+    return success({
+        "preferences": prefs_list,
+        "personality": personality_list,
+        "relations": relations_list,
+        "interests": interests,
     })
 
 
-@router.post("/portrait/refresh", summary="刷新 AI 画像")
+@router.post("/portrait/refresh", summary="刷新用户画像")
 async def refresh_portrait(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -54,8 +195,14 @@ async def refresh_portrait(
     from app.models.chat import ChatMessage
     from app.models.user_profile import UserProfile
     from app.ai.minimax_client import get_minimax_client
+    from uuid import uuid4
 
-    # 获取最近 10 篇日记摘要
+    def _decode(s, default):
+        try:
+            return json.loads(s) if s else default
+        except Exception:
+            return default
+
     diaries = (
         db.query(Diary)
         .filter(Diary.user_id == current_user.id)
@@ -68,7 +215,6 @@ async def refresh_portrait(
         for d in diaries
     ])
 
-    # 获取最近 20 条聊天摘要
     chats = (
         db.query(ChatMessage)
         .filter(ChatMessage.user_id == current_user.id, ChatMessage.role == "user")
@@ -84,7 +230,7 @@ async def refresh_portrait(
     now = int(time.time() * 1000)
     profile = db.query(UserProfile).filter(UserProfile.user_id == current_user.id).first()
     if not profile:
-        profile = UserProfile(user_id=current_user.id, updated_at=now)
+        profile = UserProfile(id=str(uuid4()), user_id=current_user.id, updated_at=now)
         db.add(profile)
 
     profile.personality = result.get("personality", "")
@@ -97,115 +243,27 @@ async def refresh_portrait(
     db.commit()
     db.refresh(profile)
 
-    return ok(result)
+    # 转换响应格式与 get_portrait 一致
+    personality = profile.personality or ""
+    personality_list = [p.strip() for p in personality.split("、") if p.strip()] if personality else []
 
+    raw_prefs = _decode(profile.preferences, {})
+    if isinstance(raw_prefs, dict):
+        prefs_list = [{"category": k, "items": v if isinstance(v, list) else [v]} for k, v in raw_prefs.items()]
+    else:
+        prefs_list = raw_prefs if isinstance(raw_prefs, list) else []
 
+    raw_relations = _decode(profile.relations, {})
+    if isinstance(raw_relations, dict):
+        relations_list = [{"name": k, "relation": v} for k, v in raw_relations.items()]
+    else:
+        relations_list = raw_relations if isinstance(raw_relations, list) else []
 
-@router.get("/profile", summary="获取用户资料")
-def get_profile(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """
-    TODO: 组员 A 实现 - 接口 B1
-    获取当前用户的完整资料
-    返回：id, username, name, school, major, grade, avatar, signature,
-          level, xp, diary_count, streak_days, pomodoro_count
-    """
-    pass
+    interests = _decode(profile.interests, [])
 
-
-@router.post("/profile", summary="更新用户资料")
-def update_profile(
-    req: UpdateProfileRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """
-    TODO: 组员 A 实现 - 接口 B2
-    更新用户资料（name/school/major/grade/signature）
-    只更新请求中非 None 的字段
-    更新 updated_at 时间戳
-    """
-    pass
-
-
-@router.get("/growth", summary="获取成长数据")
-def get_growth(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """
-    TODO: 组员 A 实现 - 接口 B4
-    获取用户成长数据
-    返回：level, xp, streak_days, diary_count, pomodoro_count
-    可加入升级所需 xp 等计算逻辑
-    """
-    pass
-
-
-@router.get("/achievements", summary="获取成就列表")
-def get_achievements(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """
-    TODO: 组员 A 实现 - 接口 B5
-    获取用户已解锁的成就列表
-    查询 user_achievements 表，关联成就定义（可以硬编码或从配置读）
-    """
-    pass
-
-
-@router.get("/settings", summary="获取用户设置")
-def get_settings(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """
-    TODO: 组员 A 实现 - 接口 B6（GET）
-    获取当前用户的设置
-    查询 user_settings 表
-    """
-    pass
-
-
-@router.post("/settings", summary="更新用户设置")
-def update_settings(
-    req: UpdateSettingsRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """
-    TODO: 组员 A 实现 - 接口 B6（POST）
-    更新用户设置（theme/notifications/auto_bgm/diary_privacy/language）
-    查询 user_settings，更新非 None 的字段
-    """
-    pass
-
-
-@router.get("/semester-report", summary="获取学期报告")
-def get_semester_report(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """
-    TODO: 组员 A 实现 - 接口 B7
-    生成学期总结报告
-    统计：本学期日记数量、情绪分布、番茄钟完成数、最常用标签等
-    可结合 AI 生成文字总结
-    """
-    pass
-
-
-@router.get("/agent-portrait", summary="获取 AI 画像")
-def get_agent_portrait(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """
-    TODO: 组员 A 实现 - 接口 B8
-    基于用户数据生成 AI 性格画像
-    分析日记情绪、标签、写作风格等，调用 AI 生成个性化描述
-    """
-    pass
+    return success({
+        "preferences": prefs_list,
+        "personality": personality_list,
+        "relations": relations_list,
+        "interests": interests if isinstance(interests, list) else [],
+    })

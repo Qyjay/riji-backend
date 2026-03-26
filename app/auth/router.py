@@ -21,16 +21,22 @@ from app.auth.service import hash_password, verify_password, create_token
 router = APIRouter(prefix="/auth", tags=["认证"])
 
 
-@router.post("/register", response_model=dict, summary="用户注册")
+def _build_auth_response(user: User, token: str) -> dict:
+    user_info = UserInfo(
+        id=user.id,
+        username=user.username,
+        name=user.name or "",
+        school=user.school or "",
+        major=user.major or "",
+        avatar=user.avatar or "",
+        level=user.level or 1,
+    )
+    resp = AuthResponse(token=token, user=user_info)
+    return resp.model_dump(by_alias=True)
+
+
+@router.post("/register", summary="用户注册")
 def register(req: RegisterRequest, db: Session = Depends(get_db)):
-    """
-    注册新用户
-    1. 校验用户名格式（已在 Schema 中完成）
-    2. 检查用户名是否重复
-    3. 创建用户 + 默认设置
-    4. 签发 JWT
-    5. 返回 AuthResponse
-    """
     # 检查用户名是否已存在
     existing = db.query(User).filter(User.username == req.username).first()
     if existing:
@@ -40,52 +46,45 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
             status_code=400,
         )
 
-    now = int(time.time() * 1000)  # 毫秒时间戳
+    now = int(time.time() * 1000)
 
-    # 创建用户
     user = User(
         id=str(uuid4()),
         username=req.username,
         password=hash_password(req.password),
-        name=req.name or "",
+        name=req.name or req.username,
         school=req.school or "",
         major=req.major or "",
+        avatar="",
+        level=1,
+        xp=0,
+        diary_count=0,
+        streak_days=0,
+        pomodoro_count=0,
         created_at=now,
         updated_at=now,
     )
     db.add(user)
 
-    # 创建默认用户设置
     user_settings = UserSettings(
         id=str(uuid4()),
         user_id=user.id,
+        theme="light",
+        notifications=True,
+        auto_bgm=False,
+        diary_privacy="private",
+        language="zh-CN",
     )
     db.add(user_settings)
     db.commit()
     db.refresh(user)
 
-    # 签发 JWT
     token = create_token(user.id)
-
-    return success(
-        data=AuthResponse(
-            token=token,
-            user=UserInfo.model_validate(user),
-        ).model_dump(),
-        message="注册成功",
-    )
+    return success(data=_build_auth_response(user, token), message="注册成功")
 
 
-@router.post("/login", response_model=dict, summary="用户登录")
+@router.post("/login", summary="用户登录")
 def login(req: LoginRequest, db: Session = Depends(get_db)):
-    """
-    用户登录
-    1. 查询用户
-    2. 验证密码
-    3. 签发 JWT
-    4. 返回 AuthResponse
-    """
-    # 查询用户
     user = db.query(User).filter(User.username == req.username).first()
     if not user:
         raise ApiException(
@@ -94,7 +93,6 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
             status_code=400,
         )
 
-    # 验证密码
     if not verify_password(req.password, user.password):
         raise ApiException(
             code=AUTH_INVALID_CREDENTIALS,
@@ -102,13 +100,5 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
             status_code=400,
         )
 
-    # 签发 JWT
     token = create_token(user.id)
-
-    return success(
-        data=AuthResponse(
-            token=token,
-            user=UserInfo.model_validate(user),
-        ).model_dump(),
-        message="登录成功",
-    )
+    return success(data=_build_auth_response(user, token), message="登录成功")

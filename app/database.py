@@ -36,6 +36,7 @@ def init_db():
     """初始化数据库：创建所有表 + uploads 目录"""
     # 导入所有模型（确保 Base 知道它们）
     from app.models import user, diary, chat, study, social  # noqa: F401
+    from app.models import material, anniversary, derivative, user_profile  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
 

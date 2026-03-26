@@ -5,6 +5,7 @@
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
+from app.serializers import CamelModel
 
 
 # ==================== 请求 Schema ====================
@@ -12,13 +13,13 @@ from pydantic import BaseModel
 class MaterialCreate(BaseModel):
     """创建素材请求"""
     type: str                           # "image" | "voice" | "text"
-    content: str = ""                  # 文字内容 / 语音转文字
-    media_url: str = ""                # 图片/语音文件 URL
-    thumbnail_url: str = ""            # 缩略图 URL
-    location: Dict[str, Any] = {}      # {lat, lng, address}
-    emotion: Dict[str, Any] = {}       # {label, score, emoji}
-    tags: List[str] = []               # 标签列表
-    date: str = ""                     # "2026-03-25"
+    content: str = ""
+    media_url: str = ""
+    thumbnail_url: str = ""
+    location: Dict[str, Any] = {}
+    emotion: Dict[str, Any] = {}
+    tags: List[str] = []
+    date: str = ""
 
 
 class MaterialUpdate(BaseModel):
@@ -38,8 +39,8 @@ class PolishRequest(BaseModel):
 
 # ==================== 响应 Schema ====================
 
-class MaterialOut(BaseModel):
-    """素材响应"""
+class MaterialOut(CamelModel):
+    """素材响应（camelCase 输出）"""
     id: str
     user_id: str
     type: str
@@ -51,17 +52,3 @@ class MaterialOut(BaseModel):
     tags: List[str]
     date: str
     created_at: int
-
-
-class EmotionResult(BaseModel):
-    """情绪提取结果"""
-    label: str     # "开心" / "悲伤" / "平静" 等
-    score: float   # 0.0 ~ 1.0 置信度
-    emoji: str     # 对应 emoji
-
-
-class PolishResult(BaseModel):
-    """润色结果"""
-    original: str   # 原始文字
-    polished: str   # 润色后文字
-    style: str      # 使用的风格

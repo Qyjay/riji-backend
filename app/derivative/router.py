@@ -2,69 +2,57 @@
 衍生内容路由
 prefix="/api/derivatives", tags=["衍生内容"]
 """
-from fastapi import APIRouter, Depends
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.dependencies import get_current_user, get_db
 from app.models.user import User
 from app.models.derivative import DiaryDerivative
-from app.response import ok, ApiException, NOT_FOUND
+from app.response import success, ApiException, NOT_FOUND
+from app.diary.schemas import DerivativeOut
 
 router = APIRouter(prefix="/derivatives", tags=["衍生内容"])
 
 
 class ShareRequest(BaseModel):
-    """分享范围设置请求"""
     scope: str = "private"   # "private" | "friends" | "public"
 
 
-def _deriv_to_dict(d: DiaryDerivative) -> dict:
-    return {
-        "id": d.id,
-        "diary_id": d.diary_id,
-        "type": d.type,
-        "content": d.content or "",
-        "media_url": d.media_url or "",
-        "share_scope": d.share_scope or "private",
-        "created_at": d.created_at,
-    }
+def _deriv_to_out(d: DiaryDerivative) -> dict:
+    return DerivativeOut(
+        id=d.id,
+        diary_id=d.diary_id,
+        type=d.type,
+        content=d.content or "",
+        media_url=d.media_url or "",
+        share_scope=d.share_scope or "private",
+        created_at=d.created_at,
+    ).model_dump(by_alias=True)
 
 
-@router.get("", summary="衍生内容列表")
+@router.get("", summary="衍生内容列表（裸数组）")
 def list_derivatives(
+    diary_id: Optional[str] = Query(None, description="按日记 ID 筛选"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """获取用户所有衍生内容"""
-    # 通过 diary 关联查找属于当前用户的衍生内容
+    """获取用户所有衍生内容，支持 diary_id 筛选，返回裸数组"""
     from app.models.diary import Diary
-    diary_ids = [d.id for d in db.query(Diary.id).filter(Diary.user_id == current_user.id)]
+    diary_ids_q = db.query(Diary.id).filter(Diary.user_id == current_user.id)
+    if diary_id:
+        diary_ids_q = diary_ids_q.filter(Diary.id == diary_id)
+    diary_ids = [d.id for d in diary_ids_q]
+
     items = (
         db.query(DiaryDerivative)
         .filter(DiaryDerivative.diary_id.in_(diary_ids))
         .order_by(DiaryDerivative.created_at.desc())
         .all()
     )
-    return ok({"items": [_deriv_to_dict(d) for d in items], "total": len(items)})
-
-
-@router.get("/{deriv_id}", summary="衍生内容详情")
-def get_derivative(
-    deriv_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """获取单条衍生内容"""
-    from app.models.diary import Diary
-    d = db.query(DiaryDerivative).filter(DiaryDerivative.id == deriv_id).first()
-    if not d:
-        raise ApiException(code=NOT_FOUND, message="衍生内容不存在", status_code=404)
-    # 验证归属
-    diary = db.query(Diary).filter(Diary.id == d.diary_id, Diary.user_id == current_user.id).first()
-    if not diary:
-        raise ApiException(code=NOT_FOUND, message="衍生内容不存在", status_code=404)
-    return ok(_deriv_to_dict(d))
+    return success([_deriv_to_out(d) for d in items])
 
 
 @router.post("/{deriv_id}/share", summary="设置分享范围")
@@ -86,4 +74,4 @@ def set_share_scope(
     d.share_scope = body.scope
     db.commit()
     db.refresh(d)
-    return ok(_deriv_to_dict(d))
+    return success(None)

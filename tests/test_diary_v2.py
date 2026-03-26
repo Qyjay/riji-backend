@@ -111,7 +111,7 @@ class TestDiaryUpdate:
         assert resp.status_code == 200
         updated = resp.json()["data"]
         assert updated["content"] == "修改后的内容"
-        assert updated["edit_count"] == 1
+        assert updated["editCount"] == 1
 
     def test_update_diary_edit_limit(self, client: TestClient):
         """修改次数达到上限后返回错误"""
@@ -208,4 +208,4 @@ class TestDiaryAI:
         data = resp.json()["data"]
         assert data["type"] == "share_card"
         assert "content" in data
-        assert data["share_scope"] == "private"
+        assert data["shareScope"] == "private"

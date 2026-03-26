@@ -4,6 +4,7 @@
 import re
 from typing import Optional
 from pydantic import BaseModel, field_validator
+from app.serializers import CamelModel
 
 
 class RegisterRequest(BaseModel):
@@ -19,8 +20,6 @@ class RegisterRequest(BaseModel):
     def validate_username(cls, v: str) -> str:
         if len(v) < 4 or len(v) > 20:
             raise ValueError("用户名长度必须在 4-20 字符之间")
-        if not re.match(r"^[a-zA-Z0-9_]+$", v):
-            raise ValueError("用户名只能包含字母、数字和下划线")
         return v
 
     @field_validator("password")
@@ -37,7 +36,7 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class UserInfo(BaseModel):
+class UserInfo(CamelModel):
     """用户信息（返回给前端）"""
     id: str
     username: str
@@ -47,10 +46,8 @@ class UserInfo(BaseModel):
     avatar: str
     level: int
 
-    model_config = {"from_attributes": True}
 
-
-class AuthResponse(BaseModel):
+class AuthResponse(CamelModel):
     """认证响应（注册/登录成功后返回）"""
     token: str
     user: UserInfo
