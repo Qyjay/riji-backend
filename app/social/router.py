@@ -16,7 +16,10 @@ from app.response import success, ApiException, NOT_FOUND, PARAM_ERROR
 from app.social.schemas import (
     MatchRequestBody, RespondRequest, BuddyRequest,
     MatchOut, MatchRequestOut, MessageOut, MatchReportOut, BuddyRequestOut,
+<<<<<<< HEAD
     SendMessageBody,
+=======
+>>>>>>> 15c408b7f9e948bfe82dbcc318ad9d1f673b00b1
 )
 from app.social import service
 
@@ -130,6 +133,7 @@ def get_messages(
     return success(result)
 
 
+<<<<<<< HEAD
 @router.post("/messages/{match_id}", summary="发送消息")
 def send_message(
     match_id: str,
@@ -149,6 +153,8 @@ def send_message(
     return success(out.model_dump(by_alias=True))
 
 
+=======
+>>>>>>> 15c408b7f9e948bfe82dbcc318ad9d1f673b00b1
 @router.get("/matches/{match_id}/report", summary="匹配报告")
 async def get_match_report(
     match_id: str,

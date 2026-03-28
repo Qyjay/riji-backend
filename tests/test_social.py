@@ -93,6 +93,7 @@ def test_messages_bare_array(client):
     data = resp.json()
     assert data["code"] == 0
     assert isinstance(data["data"], list)
+<<<<<<< HEAD
 
 
 def test_send_message_after_match_accepted(client):
@@ -119,3 +120,5 @@ def test_send_message_after_match_accepted(client):
     assert message["matchId"] == request_id
     assert message["fromUid"] == user1_data["user"]["id"]
     assert message["content"] == "你好，很高兴认识你"
+=======
+>>>>>>> 15c408b7f9e948bfe82dbcc318ad9d1f673b00b1

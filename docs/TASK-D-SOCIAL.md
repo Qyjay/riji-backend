@@ -241,6 +241,7 @@ def match_to_out(match, current_user_id, db) -> dict    # 转前端格式
 3. **测试 AI 对话**：发送消息 → 收到回复 → 查看历史
 4. **重构 service 层**（如果时间允许）
 
+<<<<<<< HEAD
 ## 开发步骤（成员 D）
 
 - [x] 第一步：补齐 `POST /api/social/messages/{match_id}` 发送消息接口
@@ -270,6 +271,8 @@ def match_to_out(match, current_user_id, db) -> dict    # 转前端格式
 - [ ] 第五步：按时间决定是否继续重构 `social/service.py`
   - 将更多业务逻辑从 `router.py` 抽离到 `service.py`
 
+=======
+>>>>>>> 15c408b7f9e948bfe82dbcc318ad9d1f673b00b1
 ## 与其他模块的依赖
 
 | 依赖方向 | 说明 |

@@ -2,8 +2,11 @@
 社交模块服务层
 """
 import json
+<<<<<<< HEAD
 import time
 from uuid import uuid4
+=======
+>>>>>>> 15c408b7f9e948bfe82dbcc318ad9d1f673b00b1
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -40,6 +43,7 @@ def match_to_out(match: Match, current_user_id: str, db: Session) -> dict:
         "common_tags": _decode(match.common_tags, []),
         "matched_at": match.created_at,
     }
+<<<<<<< HEAD
 
 
 def _now_ms() -> int:
@@ -77,3 +81,5 @@ def send_message(db: Session, user_id: str, match_id: str, content: str) -> Soci
     db.commit()
     db.refresh(message)
     return message
+=======
+>>>>>>> 15c408b7f9e948bfe82dbcc318ad9d1f673b00b1
