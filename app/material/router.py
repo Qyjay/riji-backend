@@ -1,0 +1,131 @@
+"""
+素材管理路由
+prefix="/api/materials", tags=["素材管理"]
+"""
+import time
+from datetime import date as dt_date
+from typing import Optional
+from uuid import uuid4
+
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+
+from app.dependencies import get_current_user
+from app.database import get_db
+from app.models.user import User
+from app.response import success
+from app.material import schemas, service
+from app.material.schemas import MaterialOut
+
+router = APIRouter(prefix="/materials", tags=["素材管理"])
+
+
+def _serialize(m_dict: dict) -> dict:
+    """转 camelCase 输出"""
+    return MaterialOut(**m_dict).model_dump(by_alias=True)
+
+
+@router.post("/voice", summary="语音上传与转写")
+async def upload_voice(
+    body: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """语音上传并转写"""
+    return success({
+        "url": f"/uploads/voice/{str(uuid4())}.mp3",
+        "transcription": "语音内容转文字（Mock）",
+    })
+
+
+@router.post("", summary="创建素材")
+async def create_material(
+    body: schemas.MaterialCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """创建一条素材记录，自动触发 AI 情绪提取"""
+    data = body.model_dump()
+    if not data.get("date"):
+        data["date"] = dt_date.today().strftime("%Y-%m-%d")
+    if not data.get("emotion"):
+        data["emotion"] = {"label": "平静", "score": 0.5, "emoji": "😐"}
+
+    result = service.create_material(db, current_user.id, data)
+    if data.get("content") and not body.emotion.get("label"):
+        try:
+            emotion = await service.extract_emotion(db, current_user.id, result["id"])
+            result["emotion"] = emotion
+        except Exception:
+            pass
+    return success(_serialize(result))
+
+
+@router.get("", summary="素材列表（裸数组）")
+def list_materials(
+    date: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """按日期查询素材，返回裸数组"""
+    items = service.list_materials(db, current_user.id, date)
+    return success([_serialize(m) for m in items])
+
+
+@router.get("/{material_id}", summary="素材详情")
+def get_material(
+    material_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """获取单条素材"""
+    result = service.get_material(db, current_user.id, material_id)
+    return success(_serialize(result))
+
+
+@router.put("/{material_id}", summary="编辑素材")
+def update_material(
+    material_id: str,
+    body: schemas.MaterialUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """更新素材字段"""
+    result = service.update_material(
+        db, current_user.id, material_id, body.model_dump(exclude_unset=True)
+    )
+    return success(_serialize(result))
+
+
+@router.delete("/{material_id}", summary="删除素材")
+def delete_material(
+    material_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """删除素材"""
+    service.delete_material(db, current_user.id, material_id)
+    return success(None)
+
+
+@router.post("/{material_id}/emotion", summary="AI 情绪提取")
+async def extract_emotion(
+    material_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """调用 AI 提取素材情绪，结果写回数据库"""
+    result = await service.extract_emotion(db, current_user.id, material_id)
+    return success(result)
+
+
+@router.post("/{material_id}/polish", summary="AI 文字润色")
+async def polish_text(
+    material_id: str,
+    body: schemas.PolishRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """按指定风格润色素材文字，只返回 {polished}"""
+    result = await service.polish_text(db, current_user.id, material_id, body.style)
+    return success(result)
