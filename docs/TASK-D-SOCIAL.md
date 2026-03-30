@@ -241,7 +241,6 @@ def match_to_out(match, current_user_id, db) -> dict    # 转前端格式
 3. **测试 AI 对话**：发送消息 → 收到回复 → 查看历史
 4. **重构 service 层**（如果时间允许）
 
-<<<<<<< HEAD
 ## 开发步骤（成员 D）
 
 - [x] 第一步：补齐 `POST /api/social/messages/{match_id}` 发送消息接口
@@ -254,25 +253,23 @@ def match_to_out(match, current_user_id, db) -> dict    # 转前端格式
     - 校验消息内容非空
     - 创建并返回 `SocialMessage`
   - 已完成发送消息接口基础用例验证（`test_send_message_after_match_accepted`）
-- [ ] 第二步：补充 `tests/test_social.py`
+- [x] 第二步：补充 `tests/test_social.py`
   - 覆盖发送消息成功场景
   - 覆盖未接受匹配禁止发送消息
   - 覆盖非匹配双方禁止发消息
   - 覆盖重复匹配请求和不存在用户场景
-- [ ] 第三步：补齐社交完整链路自测
+- [x] 第三步：补齐社交完整链路自测
   - 发送匹配请求
   - 接受请求
   - 发送消息
   - 获取消息列表
   - 获取匹配报告
-- [ ] 第四步：整理 `chat/service.py` 与 `chat/schemas.py`
+- [x] 第四步：整理 `chat/service.py` 与 `chat/schemas.py`
   - 抽离 AI 对话逻辑
   - 统一 schema 定义
-- [ ] 第五步：按时间决定是否继续重构 `social/service.py`
+- [x] 第五步：按时间决定是否继续重构 `social/service.py`
   - 将更多业务逻辑从 `router.py` 抽离到 `service.py`
 
-=======
->>>>>>> 15c408b7f9e948bfe82dbcc318ad9d1f673b00b1
 ## 与其他模块的依赖
 
 | 依赖方向 | 说明 |
@@ -283,11 +280,11 @@ def match_to_out(match, current_user_id, db) -> dict    # 转前端格式
 
 ## 验收标准
 
-- [ ] 9+ 个接口在 Swagger 中全部可调通（含新增的发送消息）
-- [ ] `pytest tests/test_social.py -v` 全部通过
-- [ ] 社交完整链路：匹配 → 接受 → 发消息 → 查消息
-- [ ] AI 对话能跑通（Mock 模式）
-- [ ] 搭子申请完整链路：申请 → 接受/拒绝
+- [x] 9+ 个接口在 Swagger 中全部可调通（含新增的发送消息）
+- [x] `pytest tests/test_social.py -v` 全部通过
+- [x] 社交完整链路：匹配 → 接受 → 发消息 → 查消息
+- [x] AI 对话能跑通（Mock 模式）
+- [x] 搭子申请完整链路：申请 → 接受/拒绝
 
 ## 预估工作量
 

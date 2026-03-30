@@ -1,10 +1,24 @@
 """
-聊天模块 Pydantic Schema（组员 D 根据需要扩展）
+聊天模块 Pydantic Schema
 """
 from pydantic import BaseModel
 
+from app.serializers import CamelModel
 
-class GetHistoryRequest(BaseModel):
-    """获取历史消息请求"""
-    limit: int = 50
-    before_timestamp: int = 0  # 获取此时间戳之前的消息（翻页用）
+
+class ChatRequest(BaseModel):
+    """AI 对话请求体"""
+    message: str
+
+
+class ChatMessageOut(CamelModel):
+    """聊天消息响应项"""
+    role: str
+    content: str
+    timestamp: int
+
+
+class ChatHistoryOut(CamelModel):
+    """聊天历史响应"""
+    items: list[ChatMessageOut]
+    total: int
