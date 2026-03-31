@@ -145,6 +145,8 @@ riji-backend/
 │   ├── anniversary/              # 📅 纪念日 → 队友 C
 │   ├── social/                   # 🤝 社交模块 → 队友 D
 │   ├── chat/                     # 💬 对话模块 → 队友 D
+│   ├── plaza/                    # 🏫 广场模块 → 队友 E 🆕
+│   ├── avatar/                   # 🤖 AI分身模块 → 队友 E 🆕
 │   └── study/                    # 📚 学习模块（已废弃）
 │
 ├── tests/                        # 测试
@@ -360,6 +362,7 @@ git checkout -b feat/user           # 队友 A
 git checkout -b feat/diary-core     # 队友 B
 git checkout -b feat/diary-ai       # 队友 C
 git checkout -b feat/social         # 队友 D
+git checkout -b feat/plaza-avatar   # 队友 E
 ```
 
 ### 日常工作流
