@@ -202,16 +202,26 @@ cp .env.example .env
 ### 4. 初始化数据库 + 测试数据
 
 ```bash
+# 基础测试数据（3 个用户 + 日记 + 番茄钟 + 待办）
 python scripts/seed.py
+
+# 广场+分身模块测试数据（10 个用户 + 15 帖子 + 评论/点赞/记忆/推荐/侧写全模块）
+python scripts/seed_plaza_avatar.py
 ```
 
-会创建 3 个测试账号：
+会创建测试账号：
+
+**基础账号（密码 `123456`）：**
 
 | 用户名 | 密码 | 学校 |
 |--------|------|------|
 | kylin | 123456 | 南开大学 |
 | xiaolu | 123456 | 天津大学 |
 | test | 123456 | 测试大学 |
+
+**广场+分身测试账号（密码 `test123456`）：**
+
+linxiaohan（南开）、zhoucheng（天大）、summer_z（北大）、wangfuai（清华）、liuyang_c（复旦）、chenmo（上交）、yuxin_r（浙大）、leomao（南大）、zhouqian（中大）、hanxiao（武大）
 
 ### 5. 启动服务
 

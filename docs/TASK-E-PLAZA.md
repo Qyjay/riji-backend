@@ -12,6 +12,19 @@
 
 ---
 
+## 当前进度
+
+| 阶段 | 状态 | 备注 |
+|------|------|------|
+| 数据模型 | ✅ 已完成 | plaza.py（7张表）+ avatar.py 已创建并注册 |
+| 种子数据 | ✅ 已完成 | seed_plaza_avatar.py（10用户/15帖/28评论/39点赞/41记忆/20推荐/10侧写） |
+| 广场 CRUD | ⬜ 待开始 | 6 个接口 |
+| 分身记忆/状态 | ⬜ 待开始 | 6 个接口 |
+| 分身推荐+侧写 | ⬜ 待开始 | 4 个接口 |
+| 测试 | ⬜ 待开始 | test_plaza + test_avatar |
+
+---
+
 ## 模块概述
 
 ### 广场（Plaza）
@@ -528,6 +541,9 @@ from app.models import plaza, avatar  # 新增
 
 ## 验收标准
 
+- [x] 数据模型已创建（plaza.py + avatar.py，共 7 张表）
+- [x] 数据库已注册（database.py + models/__init__.py）
+- [x] 种子数据已创建并验证通过（seed_plaza_avatar.py）
 - [ ] 16 个接口在 Swagger 中全部可调通
 - [ ] `pytest tests/test_plaza.py tests/test_avatar.py -v` 全部通过
 - [ ] 广场完整链路：创建帖子 → 列表浏览 → 频道筛选 → 点赞 → 评论
@@ -541,13 +557,14 @@ from app.models import plaza, avatar  # 新增
 
 ## 预估工作量
 
-| 阶段 | 内容 | 预估时间 |
-|------|------|----------|
-| 数据模型 | 新建 plaza.py + avatar.py | 0.5 天 |
-| 广场 CRUD | 6 个接口 | 1 天 |
-| 分身记忆/状态 | 6 个接口 | 1 天 |
-| 分身推荐 + 侧写 | 4 个接口 | 1 天 |
-| 测试 | test_plaza + test_avatar | 0.5 天 |
+| 阶段 | 内容 | 预估时间 | 状态 |
+|------|------|----------|------|
+| 数据模型 | 新建 plaza.py + avatar.py | 0.5 天 | ✅ 已完成 |
+| 种子数据 | seed_plaza_avatar.py | 0.5 天 | ✅ 已完成 |
+| 广场 CRUD | 6 个接口 | 1 天 | ⬜ |
+| 分身记忆/状态 | 6 个接口 | 1 天 | ⬜ |
+| 分身推荐 + 侧写 | 4 个接口 | 1 天 | ⬜ |
+| 测试 | test_plaza + test_avatar | 0.5 天 | ⬜ |
 | **合计** | | **约 4 天** |
 
 ---

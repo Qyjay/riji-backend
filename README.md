@@ -35,6 +35,25 @@ uvicorn app.main:app --reload --port 8000
 | xiaolu | 123456 | 天津大学 |
 | test | 123456 | 测试大学 |
 
+### 广场+分身模块测试账号
+
+运行 `python scripts/seed_plaza_avatar.py` 创建以下账号（统一密码 `test123456`）：
+
+| 用户名 | 姓名 | 学校 |
+|--------|------|------|
+| linxiaohan | 林晓涵 | 南开大学 |
+| zhoucheng | 周澄 | 天津大学 |
+| summer_z | 张诗涵 | 北京大学 |
+| wangfuai | 王FU艾 | 清华大学 |
+| liuyang_c | 刘洋 | 复旦大学 |
+| chenmo | 陈墨 | 上海交通大学 |
+| yuxin_r | 于欣怡 | 浙江大学 |
+| leomao | 李茂 | 南京大学 |
+| zhouqian | 周谦 | 中山大学 |
+| hanxiao | 韩笑 | 武汉大学 |
+
+该脚本还会创建 15 条广场帖子、28 条评论、39 条点赞、41 条分身记忆、10 条分身状态、20 条推荐匹配、10 条分身侧写。
+
 ## 项目结构
 
 ```
@@ -59,10 +78,14 @@ backend/
 │   ├── user/              # 用户模块 → 组员 A
 │   ├── diary/             # 日记模块 → 组员 B + C
 │   ├── study/             # 学习模块 → 组员 A
-│   └── social/            # 社交模块 → 组员 D
+│   ├── social/            # 社交模块 → 组员 D
+│   ├── plaza/             # 🏫 广场模块 → 组员 E
+│   └── avatar/            # 🤖 AI分身模块 → 组员 E
 │
 ├── tests/                 # 测试
-├── scripts/seed.py        # 种子数据
+├── scripts/
+│   ├── seed.py                   # 种子数据（基础测试账号）
+│   └── seed_plaza_avatar.py      # 广场+分身种子数据（10用户/15帖/全模块）
 ├── requirements.txt
 └── .env.example
 ```
