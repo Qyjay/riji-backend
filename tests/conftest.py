@@ -13,6 +13,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
 from app.main import app
+from app.upload.router import router as upload_router
 
 # ==================== 测试数据库配置 ====================
 
@@ -38,6 +39,17 @@ def override_get_db():
 
 # 覆盖 FastAPI 依赖
 app.dependency_overrides[get_db] = override_get_db
+
+
+def _ensure_upload_router_registered_for_tests():
+    """测试环境补齐 upload 路由，避免依赖 main.py 的路由注册状态。"""
+    target_path = "/api/upload/diary-image"
+    has_upload_route = any(getattr(route, "path", "") == target_path for route in app.router.routes)
+    if not has_upload_route:
+        app.include_router(upload_router, prefix="/api")
+
+
+_ensure_upload_router_registered_for_tests()
 
 
 # ==================== Fixtures ====================

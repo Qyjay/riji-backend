@@ -1,7 +1,12 @@
 """
 素材模块测试
 """
+import json
+
 import pytest
+from app.ai import minimax_client
+from app.material.schemas import POLISH_STYLES
+from app.models.material import RawMaterial
 from tests.conftest import create_test_user, get_auth_header
 
 
@@ -26,6 +31,72 @@ def test_create_material_text(client):
     assert "createdAt" in m
     assert m["type"] == "text"
     assert m["content"] == "今天天气很好，心情愉快！"
+
+
+def test_create_material_image_flow_with_uploaded_url(client):
+    """image 素材先走 /upload/diary-image，再用返回 URL 创建 /materials 记录。"""
+    user_data = create_test_user(client, username="material_image_user")
+    headers = get_auth_header(user_data["token"])
+
+    upload_resp = client.post(
+        "/api/upload/diary-image",
+        files={"file": ("diary.png", b"fake-image-bytes", "image/png")},
+        headers=headers,
+    )
+    assert upload_resp.status_code == 200
+    upload_data = upload_resp.json()
+    assert upload_data["code"] == 0
+
+    image_url = upload_data["data"]["url"]
+    assert image_url.startswith("/uploads/")
+
+    create_resp = client.post(
+        "/api/materials",
+        json={
+            "type": "image",
+            "content": "今天拍到了晚霞",
+            "media_url": image_url,
+            "date": "2026-03-25",
+        },
+        headers=headers,
+    )
+    assert create_resp.status_code == 200
+    data = create_resp.json()["data"]
+    assert data["type"] == "image"
+    assert data["mediaUrl"] == image_url
+    assert data["content"] == "今天拍到了晚霞"
+
+
+def test_create_material_voice_flow(client):
+    """voice 素材先拿到语音 URL/转写，再创建 /materials 记录。"""
+    user_data = create_test_user(client, username="material_voice_user")
+    headers = get_auth_header(user_data["token"])
+
+    voice_resp = client.post("/api/materials/voice", json={"filePath": "mock"}, headers=headers)
+    assert voice_resp.status_code == 200
+    voice_data = voice_resp.json()
+    assert voice_data["code"] == 0
+
+    voice_url = voice_data["data"]["url"]
+    transcription = voice_data["data"]["transcription"]
+    assert voice_url
+    assert transcription
+
+    create_resp = client.post(
+        "/api/materials",
+        json={
+            "type": "voice",
+            "content": transcription,
+            "media_url": voice_url,
+            "date": "2026-03-25",
+        },
+        headers=headers,
+    )
+    assert create_resp.status_code == 200
+    data = create_resp.json()["data"]
+    assert data["type"] == "voice"
+    assert data["content"] == transcription
+    assert data["mediaUrl"] == voice_url
 
 
 def test_list_materials_bare_array(client):
@@ -85,6 +156,96 @@ def test_update_material(client):
     assert resp.json()["data"]["content"] == "更新后的内容"
 
 
+def test_update_material_json_fields_roundtrip(client, db):
+    """JSON 字段更新后：数据库存字符串，接口返回 dict/list"""
+    user_data = create_test_user(client, username="material_json_user")
+    headers = get_auth_header(user_data["token"])
+
+    create_resp = client.post("/api/materials", json={
+        "type": "text",
+        "content": "JSON 更新测试",
+        "date": "2026-03-25",
+    }, headers=headers)
+    material_id = create_resp.json()["data"]["id"]
+
+    payload = {
+        "location": {"lat": 39.12, "lng": 117.20, "address": "天津南开大学"},
+        "emotion": {"label": "开心", "score": 0.91, "emoji": "😊"},
+        "tags": ["校园", "复习"],
+    }
+
+    update_resp = client.put(f"/api/materials/{material_id}", json=payload, headers=headers)
+    assert update_resp.status_code == 200
+    updated = update_resp.json()["data"]
+
+    # API 层应返回解码后的 dict/list
+    assert isinstance(updated["location"], dict)
+    assert isinstance(updated["emotion"], dict)
+    assert isinstance(updated["tags"], list)
+    assert updated["location"] == payload["location"]
+    assert updated["emotion"] == payload["emotion"]
+    assert updated["tags"] == payload["tags"]
+
+    # DB 层应保存为 JSON 字符串
+    m = db.query(RawMaterial).filter(RawMaterial.id == material_id).first()
+    assert m is not None
+    assert isinstance(m.location, str)
+    assert isinstance(m.emotion, str)
+    assert isinstance(m.tags, str)
+    assert json.loads(m.location) == payload["location"]
+    assert json.loads(m.emotion) == payload["emotion"]
+    assert json.loads(m.tags) == payload["tags"]
+
+    # 再次查询详情，确认读取时仍能正确反序列化
+    detail_resp = client.get(f"/api/materials/{material_id}", headers=headers)
+    assert detail_resp.status_code == 200
+    detail = detail_resp.json()["data"]
+    assert detail["location"] == payload["location"]
+    assert detail["emotion"] == payload["emotion"]
+    assert detail["tags"] == payload["tags"]
+
+
+def test_update_material_partial_json_keeps_unset_fields(client, db):
+    """只更新部分 JSON 字段时，未传字段应保持原值"""
+    user_data = create_test_user(client, username="mat_json_partial")
+    headers = get_auth_header(user_data["token"])
+
+    original_location = {"lat": 39.10, "lng": 117.17, "address": "原始地点"}
+    original_emotion = {"label": "平静", "score": 0.55, "emoji": "😌"}
+    original_tags = ["原始标签", "复习"]
+
+    create_resp = client.post("/api/materials", json={
+        "type": "text",
+        "content": "部分更新测试",
+        "date": "2026-03-25",
+        "location": original_location,
+        "emotion": original_emotion,
+        "tags": original_tags,
+    }, headers=headers)
+    material_id = create_resp.json()["data"]["id"]
+
+    new_emotion = {"label": "开心", "score": 0.92, "emoji": "😊"}
+    update_resp = client.put(
+        f"/api/materials/{material_id}",
+        json={"emotion": new_emotion},
+        headers=headers,
+    )
+    assert update_resp.status_code == 200
+    updated = update_resp.json()["data"]
+
+    # 仅 emotion 被更新，location/tags 保持原值
+    assert updated["emotion"] == new_emotion
+    assert updated["location"] == original_location
+    assert updated["tags"] == original_tags
+
+    # DB 层校验：未传字段不应被覆盖
+    m = db.query(RawMaterial).filter(RawMaterial.id == material_id).first()
+    assert m is not None
+    assert json.loads(m.emotion) == new_emotion
+    assert json.loads(m.location) == original_location
+    assert json.loads(m.tags) == original_tags
+
+
 def test_delete_material(client):
     user_data = create_test_user(client)
     headers = get_auth_header(user_data["token"])
@@ -101,9 +262,16 @@ def test_delete_material(client):
     assert resp.json()["data"] is None
 
 
-def test_emotion_extraction(client):
+def test_emotion_extraction_mock_format(client, db, monkeypatch):
+    """POST /materials/{id}/emotion 在 Mock 下返回情绪结构并写回数据库"""
     user_data = create_test_user(client)
     headers = get_auth_header(user_data["token"])
+
+    class FakeMiniMaxClient:
+        async def extract_emotion(self, text: str):
+            return {"label": "开心", "score": 0.88, "emoji": "😊"}
+
+    monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: FakeMiniMaxClient())
 
     create_resp = client.post("/api/materials", json={
         "type": "text",
@@ -115,15 +283,34 @@ def test_emotion_extraction(client):
     resp = client.post(f"/api/materials/{material_id}/emotion", headers=headers)
     assert resp.status_code == 200
     data = resp.json()["data"]
-    assert "label" in data
-    assert "score" in data
-    assert "emoji" in data
+
+    # 结构校验：不写死具体值，只校验字段与类型
+    assert set(data.keys()) == {"label", "score", "emoji"}
+    assert isinstance(data["label"], str) and data["label"]
+    assert isinstance(data["score"], (int, float))
+    assert 0 <= float(data["score"]) <= 1
+    assert isinstance(data["emoji"], str) and data["emoji"]
+
+    # 写库校验：emotion 以 JSON string 持久化
+    m = db.query(RawMaterial).filter(RawMaterial.id == material_id).first()
+    assert m is not None
+    assert json.loads(m.emotion) == data
 
 
-def test_polish_text_returns_only_polished(client):
-    """POST /materials/{id}/polish 只返回 {polished}"""
+@pytest.mark.parametrize("style", POLISH_STYLES)
+def test_polish_text_returns_only_polished(client, monkeypatch, style):
+    """POST /materials/{id}/polish 按配置风格遍历，且只返回 {polished}"""
     user_data = create_test_user(client)
     headers = get_auth_header(user_data["token"])
+
+    expected_polished = "润色后的文字"
+
+    class FakeMiniMaxClient:
+        async def polish_text(self, text: str, style_name: str):
+            assert style_name in POLISH_STYLES
+            return expected_polished
+
+    monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: FakeMiniMaxClient())
 
     create_resp = client.post("/api/materials", json={
         "type": "text",
@@ -133,14 +320,12 @@ def test_polish_text_returns_only_polished(client):
     material_id = create_resp.json()["data"]["id"]
 
     resp = client.post(f"/api/materials/{material_id}/polish", json={
-        "style": "文艺"
+        "style": style
     }, headers=headers)
     assert resp.status_code == 200
     data = resp.json()["data"]
-    assert "polished" in data
-    # 不应该有 original 和 style
-    assert "original" not in data
-    assert "style" not in data
+    assert data == {"polished": expected_polished}
+    assert len(data.keys()) == 1
 
 
 def test_material_no_auth(client):
