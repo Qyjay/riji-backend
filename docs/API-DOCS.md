@@ -458,11 +458,21 @@
 
 ### POST /api/materials/voice — 语音上传与转写 🔒
 
-**请求 Body：** dict（任意）
+**Content-Type：** multipart/form-data
+
+**请求参数：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| file | File | 语音文件（mp3/wav/m4a，最大 20MB） |
 
 **响应 data：** `{"url": "/uploads/voice/xxx.mp3", "transcription": "转写文字"}`
 
-**实现状态：** 🟡 返回 Mock 数据，未实现真实语音转写
+**使用场景：**
+- 素材录制页录音转文字
+- AI 对话页语音输入转文字
+
+**实现状态：** 🟡 返回 Mock 数据，未实现真实语音转写（需对接 ASR API）
 
 ---
 
