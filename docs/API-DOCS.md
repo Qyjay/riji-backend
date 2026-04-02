@@ -1234,15 +1234,23 @@
 
 > 广场是校园社交信息流，支持帖子发布、浏览、频道筛选、点赞、评论、分身代回复等功能。
 
-### GET /api/plaza/posts — 帖子列表（分页 + 频道筛选） 🔒
+### GET /api/plaza/posts — 帖子列表（分页 + 频道筛选 + 搜索） 🔒
 
 **Query 参数：**
 
 | 参数 | 类型 | 默认 | 说明 |
 |------|------|------|------|
 | channel | string | — | 频道筛选：buddy / help / share / dating，空则返回全部（推荐） |
+| q | string | — | 关键词搜索，匹配 content / tags / authorName / location（模糊匹配） |
 | page | int | 1 | 页码 |
 | page_size | int | 10 | 每页条数 |
+
+**搜索逻辑：**
+
+- `q` 参数与 `channel` 可组合使用（AND 关系）
+- 搜索范围：帖子正文（content）、话题标签（tags）、作者昵称（authorName）、位置（location）
+- 匹配方式：LIKE %q%（模糊匹配，不区分大小写）
+- 空 `q` 参数 = 不筛选（返回全部）
 
 **响应 data：** `{ items: PlazaPost[], total: number }`
 
