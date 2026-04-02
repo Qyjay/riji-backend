@@ -122,7 +122,7 @@ service.update_material 只更新传入的字段（exclude_unset）。JSON 字�
 
 ---
 
-### 日记模块（8 个接口）
+### 日记模块（9 个接口）
 
 #### GET /api/diaries/today-summary — 今日概要
 
@@ -216,6 +216,86 @@ service.get_emotion_trend 从日记关联的素材中提取情绪，按时间排
 
 ---
 
+#### GET /api/diaries/search — 搜索日记
+
+**当前状态：** 🔴 待实现
+
+**功能说明：**
+
+支持关键词、情绪、标签、天气、日期范围等多维度组合搜索日记。多条件之间为 AND 关系（所有条件必须同时满足），同维度内为 OR 关系（如 emotion=开心,幸福 → 命中任一情绪即可）。
+
+**实现要点：**
+
+1. **在 `app/diary/schemas.py` 中定义 `DiarySearchParams`**：
+   ```python
+   class DiarySearchParams(BaseModel):
+       q: Optional[str] = None  # 关键词，匹配 title/content/location
+       emotion: Optional[str] = None  # 逗号分隔的情绪标签，如 "开心,幸福"
+       tag: Optional[str] = None  # 逗号分隔的标签，如 "校园,美食"
+       weather: Optional[str] = None  # 逗号分隔的天气，如 "晴,多云"
+       from_date: Optional[str] = Field(None, alias="from")  # 起始日期 YYYY-MM-DD
+       to_date: Optional[str] = Field(None, alias="to")  # 结束日期 YYYY-MM-DD
+       page: int = 1
+       page_size: int = 20
+   ```
+
+2. **在 `app/diary/service.py` 中实现 `search_diaries(db, user_id, params)` 函数**：
+   - **基础查询**：`Diary.query.filter(Diary.user_id == user_id)`
+   - **q 关键词**：SQLAlchemy `or_(Diary.title.ilike(f"%{q}%"), Diary.content.ilike(f"%{q}%"), Diary.location.ilike(f"%{q}%"))`
+   - **emotion 情绪筛选**：
+     - 解析逗号分隔字符串（如 "开心,幸福" → ["开心", "幸福"]）
+     - 查询 `emotion_summary` JSON 字段的 `dominant` 值
+     - 使用 IN 匹配（dominant IN ["开心", "幸福"]）
+     - SQLite JSON 查询示例：`json_extract(emotion_summary, '$.dominant') IN (...)`
+   - **tag 标签筛选**：
+     - 解析逗号分隔字符串（如 "校园,美食" → ["校园", "美食"]）
+     - 查询 `tags` JSON 数组，检查是否有交集
+     - **优先方案**：尝试使用 SQLite JSON 函数（如 `json_each`）
+     - **降级方案**：如果 SQLite 版本不支持或实现复杂，降级为 Python 层过滤（先查出所有符合其他条件的日记，再在内存中过滤 tags）
+   - **weather 天气筛选**：
+     - 解析逗号分隔字符串（如 "晴,多云" → ["晴", "多云"]）
+     - weather 字段 IN 匹配：`Diary.weather.in_(weather_list)`
+   - **from/to 日期范围**：
+     - date 字段范围过滤（闭区间）
+     - `Diary.date >= from_date AND Diary.date <= to_date`
+   - **分页**：使用 LIMIT + OFFSET
+   - **排序**：按 `created_at DESC` 排序（最新的日记在前）
+   - **返回格式**：`{"items": [DiaryOut, ...], "total": 42, "page": 1, "page_size": 20}`
+   - **空参数处理**：所有参数为 None = 不筛选该维度（返回全部日记，仅应用分页）
+
+3. **在 `app/diary/router.py` 中注册路由**：
+   ```python
+   @router.get("/search", summary="搜索日记", response_model=None)
+   def search_diaries_endpoint(
+       params: DiarySearchParams = Depends(),
+       current_user=Depends(get_current_user),
+       db: Session = Depends(get_db)
+   ):
+       result = service.search_diaries(db, current_user.id, params)
+       return ok(result)
+   ```
+
+**你需要做的：**
+
+- 实现完整的搜索函数，处理多条件组合（多条件之间 AND，同维度内 OR）
+- 处理 JSON 字段（tags、emotion_summary）的查询：
+  - **emotion_summary**：提取 dominant 字段进行 IN 查询
+  - **tags**：检查 JSON 数组是否包含任一指定标签
+  - 优先尝试使用 SQLite JSON 函数（`json_extract`、`json_each`）
+  - 如果 SQLite 版本不支持或实现复杂，降级为 Python 层过滤（先筛选其他条件，再在内存中过滤 JSON 字段）
+- 空参数 = 不筛选该维度（如 emotion=None 则不筛选情绪）
+- 补充测试用例到 `tests/test_diary_v2.py`：
+  - **关键词搜索**：匹配 title/content/location 任一字段
+  - **情绪筛选**：单个情绪（emotion=开心）、多个情绪（emotion=开心,幸福）
+  - **标签筛选**：单个标签（tag=校园）、多个标签（tag=校园,美食）
+  - **天气筛选**：单个天气（weather=晴）、多个天气（weather=晴,多云）
+  - **日期范围**：from + to 闭区间筛选（from=2026-03-01&to=2026-03-31）
+  - **组合搜索**：关键词 + 情绪 + 日期范围同时生效（多条件 AND）
+  - **分页测试**：验证 page、page_size、total 的正确性
+  - **空参数**：不传任何条件，返回全部日记（仅分页）
+
+---
+
 ## 工作重点
 
 1. **理解素材→日记的完整链路**：创建素材 → 生成日记 → 修改日记
@@ -234,9 +314,10 @@ service.get_emotion_trend 从日记关联的素材中提取情绪，按时间排
 
 ## 验收标准
 
-- [ ] 16 个接口在 Swagger 中全部可调通
+- [ ] 17 个接口在 Swagger 中全部可调通（素材 8 个 + 日记 9 个）
 - [ ] `pytest tests/test_diary.py tests/test_diary_v2.py tests/test_material.py -v` 全部通过
 - [ ] 素材→日记生成完整链路跑通（创建3条素材 → 生成日记 → 修改日记 → 查看详情）
+- [ ] 搜索接口支持多条件组合查询（关键词+情绪+日期范围+标签+天气），所有测试用例通过
 - [ ] 空数据、边界情况不报 500
 
 ## 预估工作量

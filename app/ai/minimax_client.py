@@ -651,6 +651,51 @@ class MiniMaxClient:
         ]
         return await self.chat_completion(messages, system_prompt=system, temperature=0.8)
 
+    async def summarize_chat_session(self, messages: list) -> dict:
+        """将一段对话概括为素材标题 + 摘要 + 情绪 + 标签"""
+        if self.mock:
+            await asyncio.sleep(0.3)
+            return {
+                "title": "和 AI 的一段对话",
+                "summary": "用户和 AI 聊了一段有趣的对话，讨论了日常生活中的各种话题。",
+                "mood": "平静",
+                "mood_emoji": "😌",
+                "tags": ["日常", "对话"]
+            }
+
+        conversation = "\n".join([
+            f"{'用户' if m['role']=='user' else 'AI'}: {m['content']}"
+            for m in messages
+        ])
+
+        system_prompt = """你是一个对话分析助手。请分析以下对话内容，提取结构化信息。
+必须返回严格的 JSON 格式，不要包含任何其他文字：
+{
+  "title": "简短标题（10字以内，概括对话主题）",
+  "summary": "2~3句话的摘要，描述对话的主要内容",
+  "mood": "情绪标签（开心/难过/平静/吐槽/焦虑/兴奋/感动/无聊/困惑/释然）",
+  "mood_emoji": "对应的emoji（一个）",
+  "tags": ["话题标签1", "话题标签2"]
+}"""
+
+        user_prompt = f"对话内容：\n{conversation}"
+
+        result_text = await self.chat_completion(
+            [{"role": "user", "content": user_prompt}],
+            system_prompt=system_prompt
+        )
+
+        try:
+            return json.loads(result_text)
+        except json.JSONDecodeError:
+            return {
+                "title": "对话记录",
+                "summary": conversation[:200],
+                "mood": "平静",
+                "mood_emoji": "😐",
+                "tags": ["对话"]
+            }
+
 
 # ==================== 全局单例 ====================
 

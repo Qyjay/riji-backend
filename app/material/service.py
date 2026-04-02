@@ -43,6 +43,10 @@ def material_to_dict(m: RawMaterial) -> dict:
         "tags": _decode(m.tags, []),
         "date": m.date or "",
         "created_at": m.created_at,
+        # chat 类型专属字段
+        "chat_session_id": m.chat_session_id or None,
+        "start_time": m.start_time or None,
+        "end_time": m.end_time or None,
     }
 
 

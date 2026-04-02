@@ -30,6 +30,11 @@ class RawMaterial(Base):
     date = Column(String, nullable=False)           # 所属日期 "2026-03-25"
     created_at = Column(BigInteger, nullable=False)  # 毫秒时间戳
 
+    # chat 类型专属字段
+    chat_session_id = Column(String, nullable=True)    # 仅 chat 类型使用
+    start_time = Column(BigInteger, nullable=True)     # 对话开始时间
+    end_time = Column(BigInteger, nullable=True)       # 对话结束时间
+
     __table_args__ = (
         # 按用户+日期查询索引
         Index("ix_raw_materials_user_date", "user_id", "date"),

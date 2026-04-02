@@ -143,6 +143,14 @@ async def generate_diary(db: Session, user_id: str, date: str, weather: str = ""
             parts.append(f"[图片描述] {m.content}")
         elif m.type == "voice" and m.content:
             parts.append(f"[语音转文字] {m.content}")
+        elif m.type == "chat" and m.content:
+            time_range = ""
+            if m.start_time and m.end_time:
+                from datetime import datetime
+                s = datetime.fromtimestamp(m.start_time / 1000).strftime("%H:%M")
+                e = datetime.fromtimestamp(m.end_time / 1000).strftime("%H:%M")
+                time_range = f"({s}~{e}) "
+            parts.append(f"[对话记录] {time_range}{m.content}")
     materials_text = "\n".join(parts) if parts else f"今天是 {date}，无具体素材记录。"
 
     from app.models.user import User
