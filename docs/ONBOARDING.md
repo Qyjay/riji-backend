@@ -127,7 +127,7 @@ riji-backend/
 │   │   ├── material.py           # raw_materials 表
 │   │   ├── anniversary.py        # anniversaries 表
 │   │   ├── derivative.py         # diary_derivatives 表
-│   │   ├── chat.py               # chat_messages 表
+│   │   ├── chat.py               # chat_messages 表 + chat_sessions 表（对话段管理）
 │   │   ├── social.py             # matches + social_messages 表
 │   │   └── study.py              # pomodoros + todos 表（已废弃）
 │   │
@@ -144,7 +144,7 @@ riji-backend/
 │   ├── derivative/               # 🎨 衍生内容 → 队友 C
 │   ├── anniversary/              # 📅 纪念日 → 队友 C
 │   ├── social/                   # 🤝 社交模块 → 队友 D
-│   ├── chat/                     # 💬 对话模块 → 队友 D
+│   ├── chat/                     # 💬 对话模块（含对话段管理 + 自动转素材）
 │   ├── plaza/                    # 🏫 广场模块 → 队友 E 🆕
 │   ├── avatar/                   # 🤖 AI分身模块 → 队友 E 🆕
 │   └── study/                    # 📚 学习模块（已废弃）

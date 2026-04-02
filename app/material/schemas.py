@@ -52,3 +52,7 @@ class MaterialOut(CamelModel):
     tags: List[str]
     date: str
     created_at: int
+    # chat 类型专属字段
+    chat_session_id: Optional[str] = None
+    start_time: Optional[int] = None
+    end_time: Optional[int] = None

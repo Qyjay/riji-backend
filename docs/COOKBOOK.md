@@ -370,6 +370,11 @@ portrait = await client.generate_portrait("日记摘要...", "聊天摘要...")
 
 # 匹配报告（返回 string）
 report = await client.generate_match_report(portrait_a, portrait_b)
+
+# 对话段摘要（返回 dict：title/summary/mood/mood_emoji/tags）
+messages = [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
+summary = await client.summarize_chat_session(messages)
+# → {"title": "和 AI 的一段对话", "summary": "...", "mood": "平静", "mood_emoji": "😌", "tags": ["日常"]}
 ```
 
 ### Mock 模式

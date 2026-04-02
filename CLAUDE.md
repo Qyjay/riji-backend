@@ -43,6 +43,7 @@ app/
 - UserProfile（AI画像）
 - DiaryDerivative（衍生内容）
 - ChatMessage（AI对话历史）
+- ChatSession（对话段 — 一段连续对话的封装，自动转 chat 素材）
 - Match / SocialMessage（社交）
 - Pomodoro / Todo（学习）
 - PlazaPost / PlazaComment / PostLike（广场帖子、评论、点赞）

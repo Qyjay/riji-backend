@@ -214,9 +214,20 @@
   "notifications": true,
   "autoBGM": false,
   "diaryPrivacy": "private",
-  "language": "zh-CN"
+  "language": "zh-CN",
+  "chatMaterialEnabled": true,
+  "chatSilenceThreshold": 30,
+  "chatMaterialToast": true,
+  "chatMinRounds": 3
 }
 ```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| chatMaterialEnabled | bool | 对话自动转素材开关（默认 true） |
+| chatSilenceThreshold | int | 静默阈值（分钟，默认 30） |
+| chatMaterialToast | bool | toast 提示开关（默认 true） |
+| chatMinRounds | int | 最小对话轮数（user 消息数，默认 3） |
 
 **实现状态：** ✅ 已完成
 
@@ -233,6 +244,10 @@
 | auto_bgm | bool | 自动 BGM |
 | diary_privacy | string | 日记隐私（"private" / "friends" / "public"） |
 | language | string | 语言 |
+| chat_material_enabled | bool | 对话自动转素材开关 |
+| chat_silence_threshold | int | 静默阈值（分钟，15~120） |
+| chat_material_toast | bool | toast 提示开关 |
+| chat_min_rounds | int | 最小轮数（1~20） |
 
 **响应 data：** 同 GET /api/user/settings
 
@@ -311,7 +326,7 @@
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| type | string | ✅ | "image" / "voice" / "text" |
+| type | string | ✅ | "image" / "voice" / "text" / "chat"（自动生成，前端无需手动传） |
 | content | string | ❌ | 文字内容 |
 | media_url | string | ❌ | 媒体文件 URL（先调 /upload 获得） |
 | thumbnail_url | string | ❌ | 缩略图 URL |
@@ -320,7 +335,7 @@
 | tags | string[] | ❌ | 标签 |
 | date | string | ❌ | 日期 YYYY-MM-DD（默认今天） |
 
-**响应 data：**
+**响应 data（普通类型）：**
 
 ```json
 {
@@ -334,7 +349,31 @@
   "emotion": {"label": "开心", "score": 0.88, "emoji": "😊"},
   "tags": ["校园"],
   "date": "2026-03-26",
-  "createdAt": 1711440000000
+  "createdAt": 1711440000000,
+  "chatSessionId": null,
+  "startTime": null,
+  "endTime": null
+}
+```
+
+**响应 data（chat 类型，自动生成）：**
+
+```json
+{
+  "id": "uuid",
+  "userId": "uuid",
+  "type": "chat",
+  "content": "和 AI 聊了骑行路线，探讨了运动习惯...",
+  "mediaUrl": "",
+  "thumbnailUrl": "",
+  "location": {},
+  "emotion": {"label": "开心", "score": 0.8, "emoji": "😊"},
+  "tags": ["运动", "日常"],
+  "date": "2026-03-26",
+  "createdAt": 1711440000000,
+  "chatSessionId": "session-uuid",
+  "startTime": 1711440180000,
+  "endTime": 1711440900000
 }
 ```
 
@@ -465,7 +504,9 @@
 
 **响应 data：** DiaryOut 对象（含 AI 生成的 title、content、emotionSummary）
 
-**实现状态：** ✅ 已完成（调用 minimax_client.generate_diary）
+**素材纳入范围：** 接口会读取当日所有素材，包含 `type="chat"` 的对话素材。对话素材以 `[对话记录] (HH:MM~HH:MM) 摘要内容` 格式拼入提示词。
+
+**实现状态：** ✅ 已完成（调用 minimax_client.generate_diary，纳入 chat 类型素材）
 
 ---
 
@@ -812,7 +853,12 @@
 
 ### POST /api/chat — AI 对话 🔒
 
-发送消息给 AI，返回纯文本回复（非 SSE 流式）。自动保存对话历史。
+发送消息给 AI，返回纯文本回复（非 SSE 流式）。自动保存对话历史，并集成对话段（session）管理。
+
+每次发消息时，后端会：
+1. 检查是否有 open 的 ChatSession
+2. 若超过静默阈值（用户设置），关闭旧 session 并生成 chat 素材
+3. 将消息绑定到当前 session
 
 **请求 Body：**
 
@@ -822,7 +868,85 @@
 
 **响应 data：** AI 回复文本（string）
 
-**实现状态：** ✅ 已完成（调用 minimax_client.chat_completion，取最近 20 条历史作为上下文）
+**响应示例（触发素材生成时附带 meta）：**
+
+```json
+{
+  "code": 0,
+  "data": "AI 回复文本",
+  "message": "ok",
+  "meta": {
+    "materialGenerated": true,
+    "materialId": "uuid-xxx"
+  }
+}
+```
+
+> `meta` 字段仅在触发了旧 session 封闭并生成素材时附带，否则不出现。
+
+**实现状态：** ✅ 已完成（调用 minimax_client.chat_completion，取最近 20 条历史作为上下文，集成 session 管理）
+
+---
+
+### POST /api/chat/close-session — 主动关闭对话段 🔒
+
+用户离开聊天页时，前端主动调用此接口封闭当前 open 的 session。
+
+**请求 Body：** 无
+
+**响应 data：**
+
+```json
+{
+  "sessionClosed": true,
+  "materialGenerated": true,
+  "materialId": "uuid-xxx"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| sessionClosed | bool | 是否存在并关闭了 session |
+| materialGenerated | bool | 是否生成了 chat 素材 |
+| materialId | string \| null | 生成的素材 ID |
+
+> 无 open session → `{"sessionClosed": false, ...}`
+> session 轮数不足或 chat_material_enabled=false → `{"sessionClosed": true, "materialGenerated": false, "materialId": null}`
+
+**实现状态：** ✅ 已完成
+
+---
+
+### GET /api/chat/session/{session_id}/messages — 获取对话段消息 🔒
+
+前端素材卡片「展开对话」时获取原始对话记录。
+
+**路径参数：** `session_id` — ChatSession 的 ID
+
+**响应 data：**
+
+```json
+{
+  "session": {
+    "id": "uuid",
+    "title": "和室友的海河骑行",
+    "summary": "下午和小李骑车去了海河边...",
+    "startTime": 1711440180000,
+    "endTime": 1711440900000,
+    "messageCount": 12,
+    "mood": "开心",
+    "moodEmoji": "😊"
+  },
+  "messages": [
+    {"role": "user", "content": "今天下午和小李去骑车了", "timestamp": 1711440180000},
+    {"role": "assistant", "content": "听起来不错！去哪里骑的？", "timestamp": 1711440182000}
+  ]
+}
+```
+
+**权限：** 仅 session 所属用户可访问。
+
+**实现状态：** ✅ 已完成
 
 ---
 
@@ -1554,40 +1678,42 @@ AI 根据记忆库生成的分身人格摘要。
 | 38 | GET | /api/ai/fortune | AI | ✅ |
 | 39 | POST | /api/chat | 对话 | ✅ |
 | 40 | GET | /api/chat/history | 对话 | ✅ |
-| 41 | GET | /api/social/matches | 社交 | ✅ |
-| 42 | POST | /api/social/match-requests | 社交 | ✅ |
-| 43 | POST | /api/social/match-requests/{id}/respond | 社交 | ✅ |
-| 44 | GET | /api/social/messages/{match_id} | 社交 | ✅ |
-| 45 | GET | /api/social/matches/{id}/report | 社交 | ✅ |
-| 46 | POST | /api/social/buddy | 社交 | ✅ |
-| 47 | POST | /api/social/buddy/{id}/respond | 社交 | ✅ |
-| 48 | POST | /api/upload/avatar | 上传 | ✅ |
-| 49 | POST | /api/upload/diary-image | 上传 | ✅ |
-| 50 | POST | /api/upload/voice | 上传 | 🟡 |
-| 51 | GET | /api/study/pomodoros | 学习⚠️ | ✅ |
-| 52 | POST | /api/study/pomodoros | 学习⚠️ | ✅ |
-| 53 | POST | /api/study/pomodoros/{id}/complete | 学习⚠️ | ✅ |
-| 54 | GET | /api/study/todos | 学习⚠️ | ✅ |
-| 55 | POST | /api/study/todos | 学习⚠️ | ✅ |
-| 56 | POST | /api/study/todos/{id}/toggle | 学习⚠️ | ✅ |
-| 57 | GET | /api/plaza/posts | 广场🆕 | 🔴 |
-| 58 | GET | /api/plaza/posts/{id} | 广场🆕 | 🔴 |
-| 59 | POST | /api/plaza/posts | 广场🆕 | 🔴 |
-| 60 | POST | /api/plaza/posts/{id}/like | 广场🆕 | 🔴 |
-| 61 | GET | /api/plaza/posts/{id}/comments | 广场🆕 | 🔴 |
-| 62 | POST | /api/plaza/posts/{id}/comments | 广场🆕 | 🔴 |
-| 63 | GET | /api/avatar/memories | 分身🆕 | 🔴 |
-| 64 | POST | /api/avatar/memories | 分身🆕 | 🔴 |
-| 65 | PUT | /api/avatar/memories/{id} | 分身🆕 | 🔴 |
-| 66 | DELETE | /api/avatar/memories/{id} | 分身🆕 | 🔴 |
-| 67 | GET | /api/avatar/status | 分身🆕 | 🔴 |
-| 68 | PUT | /api/avatar/status | 分身🆕 | 🔴 |
-| 69 | GET | /api/avatar/matches | 分身🆕 | 🔴 |
-| 70 | POST | /api/avatar/matches/{id}/action | 分身🆕 | 🔴 |
-| 71 | GET | /api/avatar/profile | 分身🆕 | 🔴 |
-| 72 | POST | /api/avatar/profile/regenerate | 分身🆕 | 🔴 |
+| 41 | POST | /api/chat/close-session | 对话 | ✅ |
+| 42 | GET | /api/chat/session/{id}/messages | 对话 | ✅ |
+| 43 | GET | /api/social/matches | 社交 | ✅ |
+| 44 | POST | /api/social/match-requests | 社交 | ✅ |
+| 45 | POST | /api/social/match-requests/{id}/respond | 社交 | ✅ |
+| 46 | GET | /api/social/messages/{match_id} | 社交 | ✅ |
+| 47 | GET | /api/social/matches/{id}/report | 社交 | ✅ |
+| 48 | POST | /api/social/buddy | 社交 | ✅ |
+| 49 | POST | /api/social/buddy/{id}/respond | 社交 | ✅ |
+| 50 | POST | /api/upload/avatar | 上传 | ✅ |
+| 51 | POST | /api/upload/diary-image | 上传 | ✅ |
+| 52 | POST | /api/upload/voice | 上传 | 🟡 |
+| 53 | GET | /api/study/pomodoros | 学习⚠️ | ✅ |
+| 54 | POST | /api/study/pomodoros | 学习⚠️ | ✅ |
+| 55 | POST | /api/study/pomodoros/{id}/complete | 学习⚠️ | ✅ |
+| 56 | GET | /api/study/todos | 学习⚠️ | ✅ |
+| 57 | POST | /api/study/todos | 学习⚠️ | ✅ |
+| 58 | POST | /api/study/todos/{id}/toggle | 学习⚠️ | ✅ |
+| 59 | GET | /api/plaza/posts | 广场🆕 | 🔴 |
+| 60 | GET | /api/plaza/posts/{id} | 广场🆕 | 🔴 |
+| 61 | POST | /api/plaza/posts | 广场🆕 | 🔴 |
+| 62 | POST | /api/plaza/posts/{id}/like | 广场🆕 | 🔴 |
+| 63 | GET | /api/plaza/posts/{id}/comments | 广场🆕 | 🔴 |
+| 64 | POST | /api/plaza/posts/{id}/comments | 广场🆕 | 🔴 |
+| 65 | GET | /api/avatar/memories | 分身🆕 | 🔴 |
+| 66 | POST | /api/avatar/memories | 分身🆕 | 🔴 |
+| 67 | PUT | /api/avatar/memories/{id} | 分身🆕 | 🔴 |
+| 68 | DELETE | /api/avatar/memories/{id} | 分身🆕 | 🔴 |
+| 69 | GET | /api/avatar/status | 分身🆕 | 🔴 |
+| 70 | PUT | /api/avatar/status | 分身🆕 | 🔴 |
+| 71 | GET | /api/avatar/matches | 分身🆕 | 🔴 |
+| 72 | POST | /api/avatar/matches/{id}/action | 分身🆕 | 🔴 |
+| 73 | GET | /api/avatar/profile | 分身🆕 | 🔴 |
+| 74 | POST | /api/avatar/profile/regenerate | 分身🆕 | 🔴 |
 
-**统计：** 72 个路由，53 个 ✅，2 个 🟡，17 个 🔴（含 16 个广场 + 分身新增 + 1 个搜索）
+**统计：** 74 个路由，55 个 ✅，2 个 🟡，17 个 🔴（含 16 个广场 + 分身新增 + 1 个搜索）
 
 ---
 
@@ -1706,8 +1832,7 @@ class AvatarProfile(Base):
 | 方法 | 用途 | 模型 | 接入的路由 |
 |------|------|------|-----------|
 | chat_completion | 文本对话 | M2.7-highspeed | /chat, /ai/fortune |
-| stream_chat | 流式对话（SSE） | M2.7-highspeed | 未接入 |
-| generate_image | 文生图 | image-01 | /user/agent-portrait, /diaries/{id}/derivative |
+| stream_chat | 流式对话（SSE） | M2.7-highspeed | 未接入 || generate_image | 文生图 | image-01 | /user/agent-portrait, /diaries/{id}/derivative |
 | text_to_speech | TTS | speech-2.8-hd | /ai/tts |
 | generate_music | 音乐生成 | music-2.5+ | 未接入 |
 | extract_emotion | 情绪提取 | chat_completion | /materials/{id}/emotion |
@@ -1716,10 +1841,11 @@ class AvatarProfile(Base):
 | extract_info | 信息提取 | chat_completion | /diaries/{id}/extract |
 | generate_portrait | 用户画像 | chat_completion | /user/portrait/refresh |
 | generate_match_report | 匹配报告 | chat_completion | /social/matches/{id}/report |
+| summarize_chat_session | 对话摘要 | chat_completion | /chat（session 封闭时自动调用）|
 | *generate_avatar_profile* | *分身侧写生成* | *chat_completion* | */avatar/profile/regenerate* 🆕 待新增 |
 | *match_post* | *帖子匹配打分* | *chat_completion* | */avatar/matches* 🆕 待新增 |
 | *agent_conversation* | *分身对话模拟* | *chat_completion* | */avatar/matches* 🆕 待新增 |
 
 ---
 
-*本文档从 `app/` 下所有 router.py、schemas.py、service.py 以及前端 `services/api/plaza.ts`、`services/api/avatar.ts` 提取，最后更新 2026-03-31。*
+*本文档从 `app/` 下所有 router.py、schemas.py、service.py 以及前端 `services/api/plaza.ts`、`services/api/avatar.ts` 提取，最后更新 2026-04-02。*
