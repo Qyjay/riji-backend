@@ -458,11 +458,21 @@
 
 ### POST /api/materials/voice — 语音上传与转写 🔒
 
-**请求 Body：** dict（任意）
+**Content-Type：** multipart/form-data
+
+**请求参数：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| file | File | 语音文件（mp3/wav/m4a，最大 20MB） |
 
 **响应 data：** `{"url": "/uploads/voice/xxx.mp3", "transcription": "转写文字"}`
 
-**实现状态：** 🟡 返回 Mock 数据，未实现真实语音转写
+**使用场景：**
+- 素材录制页录音转文字
+- AI 对话页语音输入转文字
+
+**实现状态：** 🟡 返回 Mock 数据，未实现真实语音转写（需对接 ASR API）
 
 ---
 
@@ -1234,15 +1244,23 @@
 
 > 广场是校园社交信息流，支持帖子发布、浏览、频道筛选、点赞、评论、分身代回复等功能。
 
-### GET /api/plaza/posts — 帖子列表（分页 + 频道筛选） 🔒
+### GET /api/plaza/posts — 帖子列表（分页 + 频道筛选 + 搜索） 🔒
 
 **Query 参数：**
 
 | 参数 | 类型 | 默认 | 说明 |
 |------|------|------|------|
 | channel | string | — | 频道筛选：buddy / help / share / dating，空则返回全部（推荐） |
+| q | string | — | 关键词搜索，匹配 content / tags / authorName / location（模糊匹配） |
 | page | int | 1 | 页码 |
 | page_size | int | 10 | 每页条数 |
+
+**搜索逻辑：**
+
+- `q` 参数与 `channel` 可组合使用（AND 关系）
+- 搜索范围：帖子正文（content）、话题标签（tags）、作者昵称（authorName）、位置（location）
+- 匹配方式：LIKE %q%（模糊匹配，不区分大小写）
+- 空 `q` 参数 = 不筛选（返回全部）
 
 **响应 data：** `{ items: PlazaPost[], total: number }`
 
