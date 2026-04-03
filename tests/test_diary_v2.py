@@ -5,6 +5,7 @@
 - 测试情绪趋势查询
 """
 import json
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -160,6 +161,68 @@ class TestDiaryGeneration:
         assert detail["materialIds"] == data["materialIds"]
         assert detail["emotionSummary"] == data["emotionSummary"]
 
+    def test_generate_diary_populates_images_and_tags(self, client: TestClient, monkeypatch):
+        """生成日记时：images=当日图片URL；tags=素材标签+AI标签（去重合并）。"""
+        auth = create_test_user(client, username="diary_gen_assets")
+        headers = get_auth_header(auth["token"])
+
+        resp1 = client.post("/api/materials", json={
+            "type": "image",
+            "content": "图书馆窗外晚霞",
+            "media_url": "https://example.com/img1.jpg",
+            "tags": ["校园", "晚霞"],
+            "emotion": {"label": "开心", "score": 0.85, "emoji": "😊"},
+            "date": "2026-03-25",
+        }, headers=headers)
+        assert resp1.status_code == 200
+
+        resp2 = client.post("/api/materials", json={
+            "type": "image",
+            "content": "操场黄昏",
+            "media_url": "https://example.com/img2.jpg",
+            "tags": ["运动", "校园"],
+            "emotion": {"label": "平静", "score": 0.75, "emoji": "😌"},
+            "date": "2026-03-25",
+        }, headers=headers)
+        assert resp2.status_code == 200
+
+        resp3 = client.post("/api/materials", json={
+            "type": "text",
+            "content": "今天复习了算法和操作系统",
+            "tags": ["学习"],
+            "emotion": {"label": "专注", "score": 0.8, "emoji": "🧠"},
+            "date": "2026-03-25",
+        }, headers=headers)
+        assert resp3.status_code == 200
+
+        class FakeMiniMaxClient:
+            async def generate_diary(self, *args, **kwargs):
+                return {
+                    "title": "测试标题",
+                    "content": "测试正文",
+                    "emotion_summary": {
+                        "dominant": "平静",
+                        "distribution": {"平静": 1.0},
+                    },
+                    "ai_tags": ["成长", "回忆"],
+                }
+
+        monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: FakeMiniMaxClient())
+
+        gen_resp = client.post("/api/diaries/generate", json={
+            "date": "2026-03-25",
+            "weather": "晴",
+        }, headers=headers)
+        assert gen_resp.status_code == 200
+        data = gen_resp.json()["data"]
+
+        assert data["images"] == [
+            "https://example.com/img1.jpg",
+            "https://example.com/img2.jpg",
+        ]
+        for tag in ["校园", "晚霞", "运动", "学习", "成长", "回忆"]:
+            assert tag in data["tags"]
+
 
 class TestDiaryList:
     """日记列表测试"""
@@ -302,10 +365,10 @@ class TestDiaryEmotionTrend:
         headers = get_auth_header(auth["token"])
 
         # 创建带情绪的素材
-        for _ in range(2):
+        for idx in range(2):
             client.post("/api/materials", json={
                 "type": "text",
-                "content": "开心的事",
+                "content": f"开心的事{idx + 1}",
                 "date": "2026-03-25",
                 "emotion": {"label": "开心", "score": 0.9, "emoji": "😊"},
             }, headers=headers)
@@ -522,6 +585,65 @@ class TestDiaryAI:
         ]
         assert len(same_ann) == 1
 
+    def test_extract_diary_info_parses_markdown_json_and_persists_anniversary(self, client: TestClient, db, monkeypatch):
+        """extract_info 能解析 markdown 包裹 JSON，并将“周年”等纪念日正确写入数据库。"""
+        auth, headers = _create_user_with_material(client, "diary_ai_anniversary")
+        user_id = auth["user"]["id"]
+
+        gen_resp = client.post("/api/diaries/generate", json={"date": "2026-03-25"}, headers=headers)
+        assert gen_resp.status_code == 200
+        diary_id = gen_resp.json()["data"]["id"]
+
+        class FakeMiniMaxClient(minimax_client.MiniMaxClient):
+            def __init__(self):
+                super().__init__(api_key="x", api_base="https://api.minimaxi.com", model="mock-model", mock=False)
+
+            async def chat_completion(
+                self,
+                messages: list,
+                system_prompt: str = "",
+                temperature: float = 0.8,
+                max_tokens: int = 2048,
+            ):
+                return """```json
+{
+  "anniversaries": [
+    {"title": "恋爱一周年", "date": "03-25", "related_person": "小雨"}
+  ],
+  "persons": [
+    {"name": "小雨", "relation": "恋人"}
+  ],
+  "preferences": ["散步", "拍照"]
+}
+```"""
+
+        fake_client = FakeMiniMaxClient()
+        monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: fake_client)
+
+        resp = client.post(f"/api/diaries/{diary_id}/extract", headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+
+        assert any(a["title"] == "恋爱一周年" for a in data["anniversaries"])
+        assert any(p["name"] == "小雨" and p["relation"] == "恋人" for p in data["persons"])
+        assert "散步" in data["preferences"]
+
+        anns = db.query(Anniversary).filter(
+            Anniversary.user_id == user_id,
+            Anniversary.diary_id == diary_id,
+            Anniversary.title == "恋爱一周年",
+            Anniversary.date == "03-25",
+            Anniversary.related_person == "小雨",
+        ).all()
+        assert len(anns) == 1
+
+        profile = db.query(UserProfile).filter(UserProfile.user_id == user_id).first()
+        assert profile is not None
+        relations = json.loads(profile.relations) if profile.relations else {}
+        interests = json.loads(profile.interests) if profile.interests else []
+        assert relations.get("小雨") == "恋人"
+        assert "散步" in interests
+
     @pytest.mark.parametrize(
         "dtype,expected_content,expected_media_url,expected_image_calls,expected_chat_calls",
         [
@@ -549,10 +671,12 @@ class TestDiaryAI:
         diary_id = gen_resp.json()["data"]["id"]
 
         call_counts = {"image": 0, "chat": 0}
+        call_payloads = {"image_prompt": ""}
 
         class FakeMiniMaxClient:
             async def generate_image(self, prompt: str, aspect_ratio: str = "1:1"):
                 call_counts["image"] += 1
+                call_payloads["image_prompt"] = prompt
                 return "https://mock.local/comic.png"
 
             async def chat_completion(
@@ -581,6 +705,9 @@ class TestDiaryAI:
 
         assert call_counts["image"] == expected_image_calls
         assert call_counts["chat"] == expected_chat_calls
+        if dtype == "comic":
+            assert "多格剧情漫画" in call_payloads["image_prompt"]
+            assert "至少四格" in call_payloads["image_prompt"]
 
         rows = db.query(DiaryDerivative).filter(
             DiaryDerivative.diary_id == diary_id,
@@ -613,3 +740,174 @@ class TestDiaryAI:
 
         rows = db.query(DiaryDerivative).filter(DiaryDerivative.diary_id == diary_id).all()
         assert rows == []
+
+
+class TestDiarySearch:
+    """日记搜索测试：多维度组合（AND）+ 同维度 OR。"""
+
+    def _seed_search_diaries(self, db, user_id: str):
+        rows = [
+            {
+                "id": "search_d1",
+                "title": "校园晨光",
+                "content": "今天在图书馆复习算法，效率很高",
+                "location": "南开大学图书馆",
+                "weather": "晴",
+                "date": "2026-03-05",
+                "dominant": "开心",
+                "tags": ["校园", "学习"],
+                "created_at": 1000,
+            },
+            {
+                "id": "search_d2",
+                "title": "火锅夜谈",
+                "content": "晚上和室友去吃火锅，聊到很晚",
+                "location": "天津大学附近",
+                "weather": "多云",
+                "date": "2026-03-20",
+                "dominant": "幸福",
+                "tags": ["美食", "社交"],
+                "created_at": 2000,
+            },
+            {
+                "id": "search_d4",
+                "title": "晨跑记录",
+                "content": "清晨在海河边跑步，状态不错",
+                "location": "海河公园",
+                "weather": "晴",
+                "date": "2026-03-28",
+                "dominant": "开心",
+                "tags": ["运动"],
+                "created_at": 3000,
+            },
+            {
+                "id": "search_d3",
+                "title": "雨天随记",
+                "content": "在宿舍看书整理笔记",
+                "location": "宿舍",
+                "weather": "雨",
+                "date": "2026-04-01",
+                "dominant": "平静",
+                "tags": ["居家", "学习"],
+                "created_at": 4000,
+            },
+        ]
+
+        for row in rows:
+            diary = Diary(
+                id=f"{row['id']}_{uuid4().hex[:8]}",
+                user_id=user_id,
+                title=row["title"],
+                content=row["content"],
+                location=row["location"],
+                weather=row["weather"],
+                date=row["date"],
+                emotion_summary=json.dumps({"dominant": row["dominant"], "trend": []}, ensure_ascii=False),
+                emotion=json.dumps({"label": row["dominant"], "score": 80, "emoji": "😊"}, ensure_ascii=False),
+                tags=json.dumps(row["tags"], ensure_ascii=False),
+                images=json.dumps([], ensure_ascii=False),
+                material_ids=json.dumps([], ensure_ascii=False),
+                status="published",
+                created_at=row["created_at"],
+                updated_at=row["created_at"],
+            )
+            db.add(diary)
+
+        db.commit()
+
+    def _prepare(self, client, db, username="diary_search_user"):
+        auth = create_test_user(client, username=username)
+        headers = get_auth_header(auth["token"])
+        self._seed_search_diaries(db, auth["user"]["id"])
+        return headers
+
+    def test_search_keyword_matches_title_content_location(self, client: TestClient, db):
+        headers = self._prepare(client, db, "diary_search_kw")
+
+        r1 = client.get("/api/diaries/search?q=晨光", headers=headers)
+        r2 = client.get("/api/diaries/search?q=火锅", headers=headers)
+        r3 = client.get("/api/diaries/search?q=海河公园", headers=headers)
+
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        assert r3.status_code == 200
+
+        assert r1.json()["data"]["total"] == 1
+        assert r2.json()["data"]["total"] == 1
+        assert r3.json()["data"]["total"] == 1
+
+    def test_search_emotion_single_and_multiple(self, client: TestClient, db):
+        headers = self._prepare(client, db, "diary_search_emotion")
+
+        single = client.get("/api/diaries/search?emotion=开心", headers=headers)
+        multi = client.get("/api/diaries/search?emotion=开心,幸福", headers=headers)
+
+        assert single.status_code == 200
+        assert multi.status_code == 200
+        assert single.json()["data"]["total"] == 2
+        assert multi.json()["data"]["total"] == 3
+
+    def test_search_tag_single_and_multiple(self, client: TestClient, db):
+        headers = self._prepare(client, db, "diary_search_tag")
+
+        single = client.get("/api/diaries/search?tag=校园", headers=headers)
+        multi = client.get("/api/diaries/search?tag=校园,美食", headers=headers)
+
+        assert single.status_code == 200
+        assert multi.status_code == 200
+        assert single.json()["data"]["total"] == 1
+        assert multi.json()["data"]["total"] == 2
+
+    def test_search_weather_single_and_multiple(self, client: TestClient, db):
+        headers = self._prepare(client, db, "diary_search_weather")
+
+        single = client.get("/api/diaries/search?weather=晴", headers=headers)
+        multi = client.get("/api/diaries/search?weather=晴,多云", headers=headers)
+
+        assert single.status_code == 200
+        assert multi.status_code == 200
+        assert single.json()["data"]["total"] == 2
+        assert multi.json()["data"]["total"] == 3
+
+    def test_search_date_range_closed_interval(self, client: TestClient, db):
+        headers = self._prepare(client, db, "diary_search_date")
+
+        resp = client.get("/api/diaries/search?from=2026-03-01&to=2026-03-31", headers=headers)
+        assert resp.status_code == 200
+        assert resp.json()["data"]["total"] == 3
+
+    def test_search_combined_conditions_and_relation(self, client: TestClient, db):
+        headers = self._prepare(client, db, "diary_search_combo")
+
+        resp = client.get(
+            "/api/diaries/search?q=图书馆&emotion=开心&from=2026-03-01&to=2026-03-31",
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["total"] == 1
+        assert len(data["items"]) == 1
+        item = data["items"][0]
+        assert "图书馆" in item["content"] or "图书馆" in item["location"] or "图书馆" in item["title"]
+
+    def test_search_pagination(self, client: TestClient, db):
+        headers = self._prepare(client, db, "diary_search_page")
+
+        resp = client.get("/api/diaries/search?page=2&page_size=2", headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["total"] == 4
+        assert data["page"] == 2
+        assert data["page_size"] == 2
+        assert len(data["items"]) == 2
+
+    def test_search_empty_params_returns_all_with_pagination(self, client: TestClient, db):
+        headers = self._prepare(client, db, "diary_search_empty")
+
+        resp = client.get("/api/diaries/search", headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["total"] == 4
+        assert data["page"] == 1
+        assert data["page_size"] == 20
+        assert len(data["items"]) == 4

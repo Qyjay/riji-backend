@@ -54,6 +54,7 @@ app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads"
 # ==================== 路由注册 ====================
 
 from app.auth.router import router as auth_router
+from app.upload.router import router as upload_router
 from app.material.router import router as material_router
 from app.diary.router import router as diary_router
 from app.derivative.router import router as derivative_router
@@ -65,6 +66,7 @@ from app.anniversary.router import router as anniversary_router
 from app.study.router import router as study_router
 
 app.include_router(auth_router, prefix="/api")
+app.include_router(upload_router, prefix="/api")
 app.include_router(material_router, prefix="/api")
 app.include_router(diary_router, prefix="/api")
 app.include_router(derivative_router, prefix="/api")

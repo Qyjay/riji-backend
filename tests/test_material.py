@@ -2,9 +2,12 @@
 素材模块测试
 """
 import json
+import re
+from datetime import datetime
 
 import pytest
 from app.ai import minimax_client
+from app.material import service as material_service
 from app.material.schemas import POLISH_STYLES
 from app.models.material import RawMaterial
 from tests.conftest import create_test_user, get_auth_header
@@ -33,6 +36,81 @@ def test_create_material_text(client):
     assert m["content"] == "今天天气很好，心情愉快！"
 
 
+def test_create_material_id_and_date_generation_rule(client):
+    """id=年月日时分秒+userId；date=YYYY-MM-DD HH:MM:SS"""
+    user_data = create_test_user(client, username="mat_id_rule")
+    headers = get_auth_header(user_data["token"])
+
+    resp = client.post("/api/materials", json={
+        "type": "text",
+        "content": "规则测试",
+        "date": "2026-03-25",
+    }, headers=headers)
+
+    assert resp.status_code == 200
+    m = resp.json()["data"]
+    user_id = user_data["user"]["id"]
+
+    assert re.match(rf"^\d{{14}}_{re.escape(user_id)}(?:_\d+)?$", m["id"])
+    assert re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", m["date"])
+    assert m["date"].startswith("2026-03-25 ")
+
+
+def test_create_material_dedup_within_one_second(client, monkeypatch):
+    """同用户同负载 1s 内重复创建：返回同一条素材，不重复入库。"""
+    user_data = create_test_user(client, username="material_dedup_user")
+    headers = get_auth_header(user_data["token"])
+
+    base_dt = datetime(2026, 3, 25, 9, 8, 7)
+    base_ms = int(base_dt.timestamp() * 1000)
+    ms_values = iter([base_ms, base_ms + 500])
+    dt_values = iter([base_dt, base_dt])
+
+    monkeypatch.setattr(material_service, "_now_ms", lambda: next(ms_values))
+    monkeypatch.setattr(material_service, "_now_dt", lambda: next(dt_values))
+
+    payload = {
+        "type": "text",
+        "content": "短时间重复点击",
+        "date": "2026-03-25",
+    }
+    first = client.post("/api/materials", json=payload, headers=headers)
+    second = client.post("/api/materials", json=payload, headers=headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+    first_data = first.json()["data"]
+    second_data = second.json()["data"]
+    assert first_data["id"] == second_data["id"]
+
+    listed = client.get("/api/materials?date=2026-03-25", headers=headers)
+    assert listed.status_code == 200
+    assert len(listed.json()["data"]) == 1
+
+
+def test_create_material_accepts_camelcase_fields(client):
+    """创建素材请求支持 camelCase（前端直传）。"""
+    user_data = create_test_user(client, username="mat_camel_user")
+    headers = get_auth_header(user_data["token"])
+
+    payload = {
+        "type": "image",
+        "content": "camelCase 测试",
+        "mediaUrl": "/uploads/mock/image.jpg",
+        "thumbnailUrl": "/uploads/mock/thumb.jpg",
+        "location": {"lat": 39.1, "lng": 117.2, "address": "天津"},
+        "date": "2026-03-25",
+    }
+    resp = client.post("/api/materials", json=payload, headers=headers)
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["mediaUrl"] == payload["mediaUrl"]
+    assert data["thumbnailUrl"] == payload["thumbnailUrl"]
+    assert data["location"] == payload["location"]
+
+
 def test_create_material_image_flow_with_uploaded_url(client):
     """image 素材先走 /upload/diary-image，再用返回 URL 创建 /materials 记录。"""
     user_data = create_test_user(client, username="material_image_user")
@@ -48,7 +126,11 @@ def test_create_material_image_flow_with_uploaded_url(client):
     assert upload_data["code"] == 0
 
     image_url = upload_data["data"]["url"]
+    thumbnail_url = upload_data["data"]["thumbnailUrl"]
+    location = upload_data["data"]["location"]
     assert image_url.startswith("/uploads/")
+    assert thumbnail_url
+    assert isinstance(location, dict)
 
     create_resp = client.post(
         "/api/materials",
@@ -64,6 +146,8 @@ def test_create_material_image_flow_with_uploaded_url(client):
     data = create_resp.json()["data"]
     assert data["type"] == "image"
     assert data["mediaUrl"] == image_url
+    assert data["thumbnailUrl"] == thumbnail_url
+    assert data["location"] == location
     assert data["content"] == "今天拍到了晚霞"
 
 

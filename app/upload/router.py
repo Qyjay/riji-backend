@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.dependencies import get_current_user, get_db
 from app.models.user import User
 from app.response import success
-from app.upload.service import save_file
+from app.upload.service import save_file, save_diary_image_with_metadata
 
 router = APIRouter(prefix="/upload", tags=["文件上传"])
 
@@ -47,15 +47,25 @@ async def upload_avatar(
 async def upload_diary_image(
     file: UploadFile = File(..., description="日记图片（jpeg/png，最大 10MB）"),
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
 ):
     """
     上传日记配图
     - 支持格式：jpeg/png/gif/webp
     - 最大大小：10MB
     """
-    url = await save_file(file, current_user.id, "diary-image", max_size=DIARY_IMAGE_MAX_SIZE)
-    return success(data={"url": url}, message="图片上传成功")
+    uploaded = await save_diary_image_with_metadata(
+        file,
+        current_user.id,
+        max_size=DIARY_IMAGE_MAX_SIZE,
+    )
+    return success(
+        data={
+            "url": uploaded["url"],
+            "thumbnailUrl": uploaded["thumbnail_url"],
+            "location": uploaded["location"],
+        },
+        message="图片上传成功",
+    )
 
 
 # v2 新增：语音上传
@@ -66,7 +76,6 @@ VOICE_MAX_SIZE = 20 * 1024 * 1024  # 20MB
 async def upload_voice(
     file: UploadFile = File(..., description="语音文件（mp3/wav/m4a，最大 20MB）"),
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
 ):
     """
     上传语音素材文件
