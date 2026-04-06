@@ -5,12 +5,11 @@
 - POST /chat/close-session            主动关闭对话段
 - GET  /chat/session/{id}/messages    获取对话段消息
 """
-import time
-from uuid import uuid4
-
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.chat import service
+from app.chat.schemas import ChatHistoryOut, ChatRequest
 from app.dependencies import get_current_user, get_db
 from app.models.chat import ChatMessage, ChatSession
 from app.models.user import User, UserSettings
@@ -198,19 +197,6 @@ def get_chat_history(
     db: Session = Depends(get_db),
 ):
     """获取 AI 聊天历史"""
-    messages = (
-        db.query(ChatMessage)
-        .filter(ChatMessage.user_id == current_user.id)
-        .order_by(ChatMessage.timestamp.desc())
-        .limit(limit)
-        .all()
-    )
-    items = [
-        {
-            "role": m.role,
-            "content": m.content,
-            "timestamp": m.timestamp,
-        }
-        for m in reversed(messages)
-    ]
-    return success({"items": items, "total": len(items)})
+    result = service.get_history(db, current_user.id, limit=limit)
+    out = ChatHistoryOut(**result)
+    return success(out.model_dump(by_alias=True))

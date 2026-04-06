@@ -11,6 +11,11 @@ class MatchRequestBody(BaseModel):
     toUid: Optional[str] = None
 
 
+class SendMessageBody(BaseModel):
+    """发送社交消息"""
+    content: str
+
+
 class RespondRequest(BaseModel):
     """响应匹配/搭子申请"""
     accept: bool
