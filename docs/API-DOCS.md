@@ -725,31 +725,6 @@
 
 ---
 
-## 4.1 TASK-B 接口实现映射（material + diary）
-
-> 目标：将 `docs/TASK-B-DIARY.md` 的 16 个接口与当前代码实现一一对应，标注一致性与差异。
-
-| 模块 | 接口 | Router 实现 | Service 实现 | 与 TASK-B 一致性 | 备注 |
-|------|------|-------------|--------------|------------------|------|
-| Material | POST /api/materials | `app/material/router.py#create_material` | `app/material/service.py#create_material` + `extract_emotion` | ✅ 一致 | 支持 text/image/voice；未传情绪且有内容时会尝试 AI 提取 |
-| Material | GET /api/materials | `app/material/router.py#list_materials` | `app/material/service.py#list_materials` | ✅ 一致 | 支持 `date` 过滤，返回裸数组 |
-| Material | GET /api/materials/{material_id} | `app/material/router.py#get_material` | `app/material/service.py#get_material` | ✅ 一致 | 单条素材详情 |
-| Material | PUT /api/materials/{material_id} | `app/material/router.py#update_material` | `app/material/service.py#update_material` | ✅ 一致 | 仅更新传入字段，JSON 字段序列化写回 |
-| Material | DELETE /api/materials/{material_id} | `app/material/router.py#delete_material` | `app/material/service.py#delete_material` | ✅ 一致 | 删除素材 |
-| Material | POST /api/materials/{material_id}/emotion | `app/material/router.py#extract_emotion` | `app/material/service.py#extract_emotion` | ✅ 一致 | AI 提取并写回 emotion |
-| Material | POST /api/materials/{material_id}/polish | `app/material/router.py#polish_text` | `app/material/service.py#polish_text` | ✅ 一致 | 返回 `{polished}` |
-| Material | POST /api/materials/voice | `app/material/router.py#upload_voice` | 无（路由内 Mock） | ✅ 一致 | 目前仍是 Mock 实现 |
-| Diary | GET /api/diaries/today-summary | `app/diary/router.py#get_today_summary` | `app/diary/service.py#get_today_summary` | ✅ 一致 | 返回今日素材数、素材列表、是否有日记 |
-| Diary | POST /api/diaries/generate | `app/diary/router.py#generate_diary` | `app/diary/service.py#generate_diary` | ⚠️ 部分差异 | 当前实现为每次新建，不做“同日更新” |
-| Diary | GET /api/diaries | `app/diary/router.py#list_diaries` | `app/diary/service.py#list_diaries` | ✅ 一致 | 支持 `page_size` 与 `pageSize` |
-| Diary | GET /api/diaries/{diary_id} | `app/diary/router.py#get_diary` | `app/diary/service.py#get_diary` | ✅ 一致 | 单篇详情 |
-| Diary | PUT /api/diaries/{diary_id} | `app/diary/router.py#update_diary` | `app/diary/service.py#update_diary` | ✅ 一致 | 按 `edit_count < max_edits` 限制编辑次数 |
-| Diary | GET /api/diaries/{diary_id}/emotion-trend | `app/diary/router.py#get_emotion_trend` | `app/diary/service.py#get_emotion_trend` | ✅ 一致 | 返回 `dominant + trend(hour,label,score)` |
-| Diary | POST /api/diaries/{diary_id}/extract | `app/diary/router.py#extract_diary_info` | `app/diary/service.py#extract_diary_info` | ✅ 一致 | 写入 anniversaries 与 user_profiles |
-| Diary | POST /api/diaries/{diary_id}/derivative | `app/diary/router.py#generate_derivative` | `app/diary/service.py#generate_derivative` | ✅ 一致 | 支持 comic / novel / share_card |
-
----
-
 ## 5. 衍生内容模块（Derivative）
 
 ### GET /api/derivatives — 衍生内容列表 🔒
@@ -899,22 +874,6 @@
 ```
 
 **实现状态：** ✅ 已完成（Mock 返回固定数据，真实模式调用 chat_completion）
-
----
-
-## 7.1 TASK-C 实现映射（AI + Derivative + Anniversary）
-
-> 目标：将 `docs/TASK-C-DIARY-AI.md` 中提及接口与当前代码实现逐条对照。
-
-| 模块 | 接口/项 | 当前实现 | 与 TASK-C 一致性 | 备注 |
-|------|---------|----------|------------------|------|
-| AI | POST /api/ai/tts | `app/ai/router.py#text_to_speech` | ✅ 已完成 | 调用 `minimax_client.text_to_speech`，保存音频并返回 URL |
-| AI | GET /api/ai/fortune | `app/ai/router.py#get_fortune` | ✅ 已完成 | Mock 固定值；真实模式调用 `chat_completion` |
-| AI | `app/ai/service.py` 抽离 | 未抽离 | ⚠️ 非阻塞差异 | 当前业务逻辑仍在 router，不影响接口可用性 |
-| Derivative | GET /api/derivatives | `app/derivative/router.py#list_derivatives` | ✅ 已完成 | 支持 `diary_id` 过滤 |
-| Derivative | POST /api/derivatives/{deriv_id}/share | `app/derivative/router.py#set_share_scope` | ✅ 已完成 | 包含归属校验后更新 `share_scope` |
-| Derivative | `app/derivative/service.py`、`schemas.py` | 未新建 | ⚠️ 非阻塞差异 | 当前逻辑直接在 router，接口可用 |
-| Anniversary | GET/POST/PUT/DELETE /api/anniversaries* | `app/anniversary/router.py` + `app/anniversary/service.py` | ✅ 已完成 | 包含 today + on_this_day 查询 |
 
 ---
 
@@ -1187,26 +1146,6 @@
 **响应 data：** null
 
 **实现状态：** ✅ 已完成
-
----
-
-## 9.1 TASK-D 实现映射（Social + Chat）
-
-> 目标：将 `docs/TASK-D-SOCIAL.md` 中提及接口与当前代码实现逐条对照。
-
-| 模块 | 接口/项 | 当前实现 | 与 TASK-D 一致性 | 备注 |
-|------|---------|----------|------------------|------|
-| Social | GET /api/social/matches | `app/social/router.py#list_matches` | ✅ 已完成 | 仅返回 `accepted` 匹配 |
-| Social | POST /api/social/match-requests | `app/social/router.py#create_match_request` | ✅ 已完成 | 含目标存在与重复请求校验 |
-| Social | POST /api/social/match-requests/{request_id}/respond | `app/social/router.py#respond_match_request` | ✅ 已完成 | 仅被请求方可响应 |
-| Social | GET /api/social/messages/{match_id} | `app/social/router.py#get_messages` | ✅ 已完成 | 支持 `limit` + `before` 游标 |
-| Social | GET /api/social/matches/{match_id}/report | `app/social/router.py#get_match_report` | ✅ 已完成 | 首次生成后缓存到 `matches.match_report` |
-| Social | POST /api/social/buddy | `app/social/router.py#apply_buddy` | ✅ 已完成 | 创建 `match_type=buddy` 记录 |
-| Social | POST /api/social/buddy/{request_id}/respond | `app/social/router.py#respond_buddy` | ✅ 已完成 | 更新 buddy 申请状态 |
-| Social | POST /api/social/messages/{match_id}（发送消息） | 未注册 | ❌ 未完成 | TASK-D 提及需新增，目前仅有消息读取接口 |
-| Chat | POST /api/chat | `app/chat/router.py#ai_chat` | ✅ 已完成 | 保存 user/assistant 两条 `chat_messages` |
-| Chat | GET /api/chat/history | `app/chat/router.py#get_chat_history` | ✅ 已完成 | 返回 `{items, total}` |
-| Chat | `app/chat/service.py` 抽离 | 未抽离 | ⚠️ 非阻塞差异 | 逻辑仍在 router，不影响接口可用性 |
 
 ---
 
@@ -1728,6 +1667,105 @@ AI 根据记忆库生成的分身人格摘要。
 - 写入数据库缓存
 
 **实现状态：** 🔴 待实现
+
+---
+
+## 新增数据模型参考（广场 + 分身）
+
+以下为广场和分身模块需要新建的数据表，供实现参考：
+
+```python
+# app/models/plaza.py
+
+class PlazaPost(Base):
+  __tablename__ = "plaza_posts"
+  id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+  user_id = Column(String, nullable=False)           # 作者 ID
+  type = Column(String, nullable=False)               # buddy / help / share / dating
+  content = Column(Text, nullable=False)              # 正文
+  images = Column(Text, default="[]")                 # JSON: string[]
+  location = Column(String, default="")               # 位置
+  tags = Column(Text, default="[]")                   # JSON: string[]
+  likes = Column(Integer, default=0)                  # 点赞数
+  comments = Column(Integer, default=0)               # 评论数
+  agent_responses = Column(Integer, default=0)        # 分身响应数
+  is_from_agent = Column(Boolean, default=False)      # 是否由分身发布
+  allow_agent_reply = Column(Boolean, default=True)   # 是否允许分身回复
+  school_only = Column(Boolean, default=False)        # 仅本校可见
+  created_at = Column(BigInteger, nullable=False)
+
+class PlazaComment(Base):
+  __tablename__ = "plaza_comments"
+  id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+  post_id = Column(String, nullable=False)            # 帖子 ID
+  user_id = Column(String, nullable=False)            # 评论者 ID
+  content = Column(Text, nullable=False)              # 评论内容
+  is_agent = Column(Boolean, default=False)           # 是否分身评论
+  created_at = Column(BigInteger, nullable=False)
+
+class PostLike(Base):
+  __tablename__ = "post_likes"
+  id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+  post_id = Column(String, nullable=False)
+  user_id = Column(String, nullable=False)
+  created_at = Column(BigInteger, nullable=False)
+  # UNIQUE(post_id, user_id)
+
+
+# app/models/avatar.py
+
+class AvatarMemory(Base):
+  __tablename__ = "avatar_memories"
+  id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+  user_id = Column(String, nullable=False)
+  category = Column(String, nullable=False)           # fact/interest/personality/need/habit/relation
+  content = Column(Text, nullable=False)
+  source = Column(String, default="manual")           # diary/chat/manual/behavior
+  source_ref = Column(String, default="")             # 来源引用 ID
+  confidence = Column(Float, default=1.0)             # 0.0-1.0
+  is_active = Column(Boolean, default=True)
+  is_pinned = Column(Boolean, default=False)
+  need_type = Column(String, nullable=True)           # buddy/dating/help/activity
+  urgency = Column(String, nullable=True)             # active/passive
+  expiry = Column(BigInteger, nullable=True)          # 过期时间戳
+  match_status = Column(String, nullable=True)        # searching/matched/expired
+  tags = Column(Text, default="[]")                   # JSON: string[]
+  created_at = Column(BigInteger, nullable=False)
+  updated_at = Column(BigInteger, nullable=False)
+
+class AvatarStatus(Base):
+  __tablename__ = "avatar_status"
+  id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+  user_id = Column(String, unique=True, nullable=False)
+  is_active = Column(Boolean, default=True)
+  browsed_count = Column(Integer, default=0)
+  matched_count = Column(Integer, default=0)
+  chatting_count = Column(Integer, default=0)
+  last_active_at = Column(BigInteger, default=0)
+  enabled_channels = Column(Text, default='["buddy","help","share","dating"]')
+  enabled_actions = Column(Text, default='["browse","match","comment"]')
+  match_range = Column(Text, default='{"school":"","distanceKm":10}')
+
+class AvatarMatch(Base):
+  __tablename__ = "avatar_matches"
+  id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+  user_id = Column(String, nullable=False)            # 被推荐的用户
+  post_id = Column(String, nullable=False)            # 匹配的帖子
+  match_score = Column(Integer, default=0)            # 0-100
+  match_reasons = Column(Text, default="[]")          # JSON: string[]
+  agent_conversation = Column(Text, default="[]")     # JSON: AgentConversationMessage[]
+  status = Column(String, default="new")              # new/viewed/chatting/dismissed
+  created_at = Column(BigInteger, nullable=False)
+
+class AvatarProfile(Base):
+  __tablename__ = "avatar_profiles"
+  id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+  user_id = Column(String, unique=True, nullable=False)
+  summary = Column(Text, default="")
+  diary_count = Column(Integer, default=0)
+  chat_count = Column(Integer, default=0)
+  generated_at = Column(BigInteger, default=0)
+```
 
 ---
 
