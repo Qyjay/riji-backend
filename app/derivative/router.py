@@ -1,58 +1,32 @@
 """
-衍生内容路由
+衍生内容模块 - 路由层
 prefix="/api/derivatives", tags=["衍生内容"]
 """
-from typing import Optional
-
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.dependencies import get_current_user, get_db
 from app.models.user import User
-from app.models.derivative import DiaryDerivative
-from app.response import success, ApiException, NOT_FOUND
-from app.diary.schemas import DerivativeOut
+from app.response import success
+from app.derivative import service
+from app.derivative.schemas import ShareRequest, DerivativeOut
 
 router = APIRouter(prefix="/derivatives", tags=["衍生内容"])
 
 
-class ShareRequest(BaseModel):
-    scope: str = "private"   # "private" | "friends" | "public"
-
-
-def _deriv_to_out(d: DiaryDerivative) -> dict:
-    return DerivativeOut(
-        id=d.id,
-        diary_id=d.diary_id,
-        type=d.type,
-        content=d.content or "",
-        media_url=d.media_url or "",
-        share_scope=d.share_scope or "private",
-        created_at=d.created_at,
-    ).model_dump(by_alias=True)
-
-
 @router.get("", summary="衍生内容列表（裸数组）")
 def list_derivatives(
-    diary_id: Optional[str] = Query(None, description="按日记 ID 筛选"),
+    diary_id: str = Query(None, description="按日记 ID 筛选"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """获取用户所有衍生内容，支持 diary_id 筛选，返回裸数组"""
-    from app.models.diary import Diary
-    diary_ids_q = db.query(Diary.id).filter(Diary.user_id == current_user.id)
-    if diary_id:
-        diary_ids_q = diary_ids_q.filter(Diary.id == diary_id)
-    diary_ids = [d.id for d in diary_ids_q]
-
-    items = (
-        db.query(DiaryDerivative)
-        .filter(DiaryDerivative.diary_id.in_(diary_ids))
-        .order_by(DiaryDerivative.created_at.desc())
-        .all()
-    )
-    return success([_deriv_to_out(d) for d in items])
+    """
+    获取用户所有衍生内容，支持 diary_id 筛选，返回裸数组
+    """
+    items = service.list_derivatives(db, current_user.id, diary_id)
+    # 将每个 dict 转为 CamelModel，输出 camelCase
+    out_items = [DerivativeOut(**item).model_dump(by_alias=True) for item in items]
+    return success(out_items)
 
 
 @router.post("/{deriv_id}/share", summary="设置分享范围")
@@ -62,16 +36,9 @@ def set_share_scope(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """设置衍生内容的分享范围"""
-    from app.models.diary import Diary
-    d = db.query(DiaryDerivative).filter(DiaryDerivative.id == deriv_id).first()
-    if not d:
-        raise ApiException(code=NOT_FOUND, message="衍生内容不存在", status_code=404)
-    diary = db.query(Diary).filter(Diary.id == d.diary_id, Diary.user_id == current_user.id).first()
-    if not diary:
-        raise ApiException(code=NOT_FOUND, message="衍生内容不存在", status_code=404)
-
-    d.share_scope = body.scope
-    db.commit()
-    db.refresh(d)
-    return success(None)
+    """
+    设置衍生内容的分享范围，返回更新后的对象
+    """
+    result = service.update_share_scope(db, current_user.id, deriv_id, body.scope)
+    out = DerivativeOut(**result)
+    return success(out.model_dump(by_alias=True))

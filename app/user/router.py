@@ -93,6 +93,10 @@ def get_settings(
         auto_bgm=data["auto_bgm"],
         diary_privacy=data["diary_privacy"],
         language=data["language"],
+        chat_material_enabled=data["chat_material_enabled"],
+        chat_silence_threshold=data["chat_silence_threshold"],
+        chat_material_toast=data["chat_material_toast"],
+        chat_min_rounds=data["chat_min_rounds"],
     )
     return success(out.model_dump(by_alias=True))
 
@@ -111,6 +115,10 @@ def update_settings(
         auto_bgm=result["auto_bgm"],
         diary_privacy=result["diary_privacy"],
         language=result["language"],
+        chat_material_enabled=result["chat_material_enabled"],
+        chat_silence_threshold=result["chat_silence_threshold"],
+        chat_material_toast=result["chat_material_toast"],
+        chat_min_rounds=result["chat_min_rounds"],
     )
     return success(out.model_dump(by_alias=True))
 

@@ -499,12 +499,55 @@ class MiniMaxClient:
             prefix = style_prefix.get(style, "")
             return f"{prefix}{text}（{style}风格·Mock）"
 
-        system = (
-            f"你是专业的文字润色师，擅长将普通文字改写成{style}风格。"
-            "直接输出润色后的文字，不要解释，不要前缀。"
+        style_system_prompts = {
+            "文艺": (
+                "你是中文文艺写作编辑。"
+                "请在忠实原文事实的前提下，使用细腻、克制、具画面感的表达进行润色。"
+                "可适度使用比喻与意象，但不得堆砌辞藻，不得改写事实。"
+            ),
+            "幽默": (
+                "你是中文幽默文案编辑。"
+                "请以轻松、俏皮、友好的口吻润色文本，允许自然的包袱和自嘲感。"
+                "幽默要建立在原文事实之上，不得低俗，不得引入攻击性表达。"
+            ),
+            "简洁": (
+                "你是中文简洁风格编辑。"
+                "请压缩冗余表达，保留核心信息，语言清楚直接、节奏明快。"
+                "优先短句，避免空泛修辞，不得遗漏关键事实。"
+            ),
+            "温暖": (
+                "你是中文治愈系写作编辑。"
+                "请用温柔、真诚、带有支持感的语气润色文本，重点传达情绪温度与人与人之间的连接。"
+                "保持自然不过度抒情，不得新增原文不存在的情节。"
+            ),
+        }
+        style_temperature = {
+            "文艺": 0.7,
+            "幽默": 0.75,
+            "简洁": 0.35,
+            "温暖": 0.6,
+        }
+
+        normalized_style = style if style in style_system_prompts else "简洁"
+        system = style_system_prompts[normalized_style]
+
+        user_prompt = (
+            "请润色以下文本。\n"
+            f"目标风格：{normalized_style}\n"
+            "执行约束：\n"
+            "1. 不改变人物、时间、地点、事件与结论。\n"
+            "2. 不新增原文中不存在的信息。\n"
+            "3. 不输出解释，不输出标题，只输出润色后的正文。\n"
+            "4. 保持中文表达自然流畅。\n\n"
+            f"原文：\n{text}"
         )
-        messages = [{"role": "user", "content": f"请将以下文字润色为{style}风格：\n\n{text}"}]
-        return await self.chat_completion(messages, system_prompt=system, temperature=0.9)
+
+        messages = [{"role": "user", "content": user_prompt}]
+        return await self.chat_completion(
+            messages,
+            system_prompt=system,
+            temperature=style_temperature[normalized_style],
+        )
 
     async def generate_diary(
         self,
@@ -512,12 +555,34 @@ class MiniMaxClient:
         weather: str = "",
         special_date: str = "",
         user_style: str = "",
+        daily_emotion_summary: Optional[dict] = None,
     ) -> dict:
         """
-        根据素材生成日记，返回 {title, content, emotion_summary}
+        根据素材生成日记，返回 {title, content, emotion_summary, ai_tags}
 
         Mock 模式：返回固定日记数据
         """
+        def _calc_distribution(items: list, dominant_label: str) -> dict:
+            """根据趋势条目计算各情绪占比，确保 distribution 总和为 1。"""
+            counts = {}
+            for item in items:
+                label = str(item.get("label") or "").strip()
+                if not label:
+                    continue
+                counts[label] = counts.get(label, 0) + 1
+
+            total = sum(counts.values())
+            if total <= 0:
+                fallback = dominant_label or "平静"
+                return {fallback: 1.0}
+
+            distribution = {k: round(v / total, 4) for k, v in counts.items()}
+            delta = round(1.0 - sum(distribution.values()), 4)
+            if delta != 0:
+                max_key = max(distribution, key=distribution.get)
+                distribution[max_key] = round(distribution[max_key] + delta, 4)
+            return distribution
+
         if self.mock:
             await asyncio.sleep(0.5)
             return {
@@ -525,30 +590,85 @@ class MiniMaxClient:
                 "content": MOCK_DIARY_EXPANSION,
                 "emotion_summary": {
                     "dominant": "平静",
-                    "distribution": {"开心": 0.4, "平静": 0.4, "感动": 0.2},
+                    "distribution": {"平静": 1.0},
                 },
+                "ai_tags": ["日常记录", "校园生活", "今日心情"],
             }
 
-        style_hint = f"用户偏好{user_style}风格。" if user_style else ""
-        weather_hint = f"今天天气：{weather}。" if weather else ""
-        special_hint = f"今天是特殊的日子：{special_date}。" if special_date else ""
+        style_hint = user_style or "自然、真诚"
+        weather_hint = weather.strip()
+        special_hint = special_date.strip()
+
+        dominant = ""
+        trend_items = []
+        if isinstance(daily_emotion_summary, dict):
+            dominant = (daily_emotion_summary.get("dominant") or "").strip()
+            trend_items = daily_emotion_summary.get("trend", []) or []
+        distribution = _calc_distribution(trend_items, dominant)
+
+        trend_lines = []
+        for item in trend_items[:24]:
+            try:
+                hour = int(item.get("hour", 0))
+            except Exception:
+                hour = 0
+            label = (item.get("label") or "").strip() or "平静"
+            score = item.get("score", 50)
+            trend_lines.append(f"- {hour:02d}:00 {label}（{score}）")
+        trend_text = "\n".join(trend_lines) if trend_lines else "- 无有效趋势数据"
+
+        weather_context = weather_hint if weather_hint else "未提供天气信息（严禁臆造具体天气）"
+        special_context = special_hint if special_hint else "无"
+        dominant_context = dominant if dominant else "未识别"
 
         system = (
-            "你是日记写作助手，帮助用户将零散的生活素材整理成有温度的日记。\n"
-            f"{style_hint}{weather_hint}{special_hint}\n"
-            "请返回如下 JSON（无其他文字）：\n"
-            '{"title": "日记标题", "content": "正文（300字以上）", '
-            '"emotion_summary": {"dominant": "主要情绪", "distribution": {"情绪": 0.5}}}'
+            "你是“日迹”应用的日记整理助手，负责把用户当天素材整理成一篇完整、真实、连贯的中文日记。\n\n"
+            "【写作目标】\n"
+            "1. 严格基于素材事实写作，所有关键事件必须在素材中有依据。\n"
+            "2. 将素材按时间线自然串联，形成有起承转合的完整叙事。\n"
+            "3. 将当日情绪融入叙事过程，体现心境变化与内在感受。\n"
+            "4. 若提供了天气信息，必须在正文中自然写入天气。\n\n"
+            "【硬性约束】\n"
+            "1. 不得逐条拼接素材，不得写成清单、流水账、分点罗列。\n"
+            "2. 不得虚构素材中不存在的人、事、地点、时间、结论。\n"
+            "3. 不得遗漏核心素材；每条素材都要被合理吸收进叙事。\n"
+            "4. 语言要自然，有画面感，但保持事实忠实。\n"
+            "5. 正文不少于 300 字。\n\n"
+            "【输出格式】\n"
+            "仅输出合法 JSON，不要输出 markdown 代码块，不要输出任何解释文字。\n"
+            "JSON 结构如下：\n"
+            '{"title": "日记标题（<=18字）", "content": "完整正文", "emotion_summary": {"dominant": "主要情绪", "distribution": {"开心": 0.6, "平静": 0.4}}, "ai_tags": ["标签1", "标签2", "标签3"]}'
         )
-        messages = [{"role": "user", "content": f"请根据以下素材生成今天的日记：\n\n{materials_text}"}]
+
+        user_prompt = (
+            "请根据以下上下文生成今日日记：\n\n"
+            f"- 用户偏好风格：{style_hint}\n"
+            f"- 天气信息：{weather_context}\n"
+            f"- 特殊日期：{special_context}\n"
+            f"- 当日主情绪：{dominant_context}\n"
+            "- 当日情绪趋势：\n"
+            f"{trend_text}\n\n"
+            "- 当日素材（已按时间排序）：\n"
+            f"{materials_text}"
+        )
+        messages = [{"role": "user", "content": user_prompt}]
         try:
             resp = await self.chat_completion(messages, system_prompt=system, temperature=0.85)
-            return json.loads(resp.strip())
+            raw = resp.strip()
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                import re
+                match = re.search(r"\{[\s\S]*\}", raw)
+                if match:
+                    return json.loads(match.group(0))
+                raise
         except Exception:
             return {
                 "title": "今日记录",
                 "content": materials_text,
-                "emotion_summary": {"dominant": "平静", "distribution": {}},
+                "emotion_summary": {"dominant": dominant or "平静", "distribution": distribution},
+                "ai_tags": ["日常记录", "生活片段", "今日随记"],
             }
 
     async def extract_info(self, diary_content: str) -> dict:
@@ -570,16 +690,51 @@ class MiniMaxClient:
             }
 
         system = (
-            "你是信息提取助手。从日记中提取关键信息，"
-            "严格返回如下 JSON（无其他文字）：\n"
-            '{"anniversaries": [{"title": "事件名", "date": "MM-DD", "related_person": ""}], '
+            "你是日记信息提取助手，请从文本中提取结构化信息。\n"
+            "重点识别：纪念日、周年、交往/相识天数、生日、首次事件等可纪念节点。\n\n"
+            "【提取规则】\n"
+            "1. anniversaries: 提取有纪念意义的事件，尤其包含“纪念日/周年/满X年/第X年/生日/首次”等表述。\n"
+            "2. 若出现相对日期（如“今天是一周年”），可结合文意推断为可保存的简写日期；无法确定时可保留原文短语，但 date 字段不能为空。\n"
+            "3. persons: 提取出现的人名与关系（室友/同学/家人/恋人/老师等）。\n"
+            "4. preferences: 提取稳定偏好（食物、活动、地点、兴趣），去重后输出。\n"
+            "5. 严禁编造；无信息则返回空数组。\n\n"
+            "【输出要求】\n"
+            "仅输出合法 JSON，不要输出解释或 markdown。\n"
+            "字段结构固定为：\n"
+            '{"anniversaries": [{"title": "事件名", "date": "MM-DD或可保存日期", "related_person": "相关人物"}], '
             '"persons": [{"name": "姓名", "relation": "关系"}], '
             '"preferences": ["偏好1", "偏好2"]}'
         )
         messages = [{"role": "user", "content": f"从以下日记中提取信息：\n\n{diary_content}"}]
         try:
             resp = await self.chat_completion(messages, system_prompt=system, temperature=0.3)
-            return json.loads(resp.strip())
+            raw = resp.strip()
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                import re
+                # 兼容模型返回 ```json ... ``` 或前后有解释文本
+                match = re.search(r"\{[\s\S]*\}", raw)
+                if not match:
+                    raise
+                data = json.loads(match.group(0))
+
+            anniversaries = data.get("anniversaries", []) if isinstance(data, dict) else []
+            persons = data.get("persons", []) if isinstance(data, dict) else []
+            preferences = data.get("preferences", []) if isinstance(data, dict) else []
+
+            if not isinstance(anniversaries, list):
+                anniversaries = []
+            if not isinstance(persons, list):
+                persons = []
+            if not isinstance(preferences, list):
+                preferences = []
+
+            return {
+                "anniversaries": anniversaries,
+                "persons": persons,
+                "preferences": preferences,
+            }
         except Exception:
             return {"anniversaries": [], "persons": [], "preferences": []}
 
@@ -650,6 +805,51 @@ class MiniMaxClient:
             }
         ]
         return await self.chat_completion(messages, system_prompt=system, temperature=0.8)
+
+    async def summarize_chat_session(self, messages: list) -> dict:
+        """将一段对话概括为素材标题 + 摘要 + 情绪 + 标签"""
+        if self.mock:
+            await asyncio.sleep(0.3)
+            return {
+                "title": "和 AI 的一段对话",
+                "summary": "用户和 AI 聊了一段有趣的对话，讨论了日常生活中的各种话题。",
+                "mood": "平静",
+                "mood_emoji": "😌",
+                "tags": ["日常", "对话"]
+            }
+
+        conversation = "\n".join([
+            f"{'用户' if m['role']=='user' else 'AI'}: {m['content']}"
+            for m in messages
+        ])
+
+        system_prompt = """你是一个对话分析助手。请分析以下对话内容，提取结构化信息。
+必须返回严格的 JSON 格式，不要包含任何其他文字：
+{
+  "title": "简短标题（10字以内，概括对话主题）",
+  "summary": "2~3句话的摘要，描述对话的主要内容",
+  "mood": "情绪标签（开心/难过/平静/吐槽/焦虑/兴奋/感动/无聊/困惑/释然）",
+  "mood_emoji": "对应的emoji（一个）",
+  "tags": ["话题标签1", "话题标签2"]
+}"""
+
+        user_prompt = f"对话内容：\n{conversation}"
+
+        result_text = await self.chat_completion(
+            [{"role": "user", "content": user_prompt}],
+            system_prompt=system_prompt
+        )
+
+        try:
+            return json.loads(result_text)
+        except json.JSONDecodeError:
+            return {
+                "title": "对话记录",
+                "summary": conversation[:200],
+                "mood": "平静",
+                "mood_emoji": "😐",
+                "tags": ["对话"]
+            }
 
 
 # ==================== 全局单例 ====================

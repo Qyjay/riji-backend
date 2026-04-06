@@ -112,6 +112,10 @@ def get_settings(db: Session, user_id: str) -> dict:
             "auto_bgm": False,
             "diary_privacy": "private",
             "language": "zh-CN",
+            "chat_material_enabled": True,
+            "chat_silence_threshold": 30,
+            "chat_material_toast": True,
+            "chat_min_rounds": 3,
         }
     return {
         "theme": settings.theme or "light",
@@ -119,6 +123,10 @@ def get_settings(db: Session, user_id: str) -> dict:
         "auto_bgm": settings.auto_bgm if settings.auto_bgm is not None else False,
         "diary_privacy": settings.diary_privacy or "private",
         "language": settings.language or "zh-CN",
+        "chat_material_enabled": settings.chat_material_enabled if settings.chat_material_enabled is not None else True,
+        "chat_silence_threshold": settings.chat_silence_threshold if settings.chat_silence_threshold is not None else 30,
+        "chat_material_toast": settings.chat_material_toast if settings.chat_material_toast is not None else True,
+        "chat_min_rounds": settings.chat_min_rounds if settings.chat_min_rounds is not None else 3,
     }
 
 
@@ -143,6 +151,14 @@ def update_settings(db: Session, user_id: str, data: dict) -> dict:
         settings.diary_privacy = data["diary_privacy"]
     if "language" in data and data["language"] is not None:
         settings.language = data["language"]
+    if "chat_material_enabled" in data and data["chat_material_enabled"] is not None:
+        settings.chat_material_enabled = data["chat_material_enabled"]
+    if "chat_silence_threshold" in data and data["chat_silence_threshold"] is not None:
+        settings.chat_silence_threshold = data["chat_silence_threshold"]
+    if "chat_material_toast" in data and data["chat_material_toast"] is not None:
+        settings.chat_material_toast = data["chat_material_toast"]
+    if "chat_min_rounds" in data and data["chat_min_rounds"] is not None:
+        settings.chat_min_rounds = data["chat_min_rounds"]
 
     db.commit()
     db.refresh(settings)

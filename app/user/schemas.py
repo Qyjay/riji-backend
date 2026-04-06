@@ -23,6 +23,10 @@ class UpdateSettingsRequest(BaseModel):
     auto_bgm: Optional[bool] = None
     diary_privacy: Optional[str] = None
     language: Optional[str] = None
+    chat_material_enabled: Optional[bool] = None
+    chat_silence_threshold: Optional[int] = None
+    chat_material_toast: Optional[bool] = None
+    chat_min_rounds: Optional[int] = None
 
 
 class UserProfileOut(CamelModel):
@@ -65,6 +69,10 @@ class SettingsOut(CamelModel):
     auto_bgm: bool = Field(alias="autoBGM", default=False)
     diary_privacy: str
     language: str
+    chat_material_enabled: bool = True
+    chat_silence_threshold: int = 30
+    chat_material_toast: bool = True
+    chat_min_rounds: int = 3
 
     model_config = {
         "populate_by_name": True,

@@ -11,3 +11,5 @@ build/
 .DS_Store
 *.sqlite
 *.db
+.vscode
+.pytest_cache

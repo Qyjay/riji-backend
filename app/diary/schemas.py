@@ -3,7 +3,7 @@
 """
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from app.serializers import CamelModel
 
 
@@ -16,6 +16,7 @@ class GenerateDiaryRequest(BaseModel):
     """AI 生成日记请求"""
     date: str
     weather: Optional[str] = ""
+    allow_fallback: bool = False
 
 
 class DerivativeRequest(BaseModel):
@@ -26,6 +27,20 @@ class DerivativeRequest(BaseModel):
 class ShareRequest(BaseModel):
     """设置分享范围"""
     scope: str = "private"      # "private" | "friends" | "public"
+
+
+class DiarySearchParams(BaseModel):
+    """日记搜索参数（多条件组合，AND 关系）"""
+    model_config = ConfigDict(populate_by_name=True)
+
+    q: Optional[str] = None
+    emotion: Optional[str] = None
+    tag: Optional[str] = None
+    weather: Optional[str] = None
+    from_date: Optional[str] = Field(default=None, alias="from")
+    to_date: Optional[str] = Field(default=None, alias="to")
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=20, ge=1, le=100)
 
 
 class DiaryOut(CamelModel):

@@ -21,6 +21,12 @@ from app.auth.service import hash_password, verify_password, create_token
 router = APIRouter(prefix="/auth", tags=["认证"])
 
 
+@router.get("/health", summary="健康检查")
+def health_check():
+    """前端「测试连接」按钮调用此接口，用于验证后端是否可达"""
+    return success(data={"status": "ok"}, message="日迹后端运行中")
+
+
 def _build_auth_response(user: User, token: str) -> dict:
     user_info = UserInfo(
         id=user.id,
