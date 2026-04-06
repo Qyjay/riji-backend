@@ -2,6 +2,7 @@
 日记模块测试
 """
 import pytest
+from app.diary.service import DIARY_MAX_EDITS
 from tests.conftest import create_test_user, get_auth_header
 
 
@@ -37,7 +38,7 @@ def test_generate_diary(client):
     assert "createdAt" in d
     assert d["status"] == "draft"
     assert d["editCount"] == 0
-    assert d["maxEdits"] == 3
+    assert d["maxEdits"] == DIARY_MAX_EDITS
 
 
 def test_list_diaries_pagination(client):
@@ -91,14 +92,22 @@ def test_update_diary_exceeds_max_edits(client):
     gen_resp = client.post("/api/diaries/generate", json={"date": "2026-03-25"}, headers=headers)
     diary_id = gen_resp.json()["data"]["id"]
 
-    # 修改 3 次（max_edits=3）
-    for i in range(3):
-        client.put(f"/api/diaries/{diary_id}", json={"content": f"修改 {i+1}"}, headers=headers)
+    # 修改 max_edits 次
+    for i in range(DIARY_MAX_EDITS):
+        resp = client.put(
+            f"/api/diaries/{diary_id}",
+            json={"content": f"修改 {i+1}"},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["code"] == 0
 
     # 第 4 次应失败
     resp = client.put(f"/api/diaries/{diary_id}", json={"content": "第四次修改"}, headers=headers)
-    assert resp.status_code in [200, 400]
-    assert resp.json()["code"] != 0
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["code"] == 40102
+    assert "上限" in body["message"]
 
 
 def test_today_summary_before_diary(client):
