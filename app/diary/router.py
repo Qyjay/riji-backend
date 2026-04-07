@@ -31,7 +31,13 @@ async def generate_diary(
     db: Session = Depends(get_db),
 ):
     """从当天素材 AI 生成标题+正文+情绪汇总，自动创建日记记录"""
-    result = await service.generate_diary(db, current_user.id, body.date, body.weather or "")
+    result = await service.generate_diary(
+        db,
+        current_user.id,
+        body.date,
+        body.weather or "",
+        body.allow_fallback,
+    )
     return success(result)
 
 
@@ -46,6 +52,17 @@ def list_diaries(
     """分页获取当前用户的日记列表，返回 {items, total}"""
     effective_page_size = pageSize if pageSize is not None else page_size
     result = service.list_diaries(db, current_user.id, page, effective_page_size)
+    return success(result)
+
+
+@router.get("/search", summary="搜索日记")
+def search_diaries_endpoint(
+    params: schemas.DiarySearchParams = Depends(),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """多维度组合搜索：关键词/情绪/标签/天气/日期范围。"""
+    result = service.search_diaries(db, current_user.id, params)
     return success(result)
 
 

@@ -1,28 +1,34 @@
-"""
-AI 相关 Pydantic 模型（请求/响应 Schema）
-"""
+# app/ai/schemas.py
 from typing import Optional
 from pydantic import BaseModel
+from app.serializers import CamelModel   # 注意导入 CamelModel
+
+
+class TtsRequest(BaseModel):
+    text: str
+    voice: str = ""   # 默认空字符串，service 会处理为 female-shaonv
+
+
+class FortuneOut(CamelModel):
+    """运势响应（自动转 camelCase）"""
+    overall: int
+    study: int
+    social: int
+    health: int
+    tip: str
+    lucky_color: str
+    lucky_number: int
 
 
 class ChatRequest(BaseModel):
-    """AI 对话请求"""
     message: str
-    history: list = []  # [{"role": "user"/"assistant", "content": "..."}]
+    history: list = []
 
 
 class GenerateDiaryRequest(BaseModel):
-    """AI 扩写日记请求"""
-    draft: str                          # 日记草稿
-    emotion: Optional[str] = ""        # 情绪标签
-    style: Optional[str] = "日记式"    # 写作风格
-
-
-class FortuneResponse(BaseModel):
-    """AI 运势响应"""
-    fortune: str
-    score: int
-    advice: str
+    draft: str
+    emotion: Optional[str] = ""
+    style: Optional[str] = "日记式"
 
 
 class ComicRequest(BaseModel):

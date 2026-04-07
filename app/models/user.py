@@ -58,6 +58,12 @@ class UserSettings(Base):
     diary_privacy = Column(String, default="private")
     language = Column(String, default="zh-CN")
 
+    # 对话自动转素材相关设置
+    chat_material_enabled = Column(Boolean, default=True)      # 对话自动转素材开关
+    chat_silence_threshold = Column(Integer, default=30)        # 静默阈值（分钟）
+    chat_material_toast = Column(Boolean, default=True)         # toast 提示开关
+    chat_min_rounds = Column(Integer, default=3)                # 最小轮数（user 消息数）
+
 
 class UserAchievement(Base):
     """用户成就表"""

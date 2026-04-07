@@ -27,6 +27,8 @@ app/
 ├── anniversary/      # 纪念日管理
 ├── derivative/       # 衍生内容（漫画/小说/分享卡）
 ├── social/           # 社交匹配 + 搭子
+├── plaza/            # 🏫 广场帖子（找搭子/求助/分享/恋爱）
+├── avatar/           # 🤖 AI 分身（记忆库/状态/推荐匹配/侧写）
 ├── chat/             # AI 对话（SSE 流式）
 ├── study/            # 学习（番茄钟/Todo）
 ├── ai/               # MiniMax AI 客户端
@@ -41,8 +43,11 @@ app/
 - UserProfile（AI画像）
 - DiaryDerivative（衍生内容）
 - ChatMessage（AI对话历史）
+- ChatSession（对话段 — 一段连续对话的封装，自动转 chat 素材）
 - Match / SocialMessage（社交）
 - Pomodoro / Todo（学习）
+- PlazaPost / PlazaComment / PostLike（广场帖子、评论、点赞）
+- AvatarMemory / AvatarStatus / AvatarMatch / AvatarProfile（AI 分身记忆、状态、推荐匹配、侧写）
 
 ## 规范
 - 所有时间戳用毫秒 BigInteger

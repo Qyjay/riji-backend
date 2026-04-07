@@ -2,8 +2,6 @@
 素材管理路由
 prefix="/api/materials", tags=["素材管理"]
 """
-import time
-from datetime import date as dt_date
 from typing import Optional
 from uuid import uuid4
 
@@ -46,8 +44,6 @@ async def create_material(
 ):
     """创建一条素材记录，自动触发 AI 情绪提取"""
     data = body.model_dump()
-    if not data.get("date"):
-        data["date"] = dt_date.today().strftime("%Y-%m-%d")
     if not data.get("emotion"):
         data["emotion"] = {"label": "平静", "score": 0.5, "emoji": "😐"}
 

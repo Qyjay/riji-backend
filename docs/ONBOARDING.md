@@ -127,7 +127,7 @@ riji-backend/
 │   │   ├── material.py           # raw_materials 表
 │   │   ├── anniversary.py        # anniversaries 表
 │   │   ├── derivative.py         # diary_derivatives 表
-│   │   ├── chat.py               # chat_messages 表
+│   │   ├── chat.py               # chat_messages 表 + chat_sessions 表（对话段管理）
 │   │   ├── social.py             # matches + social_messages 表
 │   │   └── study.py              # pomodoros + todos 表（已废弃）
 │   │
@@ -144,7 +144,9 @@ riji-backend/
 │   ├── derivative/               # 🎨 衍生内容 → 队友 C
 │   ├── anniversary/              # 📅 纪念日 → 队友 C
 │   ├── social/                   # 🤝 社交模块 → 队友 D
-│   ├── chat/                     # 💬 对话模块 → 队友 D
+│   ├── chat/                     # 💬 对话模块（含对话段管理 + 自动转素材）
+│   ├── plaza/                    # 🏫 广场模块 → 队友 E 🆕
+│   ├── avatar/                   # 🤖 AI分身模块 → 队友 E 🆕
 │   └── study/                    # 📚 学习模块（已废弃）
 │
 ├── tests/                        # 测试
@@ -200,16 +202,26 @@ cp .env.example .env
 ### 4. 初始化数据库 + 测试数据
 
 ```bash
+# 基础测试数据（3 个用户 + 日记 + 番茄钟 + 待办）
 python scripts/seed.py
+
+# 广场+分身模块测试数据（10 个用户 + 15 帖子 + 评论/点赞/记忆/推荐/侧写全模块）
+python scripts/seed_plaza_avatar.py
 ```
 
-会创建 3 个测试账号：
+会创建测试账号：
+
+**基础账号（密码 `123456`）：**
 
 | 用户名 | 密码 | 学校 |
 |--------|------|------|
 | kylin | 123456 | 南开大学 |
 | xiaolu | 123456 | 天津大学 |
 | test | 123456 | 测试大学 |
+
+**广场+分身测试账号（密码 `test123456`）：**
+
+linxiaohan（南开）、zhoucheng（天大）、summer_z（北大）、wangfuai（清华）、liuyang_c（复旦）、chenmo（上交）、yuxin_r（浙大）、leomao（南大）、zhouqian（中大）、hanxiao（武大）
 
 ### 5. 启动服务
 
@@ -360,6 +372,7 @@ git checkout -b feat/user           # 队友 A
 git checkout -b feat/diary-core     # 队友 B
 git checkout -b feat/diary-ai       # 队友 C
 git checkout -b feat/social         # 队友 D
+git checkout -b feat/plaza-avatar   # 队友 E
 ```
 
 ### 日常工作流
