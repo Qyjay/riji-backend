@@ -7,6 +7,8 @@
 """
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
+from time import time
+from uuid import uuid4
 
 from app.chat import service
 from app.chat.schemas import ChatHistoryOut, ChatRequest
