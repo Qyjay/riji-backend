@@ -1,0 +1,297 @@
+"""
+社交模块测试
+"""
+import pytest
+from tests.conftest import create_test_user, get_auth_header
+
+
+def test_list_matches_bare_array(client):
+    """GET /social/matches 返回裸数组"""
+    user_data = create_test_user(client)
+    headers = get_auth_header(user_data["token"])
+
+    resp = client.get("/api/social/matches", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["code"] == 0
+    assert isinstance(data["data"], list)
+
+
+def test_create_match_request(client):
+    user1_data = create_test_user(client, username="user1social")
+    user2_data = create_test_user(client, username="user2social")
+    headers1 = get_auth_header(user1_data["token"])
+
+    target_id = user2_data["user"]["id"]
+    resp = client.post("/api/social/match-requests", json={
+        "toUid": target_id,
+    }, headers=headers1)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["code"] == 0
+    req = data["data"]
+    assert "fromUid" in req
+    assert "toUid" in req
+    assert req["status"] == "pending"
+
+
+def test_respond_match_request(client):
+    user1_data = create_test_user(client, username="matchreq1")
+    user2_data = create_test_user(client, username="matchreq2")
+    headers1 = get_auth_header(user1_data["token"])
+    headers2 = get_auth_header(user2_data["token"])
+
+    # user1 发请求给 user2
+    target_id = user2_data["user"]["id"]
+    req_resp = client.post("/api/social/match-requests", json={"toUid": target_id}, headers=headers1)
+    request_id = req_resp.json()["data"]["id"]
+
+    # user2 接受（accept: bool，不是 action: string）
+    resp = client.post(f"/api/social/match-requests/{request_id}/respond", json={
+        "accept": True
+    }, headers=headers2)
+    assert resp.status_code == 200
+    assert resp.json()["code"] == 0
+    assert resp.json()["data"] is None
+
+
+def test_buddy_request_uses_target_user_id(client):
+    """POST /social/buddy 前端发的是 target_user_id"""
+    user1_data = create_test_user(client, username="buddy1")
+    user2_data = create_test_user(client, username="buddy2")
+    headers1 = get_auth_header(user1_data["token"])
+
+    target_id = user2_data["user"]["id"]
+    resp = client.post("/api/social/buddy", json={
+        "target_user_id": target_id,
+    }, headers=headers1)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["code"] == 0
+    buddy = data["data"]
+    assert "fromUid" in buddy
+    assert "toUid" in buddy
+    assert buddy["status"] == "pending"
+
+
+@pytest.mark.parametrize("accept, expected_status", [(True, "accepted"), (False, "rejected")])
+def test_buddy_request_full_flow(client, accept, expected_status):
+    """搭子申请完整链路：申请后可被接受或拒绝"""
+    user1_data = create_test_user(client, username=f"buddyflowa{int(accept)}")
+    user2_data = create_test_user(client, username=f"buddyflowb{int(accept)}")
+    headers1 = get_auth_header(user1_data["token"])
+    headers2 = get_auth_header(user2_data["token"])
+
+    target_id = user2_data["user"]["id"]
+    apply_resp = client.post(
+        "/api/social/buddy",
+        json={"target_user_id": target_id, "reason": "一起运动打卡"},
+        headers=headers1,
+    )
+    assert apply_resp.status_code == 200
+    apply_data = apply_resp.json()
+    assert apply_data["code"] == 0
+    request_id = apply_data["data"]["id"]
+    assert apply_data["data"]["status"] == "pending"
+
+    respond_resp = client.post(
+        f"/api/social/buddy/{request_id}/respond",
+        json={"accept": accept},
+        headers=headers2,
+    )
+    assert respond_resp.status_code == 200
+    respond_data = respond_resp.json()
+    assert respond_data["code"] == 0
+    assert respond_data["data"] is None
+
+    # 同步复用匹配列表接口验证 accepted 分支能进入已匹配列表
+    matches_resp = client.get("/api/social/matches", headers=headers1)
+    assert matches_resp.status_code == 200
+    matches_data = matches_resp.json()
+    assert matches_data["code"] == 0
+    if accept:
+        assert any(item["id"] == request_id for item in matches_data["data"])
+    else:
+        assert all(item["id"] != request_id for item in matches_data["data"])
+
+
+def test_messages_bare_array(client):
+    """GET /social/messages/{matchId} 返回裸数组"""
+    user1_data = create_test_user(client, username="msg1")
+    user2_data = create_test_user(client, username="msg2")
+    headers1 = get_auth_header(user1_data["token"])
+    headers2 = get_auth_header(user2_data["token"])
+
+    # 建立匹配
+    target_id = user2_data["user"]["id"]
+    req_resp = client.post("/api/social/match-requests", json={"toUid": target_id}, headers=headers1)
+    request_id = req_resp.json()["data"]["id"]
+    client.post(f"/api/social/match-requests/{request_id}/respond", json={"accept": True}, headers=headers2)
+
+    # 注意：匹配 ID 和请求 ID 是同一个
+    resp = client.get(f"/api/social/messages/{request_id}", headers=headers1)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["code"] == 0
+    assert isinstance(data["data"], list)
+
+
+def test_send_message_after_match_accepted(client):
+    """POST /social/messages/{matchId} 在匹配通过后可发送消息"""
+    user1_data = create_test_user(client, username="sendmsg1")
+    user2_data = create_test_user(client, username="sendmsg2")
+    headers1 = get_auth_header(user1_data["token"])
+    headers2 = get_auth_header(user2_data["token"])
+
+    target_id = user2_data["user"]["id"]
+    req_resp = client.post("/api/social/match-requests", json={"toUid": target_id}, headers=headers1)
+    request_id = req_resp.json()["data"]["id"]
+    client.post(f"/api/social/match-requests/{request_id}/respond", json={"accept": True}, headers=headers2)
+
+    resp = client.post(
+        f"/api/social/messages/{request_id}",
+        json={"content": "你好，很高兴认识你"},
+        headers=headers1,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["code"] == 0
+    message = data["data"]
+    assert message["matchId"] == request_id
+    assert message["fromUid"] == user1_data["user"]["id"]
+    assert message["content"] == "你好，很高兴认识你"
+
+
+def test_send_message_requires_accepted_match(client):
+    """POST /social/messages/{matchId} 未接受匹配时禁止发送消息"""
+    user1_data = create_test_user(client, username="sendmsgpending1")
+    user2_data = create_test_user(client, username="sendmsgpending2")
+    headers1 = get_auth_header(user1_data["token"])
+
+    target_id = user2_data["user"]["id"]
+    req_resp = client.post("/api/social/match-requests", json={"toUid": target_id}, headers=headers1)
+    request_id = req_resp.json()["data"]["id"]
+
+    resp = client.post(
+        f"/api/social/messages/{request_id}",
+        json={"content": "现在可以发吗"},
+        headers=headers1,
+    )
+    assert resp.status_code == 400
+    data = resp.json()
+    assert data["code"] == 40102
+    assert data["message"] == "匹配未通过，暂时不能发送消息"
+
+
+def test_send_message_forbidden_for_non_member(client):
+    """POST /social/messages/{matchId} 非匹配双方不能发送消息"""
+    user1_data = create_test_user(client, username="sendmsga1")
+    user2_data = create_test_user(client, username="sendmsga2")
+    user3_data = create_test_user(client, username="sendmsga3")
+    headers1 = get_auth_header(user1_data["token"])
+    headers2 = get_auth_header(user2_data["token"])
+    headers3 = get_auth_header(user3_data["token"])
+
+    target_id = user2_data["user"]["id"]
+    req_resp = client.post("/api/social/match-requests", json={"toUid": target_id}, headers=headers1)
+    request_id = req_resp.json()["data"]["id"]
+    client.post(f"/api/social/match-requests/{request_id}/respond", json={"accept": True}, headers=headers2)
+
+    resp = client.post(
+        f"/api/social/messages/{request_id}",
+        json={"content": "我是第三方用户"},
+        headers=headers3,
+    )
+    assert resp.status_code == 404
+    data = resp.json()
+    assert data["code"] == 40202
+    assert data["message"] == "匹配不存在"
+
+
+def test_create_match_request_rejects_duplicate(client):
+    """POST /social/match-requests 重复请求会被拦截"""
+    user1_data = create_test_user(client, username="dupsocial1")
+    user2_data = create_test_user(client, username="dupsocial2")
+    headers1 = get_auth_header(user1_data["token"])
+
+    target_id = user2_data["user"]["id"]
+    first_resp = client.post("/api/social/match-requests", json={"toUid": target_id}, headers=headers1)
+    assert first_resp.status_code == 200
+
+    resp = client.post("/api/social/match-requests", json={"toUid": target_id}, headers=headers1)
+    assert resp.status_code == 400
+    data = resp.json()
+    assert data["code"] == 40102
+    assert data["message"] == "已存在匹配请求"
+
+
+def test_create_match_request_rejects_missing_user(client):
+    """POST /social/match-requests 不允许向不存在用户发送请求"""
+    user_data = create_test_user(client, username="missingsocial")
+    headers = get_auth_header(user_data["token"])
+
+    resp = client.post("/api/social/match-requests", json={"toUid": "missing-user-id"}, headers=headers)
+    assert resp.status_code == 404
+    data = resp.json()
+    assert data["code"] == 40202
+    assert data["message"] == "用户不存在"
+
+
+def test_social_full_flow_with_messages_and_match_report(client):
+    """社交完整链路：匹配、接受、发消息、查消息、查匹配报告"""
+    user1_data = create_test_user(client, username="socialflow1")
+    user2_data = create_test_user(client, username="socialflow2")
+    headers1 = get_auth_header(user1_data["token"])
+    headers2 = get_auth_header(user2_data["token"])
+
+    # 1. 发送匹配请求
+    target_id = user2_data["user"]["id"]
+    req_resp = client.post("/api/social/match-requests", json={"toUid": target_id}, headers=headers1)
+    assert req_resp.status_code == 200
+    request_data = req_resp.json()
+    assert request_data["code"] == 0
+    request_id = request_data["data"]["id"]
+
+    # 2. 对方接受请求
+    respond_resp = client.post(
+        f"/api/social/match-requests/{request_id}/respond",
+        json={"accept": True},
+        headers=headers2,
+    )
+    assert respond_resp.status_code == 200
+    assert respond_resp.json()["code"] == 0
+
+    # 3. 发送消息
+    send_resp = client.post(
+        f"/api/social/messages/{request_id}",
+        json={"content": "你好，我们可以一起自习吗？"},
+        headers=headers1,
+    )
+    assert send_resp.status_code == 200
+    send_data = send_resp.json()
+    assert send_data["code"] == 0
+    sent_message = send_data["data"]
+    assert sent_message["matchId"] == request_id
+    assert sent_message["fromUid"] == user1_data["user"]["id"]
+    assert sent_message["content"] == "你好，我们可以一起自习吗？"
+
+    # 4. 获取消息列表
+    messages_resp = client.get(f"/api/social/messages/{request_id}", headers=headers2)
+    assert messages_resp.status_code == 200
+    messages_data = messages_resp.json()
+    assert messages_data["code"] == 0
+    assert isinstance(messages_data["data"], list)
+    assert len(messages_data["data"]) == 1
+    assert messages_data["data"][0]["id"] == sent_message["id"]
+    assert messages_data["data"][0]["content"] == "你好，我们可以一起自习吗？"
+
+    # 5. 获取匹配报告（Mock 模式）
+    report_resp = client.get(f"/api/social/matches/{request_id}/report", headers=headers1)
+    assert report_resp.status_code == 200
+    report_data = report_resp.json()
+    assert report_data["code"] == 0
+    report = report_data["data"]
+    assert report["compatibility"] == 85
+    assert isinstance(report["commonPoints"], list)
+    assert isinstance(report["differences"], list)
+    assert report["analysis"]
