@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.env
+data.db
+uploads/
+venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.DS_Store
+*.sqlite
+*.db
+.vscode
+.pytest_cache
+.claude
