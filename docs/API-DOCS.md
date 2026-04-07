@@ -330,7 +330,7 @@
 |------|------|------|------|
 | type | string | ✅ | "image" / "voice" / "text" / "chat"（自动生成，前端无需手动传） |
 | content | string | ❌ | 文字内容 |
-| media_url | string | ❌ | 媒体文件 URL（先调 /upload 获得） |
+| media_url | string[] | ❌ | 媒体文件 URL 数组（先调 /upload 获得，可多图） |
 | thumbnail_url | string | ❌ | 缩略图 URL |
 | location | object | ❌ | 位置信息 `{lat, lng, ...}` |
 | emotion | object | ❌ | 情绪 `{label, score, emoji}`，空则自动 AI 提取 |
@@ -345,7 +345,7 @@
   "userId": "uuid",
   "type": "text",
   "content": "今天阳光真好",
-  "mediaUrl": "",
+  "mediaUrl": [],
   "thumbnailUrl": "",
   "location": {},
   "emotion": {"label": "开心", "score": 0.88, "emoji": "😊"},
@@ -366,7 +366,7 @@
   "userId": "uuid",
   "type": "chat",
   "content": "和 AI 聊了骑行路线，探讨了运动习惯...",
-  "mediaUrl": "",
+  "mediaUrl": [],
   "thumbnailUrl": "",
   "location": {},
   "emotion": {"label": "开心", "score": 0.8, "emoji": "😊"},
@@ -412,7 +412,7 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | content | string | 文字内容 |
-| media_url | string | 媒体 URL |
+| media_url | string[] | 媒体 URL 数组 |
 | thumbnail_url | string | 缩略图 |
 | location | object | 位置 |
 | emotion | object | 情绪 |
@@ -1178,6 +1178,39 @@
 | file | File | 图片（jpeg/png/gif/webp，最大 10MB） |
 
 **响应 data：** `{"url": "/uploads/xxx/diary-image/xxx.jpg"}`
+
+**实现状态：** ✅ 已完成
+
+---
+
+### POST /api/upload/diary-images — 批量上传日记图片 🔒
+
+**Content-Type：** multipart/form-data
+
+**请求参数：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| files | File[] | 图片列表（jpeg/png/gif/webp，单张最大 10MB，单次最多 9 张） |
+
+**响应 data：**
+
+```json
+{
+  "items": [
+    {
+      "url": "/uploads/xxx/diary-image/xxx1.jpg",
+      "thumbnailUrl": "/uploads/xxx/diary-image/thumb_xxx1.jpg",
+      "location": {"lat": 39.12, "lng": 117.20, "address": "39.120000,117.200000"}
+    },
+    {
+      "url": "/uploads/xxx/diary-image/xxx2.jpg",
+      "thumbnailUrl": "/uploads/xxx/diary-image/thumb_xxx2.jpg",
+      "location": {}
+    }
+  ]
+}
+```
 
 **实现状态：** ✅ 已完成
 

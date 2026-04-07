@@ -173,6 +173,29 @@ def _build_materials_prompt_text(materials: List[RawMaterial], date: str) -> str
     return "\n".join(parts) if parts else f"今天是 {date}，无具体素材记录。"
 
 
+def _extract_material_media_urls(m: RawMaterial) -> List[str]:
+    """兼容旧 string 与新 JSON 数组格式的素材媒体 URL。"""
+    decoded = _decode(m.media_url or "", None)
+    if isinstance(decoded, str):
+        raw_items = [decoded]
+    elif isinstance(decoded, list):
+        raw_items = decoded
+    else:
+        raw_items = [m.media_url or ""]
+
+    urls: List[str] = []
+    for item in raw_items:
+        url = ""
+        if isinstance(item, str):
+            url = item.strip()
+        elif isinstance(item, dict):
+            url = str(item.get("url") or "").strip()
+
+        if url and url not in urls:
+            urls.append(url)
+    return urls
+
+
 def _collect_today_image_urls(materials: List[RawMaterial]) -> List[str]:
     """提取当日图片素材 URL，按时间顺序去重。"""
     urls = []
@@ -180,11 +203,11 @@ def _collect_today_image_urls(materials: List[RawMaterial]) -> List[str]:
     for m in materials:
         if m.type != "image":
             continue
-        url = (m.media_url or "").strip()
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        urls.append(url)
+        for url in _extract_material_media_urls(m):
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            urls.append(url)
     return urls
 
 

@@ -34,6 +34,47 @@ def _decode(s: str, default=None):
         return default
 
 
+def _normalize_media_urls(raw_media) -> List[str]:
+    """兼容 string / list / {url} 输入，统一归一为 URL 数组。"""
+    if raw_media is None:
+        return []
+
+    if isinstance(raw_media, str):
+        raw_items = [raw_media]
+    elif isinstance(raw_media, dict):
+        raw_items = [raw_media.get("url")]
+    elif isinstance(raw_media, list):
+        raw_items = raw_media
+    else:
+        return []
+
+    urls: List[str] = []
+    for item in raw_items:
+        url = ""
+        if isinstance(item, str):
+            url = item.strip()
+        elif isinstance(item, dict):
+            url = str(item.get("url") or "").strip()
+
+        if url and url not in urls:
+            urls.append(url)
+
+    return urls
+
+
+def _decode_media_urls(raw_value: str) -> List[str]:
+    parsed = _decode(raw_value, None)
+    if isinstance(parsed, list):
+        return _normalize_media_urls(parsed)
+    if isinstance(parsed, str):
+        return _normalize_media_urls(parsed)
+    return _normalize_media_urls(raw_value)
+
+
+def _encode_media_urls(media_urls: List[str]) -> str:
+    return _encode(_normalize_media_urls(media_urls))
+
+
 def _resolve_date_part(date_hint: Optional[str], now_dt: datetime) -> str:
     """优先沿用传入的 YYYY-MM-DD；无效时回退到当前日期。"""
     if isinstance(date_hint, str):
@@ -75,7 +116,7 @@ def _same_payload(last: RawMaterial, payload: dict) -> bool:
     return (
         (last.type or "") == payload["type"]
         and (last.content or "") == payload["content"]
-        and (last.media_url or "") == payload["media_url"]
+        and _decode_media_urls(last.media_url or "") == payload["media_url"]
         and (last.thumbnail_url or "") == payload["thumbnail_url"]
         and _decode(last.location, {}) == payload["location"]
     )
@@ -86,18 +127,23 @@ def _normalize_create_payload(data: dict) -> dict:
     payload = {
         "type": data["type"],
         "content": data.get("content", "") or "",
-        "media_url": data.get("media_url", "") or "",
+        "media_url": _normalize_media_urls(data.get("media_url")),
         "thumbnail_url": data.get("thumbnail_url", "") or "",
         "location": data.get("location", {}) or {},
         "emotion": data.get("emotion") or default_emotion,
         "tags": data.get("tags", []) or [],
     }
 
-    media_url = payload["media_url"]
-    if media_url and (not payload["thumbnail_url"] or not payload["location"]):
+    media_urls = payload["media_url"]
+    if media_urls and (not payload["thumbnail_url"] or not payload["location"]):
         from app.upload.service import get_uploaded_image_meta
 
-        uploaded_meta = get_uploaded_image_meta(media_url)
+        uploaded_meta = None
+        for media_url in media_urls:
+            uploaded_meta = get_uploaded_image_meta(media_url)
+            if uploaded_meta:
+                break
+
         if uploaded_meta:
             if not payload["thumbnail_url"]:
                 payload["thumbnail_url"] = uploaded_meta.get("thumbnail_url", "")
@@ -125,7 +171,7 @@ def material_to_dict(m: RawMaterial) -> dict:
         "user_id": m.user_id,
         "type": m.type,
         "content": m.content or "",
-        "media_url": m.media_url or "",
+        "media_url": _decode_media_urls(m.media_url or ""),
         "thumbnail_url": m.thumbnail_url or "",
         "location": _decode(m.location, {}),
         "emotion": _decode(m.emotion, {"label": "平静", "score": 0.5, "emoji": "😐"}),
@@ -161,7 +207,7 @@ def create_material(db: Session, user_id: str, data: dict) -> dict:
         user_id=user_id,
         type=payload["type"],
         content=payload["content"],
-        media_url=payload["media_url"],
+        media_url=_encode_media_urls(payload["media_url"]),
         thumbnail_url=payload["thumbnail_url"],
         location=_encode(payload["location"]),
         emotion=_encode(payload["emotion"]),
@@ -206,7 +252,7 @@ def update_material(db: Session, user_id: str, material_id: str, data: dict) -> 
     if "content" in data and data["content"] is not None:
         m.content = data["content"]
     if "media_url" in data and data["media_url"] is not None:
-        m.media_url = data["media_url"]
+        m.media_url = _encode_media_urls(data["media_url"])
     if "thumbnail_url" in data and data["thumbnail_url"] is not None:
         m.thumbnail_url = data["thumbnail_url"]
     if "location" in data and data["location"] is not None:
