@@ -157,3 +157,34 @@ def get_or_create_session(
         db.add(new_session)
         db.flush()
         return new_session, None
+
+
+def get_history(db: Session, user_id: str, limit: int = 20):
+    """获取用户聊天历史记录"""
+    # 查询最近的 limit 条消息
+    messages = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.user_id == user_id)
+        .order_by(ChatMessage.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
+
+    # 获取总条数
+    total = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.user_id == user_id)
+        .count()
+    )
+
+    # 按时间正序返回
+    items = [
+        {
+            "role": msg.role,
+            "content": msg.content,
+            "timestamp": msg.timestamp,
+        }
+        for msg in reversed(messages)
+    ]
+
+    return {"items": items, "total": total}

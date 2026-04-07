@@ -91,6 +91,17 @@ def update_diary(
     return success(result)
 
 
+@router.delete("/{diary_id}", summary="删除日记")
+def delete_diary(
+    diary_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """删除指定日记"""
+    service.delete_diary(db, current_user.id, diary_id)
+    return success(None)
+
+
 @router.get("/{diary_id}/emotion-trend", summary="当日情绪趋势")
 def get_emotion_trend(
     diary_id: str,

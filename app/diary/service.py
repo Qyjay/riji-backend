@@ -889,3 +889,15 @@ def get_today_summary(db: Session, user_id: str, date: str) -> dict:
         "diary_id": diary.id if diary else None,
         "diary_status": diary.status if diary else None,
     }
+
+
+def delete_diary(db: Session, user_id: str, diary_id: str) -> None:
+    """删除日记"""
+    d = db.query(Diary).filter(
+        Diary.id == diary_id,
+        Diary.user_id == user_id,
+    ).first()
+    if not d:
+        raise ApiException(code=NOT_FOUND, message="日记不存在", status_code=404)
+    db.delete(d)
+    db.commit()

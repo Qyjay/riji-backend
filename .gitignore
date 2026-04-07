@@ -13,3 +13,4 @@ build/
 *.db
 .vscode
 .pytest_cache
+.claude
