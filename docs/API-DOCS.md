@@ -330,8 +330,8 @@
 |------|------|------|------|
 | type | string | ✅ | "image" / "voice" / "text" / "chat"（自动生成，前端无需手动传） |
 | content | string | ❌ | 文字内容 |
-| media_url | string | ❌ | 媒体文件 URL（先调 /upload 获得） |
-| thumbnail_url | string | ❌ | 缩略图 URL |
+| media_url | string[] | ❌ | 媒体文件 URL 数组（先调 /upload 获得，可多图） |
+| thumbnail_url | string[] | ❌ | 缩略图 URL 数组（与 media_url 对齐） |
 | location | object | ❌ | 位置信息 `{lat, lng, ...}` |
 | emotion | object | ❌ | 情绪 `{label, score, emoji}`，空则自动 AI 提取 |
 | tags | string[] | ❌ | 标签 |
@@ -345,8 +345,8 @@
   "userId": "uuid",
   "type": "text",
   "content": "今天阳光真好",
-  "mediaUrl": "",
-  "thumbnailUrl": "",
+  "mediaUrl": [],
+  "thumbnailUrl": [],
   "location": {},
   "emotion": {"label": "开心", "score": 0.88, "emoji": "😊"},
   "tags": ["校园"],
@@ -366,8 +366,8 @@
   "userId": "uuid",
   "type": "chat",
   "content": "和 AI 聊了骑行路线，探讨了运动习惯...",
-  "mediaUrl": "",
-  "thumbnailUrl": "",
+  "mediaUrl": [],
+  "thumbnailUrl": [],
   "location": {},
   "emotion": {"label": "开心", "score": 0.8, "emoji": "😊"},
   "tags": ["运动", "日常"],
@@ -412,8 +412,8 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | content | string | 文字内容 |
-| media_url | string | 媒体 URL |
-| thumbnail_url | string | 缩略图 |
+| media_url | string[] | 媒体 URL 数组 |
+| thumbnail_url | string[] | 缩略图数组 |
 | location | object | 位置 |
 | emotion | object | 情绪 |
 | tags | string[] | 标签 |
@@ -521,15 +521,51 @@
 |------|------|------|------|
 | date | string | ✅ | 日期 YYYY-MM-DD |
 | weather | string | ❌ | 天气 |
+| allow_fallback | bool | ❌ | 无素材时是否允许兜底生成（默认 false） |
 
-**响应 data：** DiaryOut 对象（含 AI 生成的 title、content、emotionSummary）
+**响应 data：** DiaryOut 对象（含 AI 生成的 title、content、emotionSummary、imageUnderstandings）
 
 **实现状态：** ✅ 已完成（调用 minimax_client.generate_diary）
 
 **实现细节补充：**
 
-- 当前实现每次调用都会新建 Diary 记录，不会覆盖同日期已有日记（与 TASK-B 文档里的“同日更新”伪代码不同）。
+- 同日期重复调用会更新同一篇日记（upsert），不会重复新建。
 - 新建日记 `status` 初始值为 `draft`，`editCount=0`，`maxEdits=3`。
+- 每晚 22:00 后，系统后台会自动补生成：当天有素材且尚未生成日记的用户，会自动触发一次生成。
+
+**图片理解字段说明：**
+
+- `POST /api/diaries/generate` 的请求体不直接接收图片字段。
+- 日记生成使用的图片来源于当天素材（`raw_materials.media_url` / `mediaUrl`），即先通过素材接口上传并保存 URL，再在生成流程中读取。
+- 当 `ARK_VISION_ENABLED=true` 时，系统会对当天 image 素材执行视觉理解。
+- 图片理解结果会注入到日记生成提示词中的 `[图片描述]` 上下文段落，并同时在响应字段 `imageUnderstandings` 中返回（数组类型，按素材顺序去重）。
+- 图片理解失败会自动降级为“仅使用原素材文本继续生成日记”，不阻断主流程。
+
+**Ark 视觉理解配置说明（启用方式 + 推荐值）：**
+
+| 环境变量 | 默认值 | 作用 | 推荐值 |
+|------|------|------|------|
+| ARK_API_KEY | 空 | Ark API Key | 必填 |
+| ARK_BASE_URL | https://ark.cn-beijing.volces.com/api/v3 | Ark 接口地址 | 默认即可 |
+| ARK_VISION_MODEL | doubao-seed-2-0-mini-260215 | 视觉理解模型 | 默认即可 |
+| ARK_VISION_ENABLED | true | 是否开启视觉理解 | true |
+| ARK_VISION_PROMPT | 见配置文件 | 视觉理解提示词模板 | 保持“客观+细节+禁臆测”风格 |
+| ARK_VISION_MAX_IMAGES | 10 | 单次生成最多识别图片数 | 6~10 |
+| ARK_VISION_TIMEOUT_SEC | 50 | 单张图片识别超时秒数 | 30~50 |
+| ARK_VISION_CACHE_TTL_SEC | 21600 | URL 级缓存有效期（秒） | 21600（6小时） |
+
+**启用步骤（环境变量示例）：**
+
+```env
+MINIMAX_MOCK=false
+ARK_API_KEY=your-ark-api-key
+ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+ARK_VISION_MODEL=doubao-seed-2-0-mini-260215
+ARK_VISION_ENABLED=true
+ARK_VISION_MAX_IMAGES=10
+ARK_VISION_TIMEOUT_SEC=50
+ARK_VISION_CACHE_TTL_SEC=21600
+```
 
 ---
 
@@ -1178,6 +1214,39 @@
 | file | File | 图片（jpeg/png/gif/webp，最大 10MB） |
 
 **响应 data：** `{"url": "/uploads/xxx/diary-image/xxx.jpg"}`
+
+**实现状态：** ✅ 已完成
+
+---
+
+### POST /api/upload/diary-images — 批量上传日记图片 🔒
+
+**Content-Type：** multipart/form-data
+
+**请求参数：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| files | File[] | 图片列表（jpeg/png/gif/webp，单张最大 10MB，单次最多 9 张） |
+
+**响应 data：**
+
+```json
+{
+  "items": [
+    {
+      "url": "/uploads/xxx/diary-image/xxx1.jpg",
+      "thumbnailUrl": "/uploads/xxx/diary-image/thumb_xxx1.jpg",
+      "location": {"lat": 39.12, "lng": 117.20, "address": "39.120000,117.200000"}
+    },
+    {
+      "url": "/uploads/xxx/diary-image/xxx2.jpg",
+      "thumbnailUrl": "/uploads/xxx/diary-image/thumb_xxx2.jpg",
+      "location": {}
+    }
+  ]
+}
+```
 
 **实现状态：** ✅ 已完成
 
@@ -1838,7 +1907,7 @@ class AvatarProfile(Base):
 1. **语音上传 MIME 校验**：`upload/service.py` 的 `ALLOWED_IMAGE_TYPES` 只包含图片类型，`POST /api/upload/voice` 会因 MIME 校验失败而 400。需要新增语音 MIME 类型支持。
 2. **语音转写**：`POST /api/materials/voice` 返回硬编码 Mock 数据，未接入真实语音转文字服务。
 3. **学习模块**：v2 已废弃但路由仍注册，建议后续清理。
-4. **同日重复生成策略**：`POST /api/diaries/generate` 在当前实现中会重复新建日记；若要符合 TASK-B 伪代码的“同日更新”，需补充 upsert 逻辑。
+4. **自动生成任务部署注意**：22:00 自动补生成依赖后端常驻进程。多实例部署时建议仅保留单实例执行定时任务，避免重复扫描。
 5. **社交消息发送接口缺失**：TASK-D 提及 `POST /api/social/messages/{match_id}`（发送消息），当前后端未注册该接口，`social_messages` 仅有读取逻辑。
 
 ---

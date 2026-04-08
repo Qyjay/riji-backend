@@ -1,10 +1,19 @@
 # app/ai/service.py
+import asyncio
 import os
 import json
 import re
+import logging
+from pathlib import Path
+from typing import Any, Optional
+from urllib.parse import urlparse
 from uuid import uuid4
 from app.config import settings
 from app.ai.minimax_client import get_minimax_client
+from app.response import ApiException, PARAM_ERROR
+
+
+logger = logging.getLogger("uvicorn.error")
 
 
 async def text_to_speech_service(user_id: str, text: str, voice: str = "") -> str:
@@ -83,3 +92,189 @@ async def fortune_service() -> dict:
                 "lucky_color": "蓝色",
                 "lucky_number": 8,
             }
+
+
+def _extract_ark_text(response: Any) -> str:
+    """从 Ark responses.create 结果中尽量提取文本。"""
+    output_text = getattr(response, "output_text", None)
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    if hasattr(response, "model_dump"):
+        data = response.model_dump()
+    else:
+        data = response
+
+    if isinstance(data, dict):
+        direct = data.get("output_text")
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip()
+
+        output = data.get("output", [])
+        if isinstance(output, list):
+            chunks = []
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                content_blocks = item.get("content", [])
+                if not isinstance(content_blocks, list):
+                    continue
+                for block in content_blocks:
+                    if not isinstance(block, dict):
+                        continue
+                    text = block.get("text") or block.get("output_text")
+                    if isinstance(text, str) and text.strip():
+                        chunks.append(text.strip())
+            if chunks:
+                return "\n".join(chunks).strip()
+
+    return ""
+
+
+async def _call_ark_vision_async(image_url: str, prompt: str):
+    """异步调用 Ark 视觉模型。"""
+    try:
+        from volcenginesdkarkruntime import AsyncArk
+    except ImportError as exc:
+        raise ApiException(
+            code=PARAM_ERROR,
+            message="未安装 volcengine-python-sdk[ark]，请先安装后再调用视觉理解接口",
+            status_code=500,
+        ) from exc
+
+    client = AsyncArk(
+        base_url=settings.ARK_BASE_URL,
+        api_key=settings.ARK_API_KEY,
+    )
+
+    try:
+        return await client.responses.create(
+            model=settings.ARK_VISION_MODEL,
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": image_url,
+                        },
+                        {
+                            "type": "input_text",
+                            "text": prompt,
+                        },
+                    ],
+                }
+            ],
+        )
+    finally:
+        close_fn = getattr(client, "close", None)
+        if callable(close_fn):
+            maybe_awaitable = close_fn()
+            if asyncio.iscoroutine(maybe_awaitable):
+                await maybe_awaitable
+
+
+def _to_ark_file_uri(path: Path) -> str:
+    """生成 Ark SDK 在 Windows 下可正确解析的 file URI。"""
+    resolved = path.resolve()
+    posix_path = resolved.as_posix()
+
+    # Ark SDK 现版本在 Windows 下对 file:///C:/... 的解析有问题，
+    # 这里使用 file://C:/... 以确保其内部拼接后得到有效本地路径。
+    if len(posix_path) >= 3 and posix_path[1] == ":" and posix_path[2] == "/":
+        return f"file://{posix_path}"
+
+    return resolved.as_uri()
+
+
+def _resolve_ark_image_input(image_url: str) -> str:
+    """将图片输入转换为 Ark 可接受的 URL。"""
+    raw = (image_url or "").strip()
+    if not raw:
+        return ""
+
+    parsed = urlparse(raw)
+    if parsed.scheme in {"http", "https", "file", "data"}:
+        return raw
+
+    upload_root = Path(settings.UPLOAD_DIR).resolve()
+    normalized = raw.replace("\\", "/")
+
+    relative_path = ""
+    if normalized.startswith("/uploads/"):
+        relative_path = normalized[len("/uploads/"):]
+    elif normalized.startswith("uploads/"):
+        relative_path = normalized[len("uploads/"):]
+
+    if relative_path:
+        candidate = (upload_root / Path(relative_path)).resolve()
+        try:
+            candidate.relative_to(upload_root)
+        except ValueError:
+            logger.warning("[ark/vision] skip unsafe upload path image_url=%s", raw)
+            return ""
+
+        if candidate.exists():
+            return _to_ark_file_uri(candidate)
+
+        logger.warning("[ark/vision] upload file not found image_url=%s path=%s", raw, candidate)
+        return ""
+
+    as_path = Path(raw)
+    if as_path.is_absolute():
+        if as_path.exists():
+            return _to_ark_file_uri(as_path)
+        logger.warning("[ark/vision] local file not found image_url=%s path=%s", raw, as_path)
+        return ""
+
+    return raw
+
+
+async def understand_image_text(
+    image_url: str,
+    prompt: str = "",
+    timeout_sec: Optional[int] = None,
+) -> str:
+    """调用 Ark 视觉模型，返回识别文本；失败返回空字符串。"""
+    image_url = (image_url or "").strip()
+    if not image_url:
+        return ""
+
+    if not settings.ARK_VISION_ENABLED:
+        return ""
+
+    if not settings.ARK_API_KEY:
+        logger.warning("[ark/vision] ARK_API_KEY is empty")
+        return ""
+
+    resolved_prompt = (prompt or "").strip() or settings.ARK_VISION_PROMPT
+    resolved_image_input = _resolve_ark_image_input(image_url)
+    if not resolved_image_input:
+        return ""
+    req_timeout = float(timeout_sec or settings.ARK_VISION_TIMEOUT_SEC)
+
+    logger.info(
+        "[ark/vision] request model=%s timeout=%s image_url=%s image_input=%s",
+        settings.ARK_VISION_MODEL,
+        req_timeout,
+        image_url,
+        resolved_image_input,
+    )
+
+    try:
+        response = await asyncio.wait_for(
+            _call_ark_vision_async(resolved_image_input, resolved_prompt),
+            timeout=req_timeout,
+        )
+        description = _extract_ark_text(response)
+        if not description:
+            logger.warning("[ark/vision] empty response for image_url=%s", image_url)
+        return description
+    except asyncio.TimeoutError:
+        logger.warning("[ark/vision] timeout for image_url=%s timeout=%s", image_url, req_timeout)
+        return ""
+    except ApiException:
+        raise
+    except Exception as exc:
+        logger.exception("[ark/vision] request failed: %s", str(exc))
+        return ""

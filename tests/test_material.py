@@ -97,8 +97,8 @@ def test_create_material_accepts_camelcase_fields(client):
     payload = {
         "type": "image",
         "content": "camelCase 测试",
-        "mediaUrl": "/uploads/mock/image.jpg",
-        "thumbnailUrl": "/uploads/mock/thumb.jpg",
+        "mediaUrl": ["/uploads/mock/image.jpg", "/uploads/mock/image2.jpg"],
+        "thumbnailUrl": ["/uploads/mock/thumb.jpg", "/uploads/mock/thumb2.jpg"],
         "location": {"lat": 39.1, "lng": 117.2, "address": "天津"},
         "date": "2026-03-25",
     }
@@ -109,6 +109,41 @@ def test_create_material_accepts_camelcase_fields(client):
     assert data["mediaUrl"] == payload["mediaUrl"]
     assert data["thumbnailUrl"] == payload["thumbnailUrl"]
     assert data["location"] == payload["location"]
+
+
+def test_create_material_accepts_legacy_string_media_url(client):
+    """兼容旧端：mediaUrl 传 string 时自动归一为数组。"""
+    user_data = create_test_user(client, username="mat_legacy_media")
+    headers = get_auth_header(user_data["token"])
+
+    payload = {
+        "type": "image",
+        "content": "旧字段兼容",
+        "mediaUrl": "/uploads/mock/legacy.jpg",
+        "date": "2026-03-25",
+    }
+    resp = client.post("/api/materials", json=payload, headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["mediaUrl"] == [payload["mediaUrl"]]
+
+
+def test_create_material_accepts_legacy_string_thumbnail_url(client):
+    """兼容旧端：thumbnailUrl 传 string 时自动归一为数组。"""
+    user_data = create_test_user(client, username="mat_legacy_thumb")
+    headers = get_auth_header(user_data["token"])
+
+    payload = {
+        "type": "image",
+        "content": "缩略图旧字段兼容",
+        "mediaUrl": ["/uploads/mock/legacy-thumb.jpg"],
+        "thumbnailUrl": "/uploads/mock/thumb-legacy.jpg",
+        "date": "2026-03-25",
+    }
+    resp = client.post("/api/materials", json=payload, headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["thumbnailUrl"] == [payload["thumbnailUrl"]]
 
 
 def test_create_material_image_flow_with_uploaded_url(client):
@@ -137,7 +172,7 @@ def test_create_material_image_flow_with_uploaded_url(client):
         json={
             "type": "image",
             "content": "今天拍到了晚霞",
-            "media_url": image_url,
+            "media_url": [image_url],
             "date": "2026-03-25",
         },
         headers=headers,
@@ -145,10 +180,109 @@ def test_create_material_image_flow_with_uploaded_url(client):
     assert create_resp.status_code == 200
     data = create_resp.json()["data"]
     assert data["type"] == "image"
-    assert data["mediaUrl"] == image_url
-    assert data["thumbnailUrl"] == thumbnail_url
+    assert data["mediaUrl"] == [image_url]
+    assert data["thumbnailUrl"] == [thumbnail_url]
     assert data["location"] == location
     assert data["content"] == "今天拍到了晚霞"
+
+
+def test_create_material_with_multiple_uploaded_images(client):
+    """多图场景：可传 mediaUrl 数组并按顺序保存。"""
+    user_data = create_test_user(client, username="mat_multi_img")
+    headers = get_auth_header(user_data["token"])
+
+    upload1 = client.post(
+        "/api/upload/diary-image",
+        files={"file": ("img1.png", b"fake-image-1", "image/png")},
+        headers=headers,
+    )
+    upload2 = client.post(
+        "/api/upload/diary-image",
+        files={"file": ("img2.png", b"fake-image-2", "image/png")},
+        headers=headers,
+    )
+
+    assert upload1.status_code == 200
+    assert upload2.status_code == 200
+
+    image_url1 = upload1.json()["data"]["url"]
+    image_url2 = upload2.json()["data"]["url"]
+    thumbnail1 = upload1.json()["data"]["thumbnailUrl"]
+    thumbnail2 = upload2.json()["data"]["thumbnailUrl"]
+    location1 = upload1.json()["data"]["location"]
+
+    create_resp = client.post(
+        "/api/materials",
+        json={
+            "type": "image",
+            "content": "今天拍了两张图",
+            "mediaUrl": [image_url1, image_url2],
+            "date": "2026-03-25",
+        },
+        headers=headers,
+    )
+    assert create_resp.status_code == 200
+
+    data = create_resp.json()["data"]
+    assert data["type"] == "image"
+    assert data["mediaUrl"] == [image_url1, image_url2]
+    assert data["thumbnailUrl"] == [thumbnail1, thumbnail2]
+    assert data["location"] == location1
+
+
+def test_batch_upload_diary_images_flow(client):
+    """批量上传接口可一次上传多张并用于创建素材。"""
+    user_data = create_test_user(client, username="mat_batch_up")
+    headers = get_auth_header(user_data["token"])
+
+    upload_resp = client.post(
+        "/api/upload/diary-images",
+        files=[
+            ("files", ("img1.png", b"fake-image-1", "image/png")),
+            ("files", ("img2.png", b"fake-image-2", "image/png")),
+        ],
+        headers=headers,
+    )
+
+    assert upload_resp.status_code == 200
+    payload = upload_resp.json()
+    assert payload["code"] == 0
+
+    items = payload["data"]["items"]
+    assert isinstance(items, list)
+    assert len(items) == 2
+    assert items[0]["url"].startswith("/uploads/")
+    assert items[1]["url"].startswith("/uploads/")
+    assert items[0]["thumbnailUrl"]
+    assert isinstance(items[0]["location"], dict)
+
+    create_resp = client.post(
+        "/api/materials",
+        json={
+            "type": "image",
+            "content": "批量上传后的多图素材",
+            "mediaUrl": [item["url"] for item in items],
+            "date": "2026-03-25",
+        },
+        headers=headers,
+    )
+    assert create_resp.status_code == 200
+    created = create_resp.json()["data"]
+    assert created["mediaUrl"] == [item["url"] for item in items]
+
+
+def test_batch_upload_diary_images_limit(client):
+    """批量上传超过上限时应返回 400。"""
+    user_data = create_test_user(client, username="mat_batch_lim")
+    headers = get_auth_header(user_data["token"])
+
+    files = [("files", (f"img{i}.png", b"x", "image/png")) for i in range(10)]
+    resp = client.post("/api/upload/diary-images", files=files, headers=headers)
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["code"] != 0
+    assert "最多上传" in body["message"]
 
 
 def test_create_material_voice_flow(client):
@@ -171,7 +305,7 @@ def test_create_material_voice_flow(client):
         json={
             "type": "voice",
             "content": transcription,
-            "media_url": voice_url,
+            "media_url": [voice_url],
             "date": "2026-03-25",
         },
         headers=headers,
@@ -180,7 +314,7 @@ def test_create_material_voice_flow(client):
     data = create_resp.json()["data"]
     assert data["type"] == "voice"
     assert data["content"] == transcription
-    assert data["mediaUrl"] == voice_url
+    assert data["mediaUrl"] == [voice_url]
 
 
 def test_list_materials_bare_array(client):

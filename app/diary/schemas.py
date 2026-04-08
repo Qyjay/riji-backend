@@ -67,6 +67,7 @@ class DiaryOut(CamelModel):
     location: str
     has_comic: bool
     has_bgm: bool
+    image_understandings: List[str] = []
 
 
 class DerivativeOut(CamelModel):

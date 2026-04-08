@@ -4,11 +4,6 @@ from pydantic import BaseModel
 from app.serializers import CamelModel   # 注意导入 CamelModel
 
 
-class TtsRequest(BaseModel):
-    text: str
-    voice: str = ""   # 默认空字符串，service 会处理为 female-shaonv
-
-
 class FortuneOut(CamelModel):
     """运势响应（自动转 camelCase）"""
     overall: int
