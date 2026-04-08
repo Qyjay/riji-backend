@@ -20,7 +20,7 @@
 | type | string | 是 | 素材类型，创建接口支持 `image` / `voice` / `text` |
 | content | string | 否 | 文字内容；图片可放描述；语音可放转写文本 |
 | media_url | string | 否 | 媒体地址（图片/语音） |
-| thumbnail_url | string | 否 | 缩略图地址（主要用于图片） |
+| thumbnail_url | string[] | 否 | 缩略图地址数组（与 media_url 对齐） |
 | location | object | 否 | 位置信息（如 `lat/lng/address`） |
 | emotion | object | 否 | 情绪信息（未传时会使用默认值） |
 | tags | array | 否 | 素材标签数组 |
@@ -104,7 +104,7 @@
 | type | 素材类型 |
 | content | 素材文本内容 |
 | mediaUrl | 媒体地址 |
-| thumbnailUrl | 缩略图地址 |
+| thumbnailUrl | 缩略图地址数组 |
 | location | 位置信息对象 |
 | emotion | 情绪对象 |
 | tags | 标签数组 |
@@ -141,4 +141,5 @@
 
 后端兜底逻辑：
 - 若创建素材时只传了 `mediaUrl/media_url`，未传 `thumbnailUrl/thumbnail_url` 或 `location`，后端会按 `media_url` 从上传元数据缓存自动回填。
+- 自动回填时，`thumbnailUrl` 会按 `mediaUrl` 顺序尽量补齐为数组。
 - 这样可以保证「上传图片后创建素材」场景中，缩略图和位置信息默认可带入素材记录。

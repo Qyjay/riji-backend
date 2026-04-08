@@ -1,17 +1,15 @@
 # app/ai/router.py（修改后）
-import os
-import time
-from uuid import uuid4
-
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.dependencies import get_current_user, get_db
 from app.models.user import User
 from app.response import success
 from app.ai import service as ai_service
-from app.ai.schemas import TtsRequest, FortuneOut   # 注意 FortuneOut 现在在 schemas 中
+from app.ai.schemas import (
+    TtsRequest,
+    FortuneOut,
+)   # 注意 FortuneOut 现在在 schemas 中
 
 router = APIRouter(prefix="/ai", tags=["AI 功能"])
 

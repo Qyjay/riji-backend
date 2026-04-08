@@ -1,7 +1,9 @@
 """
 AI + 聊天模块测试
 """
-import pytest
+import asyncio
+from pathlib import Path
+
 from tests.conftest import create_test_user, get_auth_header
 
 
@@ -68,3 +70,37 @@ def test_tts(client):
     data = resp.json()
     assert data["code"] == 0
     assert isinstance(data["data"], str)
+
+
+def test_understand_image_text_with_local_upload_url(monkeypatch):
+    """当素材 URL 为 /uploads/... 时，Ark 调用应自动使用 file:// URI。"""
+    from app.ai import service as ai_service
+
+    monkeypatch.setattr(ai_service.settings, "ARK_VISION_ENABLED", True)
+    monkeypatch.setattr(ai_service.settings, "ARK_API_KEY", "test-key")
+    monkeypatch.setattr(ai_service.settings, "ARK_VISION_TIMEOUT_SEC", 5)
+
+    upload_root = Path(ai_service.settings.UPLOAD_DIR)
+    image_path = upload_root / "test-user" / "diary-image" / "ark-local-path.jpg"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(b"fake-image-bytes")
+
+    captured = {"image_input": ""}
+
+    async def fake_call(image_input: str, _prompt: str):
+        captured["image_input"] = image_input
+        return {"output_text": "识别结果"}
+
+    monkeypatch.setattr(ai_service, "_call_ark_vision_async", fake_call)
+
+    result = asyncio.run(
+        ai_service.understand_image_text(
+            image_url="/uploads/test-user/diary-image/ark-local-path.jpg",
+            prompt="请描述图片",
+        )
+    )
+
+    assert result == "识别结果"
+    expected_posix = image_path.resolve().as_posix()
+    assert captured["image_input"].startswith("file://")
+    assert captured["image_input"].endswith(expected_posix)

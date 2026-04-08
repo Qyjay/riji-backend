@@ -62,6 +62,11 @@ def _normalize_media_urls(raw_media) -> List[str]:
     return urls
 
 
+def _normalize_thumbnail_urls(raw_thumbnail) -> List[str]:
+    """缩略图字段沿用 media_url 的兼容与去重规则。"""
+    return _normalize_media_urls(raw_thumbnail)
+
+
 def _decode_media_urls(raw_value: str) -> List[str]:
     parsed = _decode(raw_value, None)
     if isinstance(parsed, list):
@@ -73,6 +78,19 @@ def _decode_media_urls(raw_value: str) -> List[str]:
 
 def _encode_media_urls(media_urls: List[str]) -> str:
     return _encode(_normalize_media_urls(media_urls))
+
+
+def _decode_thumbnail_urls(raw_value: str) -> List[str]:
+    parsed = _decode(raw_value, None)
+    if isinstance(parsed, list):
+        return _normalize_thumbnail_urls(parsed)
+    if isinstance(parsed, str):
+        return _normalize_thumbnail_urls(parsed)
+    return _normalize_thumbnail_urls(raw_value)
+
+
+def _encode_thumbnail_urls(thumbnail_urls: List[str]) -> str:
+    return _encode(_normalize_thumbnail_urls(thumbnail_urls))
 
 
 def _resolve_date_part(date_hint: Optional[str], now_dt: datetime) -> str:
@@ -117,7 +135,7 @@ def _same_payload(last: RawMaterial, payload: dict) -> bool:
         (last.type or "") == payload["type"]
         and (last.content or "") == payload["content"]
         and _decode_media_urls(last.media_url or "") == payload["media_url"]
-        and (last.thumbnail_url or "") == payload["thumbnail_url"]
+        and _decode_thumbnail_urls(last.thumbnail_url or "") == payload["thumbnail_url"]
         and _decode(last.location, {}) == payload["location"]
     )
 
@@ -128,7 +146,7 @@ def _normalize_create_payload(data: dict) -> dict:
         "type": data["type"],
         "content": data.get("content", "") or "",
         "media_url": _normalize_media_urls(data.get("media_url")),
-        "thumbnail_url": data.get("thumbnail_url", "") or "",
+        "thumbnail_url": _normalize_thumbnail_urls(data.get("thumbnail_url")),
         "location": data.get("location", {}) or {},
         "emotion": data.get("emotion") or default_emotion,
         "tags": data.get("tags", []) or [],
@@ -138,17 +156,24 @@ def _normalize_create_payload(data: dict) -> dict:
     if media_urls and (not payload["thumbnail_url"] or not payload["location"]):
         from app.upload.service import get_uploaded_image_meta
 
-        uploaded_meta = None
+        thumbnail_urls: List[str] = []
+        first_location = {}
         for media_url in media_urls:
             uploaded_meta = get_uploaded_image_meta(media_url)
-            if uploaded_meta:
-                break
+            if not uploaded_meta:
+                continue
 
-        if uploaded_meta:
-            if not payload["thumbnail_url"]:
-                payload["thumbnail_url"] = uploaded_meta.get("thumbnail_url", "")
-            if not payload["location"]:
-                payload["location"] = uploaded_meta.get("location", {}) or {}
+            thumbnail_url = str(uploaded_meta.get("thumbnail_url") or "").strip()
+            if thumbnail_url and thumbnail_url not in thumbnail_urls:
+                thumbnail_urls.append(thumbnail_url)
+
+            if not first_location:
+                first_location = uploaded_meta.get("location", {}) or {}
+
+        if not payload["thumbnail_url"] and thumbnail_urls:
+            payload["thumbnail_url"] = thumbnail_urls
+        if not payload["location"] and first_location:
+            payload["location"] = first_location
 
     return payload
 
@@ -172,7 +197,7 @@ def material_to_dict(m: RawMaterial) -> dict:
         "type": m.type,
         "content": m.content or "",
         "media_url": _decode_media_urls(m.media_url or ""),
-        "thumbnail_url": m.thumbnail_url or "",
+        "thumbnail_url": _decode_thumbnail_urls(m.thumbnail_url or ""),
         "location": _decode(m.location, {}),
         "emotion": _decode(m.emotion, {"label": "平静", "score": 0.5, "emoji": "😐"}),
         "tags": _decode(m.tags, []),
@@ -208,7 +233,7 @@ def create_material(db: Session, user_id: str, data: dict) -> dict:
         type=payload["type"],
         content=payload["content"],
         media_url=_encode_media_urls(payload["media_url"]),
-        thumbnail_url=payload["thumbnail_url"],
+        thumbnail_url=_encode_thumbnail_urls(payload["thumbnail_url"]),
         location=_encode(payload["location"]),
         emotion=_encode(payload["emotion"]),
         tags=_encode(payload["tags"]),
@@ -254,7 +279,7 @@ def update_material(db: Session, user_id: str, material_id: str, data: dict) -> 
     if "media_url" in data and data["media_url"] is not None:
         m.media_url = _encode_media_urls(data["media_url"])
     if "thumbnail_url" in data and data["thumbnail_url"] is not None:
-        m.thumbnail_url = data["thumbnail_url"]
+        m.thumbnail_url = _encode_thumbnail_urls(data["thumbnail_url"])
     if "location" in data and data["location"] is not None:
         m.location = _encode(data["location"])
     if "emotion" in data and data["emotion"] is not None:

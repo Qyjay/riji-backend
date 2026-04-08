@@ -12,6 +12,7 @@ from uuid import uuid4
 from sqlalchemy import func, or_, text
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.diary import Diary
 from app.models.material import RawMaterial
 from app.response import ApiException, NOT_FOUND, PARAM_ERROR
@@ -40,6 +41,38 @@ DEFAULT_EMOTION_EMOJI = {
     "难过": "😢",
     "生气": "😠",
 }
+
+
+_IMAGE_UNDERSTAND_CACHE = {}
+
+
+def _cleanup_image_understand_cache(now_ms: int) -> None:
+    ttl_ms = max(int(settings.ARK_VISION_CACHE_TTL_SEC), 60) * 1000
+    expired_urls = [
+        url
+        for url, meta in _IMAGE_UNDERSTAND_CACHE.items()
+        if now_ms - int(meta.get("cached_at", 0)) > ttl_ms
+    ]
+    for url in expired_urls:
+        _IMAGE_UNDERSTAND_CACHE.pop(url, None)
+
+
+def _get_cached_image_hint(url: str) -> tuple[bool, str]:
+    now_ms = _now_ms()
+    _cleanup_image_understand_cache(now_ms)
+    meta = _IMAGE_UNDERSTAND_CACHE.get(url)
+    if not meta:
+        return False, ""
+    return True, str(meta.get("hint") or "").strip()
+
+
+def _set_cached_image_hint(url: str, hint: str) -> None:
+    now_ms = _now_ms()
+    _cleanup_image_understand_cache(now_ms)
+    _IMAGE_UNDERSTAND_CACHE[url] = {
+        "hint": str(hint or "").strip(),
+        "cached_at": now_ms,
+    }
 
 
 def _now_ms() -> int:
@@ -153,7 +186,11 @@ def _format_material_time(m: RawMaterial) -> str:
     return "未知时间"
 
 
-def _build_materials_prompt_text(materials: List[RawMaterial], date: str) -> str:
+def _build_materials_prompt_text(
+    materials: List[RawMaterial],
+    date: str,
+    image_hints: dict = None,
+) -> str:
     """将素材整理为按时间排序的提示词上下文文本。"""
     if not materials:
         return f"今天是 {date}，无具体素材记录。"
@@ -163,8 +200,17 @@ def _build_materials_prompt_text(materials: List[RawMaterial], date: str) -> str
         time_label = _format_material_time(m)
         if m.type == "text" and m.content:
             parts.append(f"[{time_label}] [文字] {m.content}")
-        elif m.type == "image" and m.content:
-            parts.append(f"[{time_label}] [图片描述] {m.content}")
+        elif m.type == "image":
+            image_desc = (m.content or "").strip()
+            if image_hints:
+                hint = str(image_hints.get(m.id) or "").strip()
+                if hint:
+                    if image_desc and hint not in image_desc:
+                        image_desc = f"{image_desc}；AI识图补充：{hint}"
+                    elif not image_desc:
+                        image_desc = hint
+            if image_desc:
+                parts.append(f"[{time_label}] [图片描述] {image_desc}")
         elif m.type == "voice" and m.content:
             parts.append(f"[{time_label}] [语音转文字] {m.content}")
         elif m.type == "chat" and m.content:
@@ -209,6 +255,75 @@ def _collect_today_image_urls(materials: List[RawMaterial]) -> List[str]:
             seen.add(url)
             urls.append(url)
     return urls
+
+
+async def _collect_image_understand_hints(materials: List[RawMaterial]) -> dict:
+    """提取图片视觉理解结果（失败降级，按 URL 缓存）。"""
+    if not settings.ARK_VISION_ENABLED:
+        return {}
+
+    max_images = max(int(settings.ARK_VISION_MAX_IMAGES), 0)
+    if max_images <= 0:
+        return {}
+
+    prompt = settings.ARK_VISION_PROMPT
+    timeout_sec = int(settings.ARK_VISION_TIMEOUT_SEC)
+
+    hints = {}
+    model_call_count = 0
+
+    for m in materials:
+        if m.type != "image":
+            continue
+
+        urls = _extract_material_media_urls(m)
+        if not urls:
+            continue
+
+        image_url = urls[0]
+        hit, cached_hint = _get_cached_image_hint(image_url)
+        if hit:
+            if cached_hint:
+                hints[m.id] = cached_hint
+            continue
+
+        if model_call_count >= max_images:
+            continue
+
+        try:
+            from app.ai import service as ai_service
+
+            hint = await ai_service.understand_image_text(
+                image_url=image_url,
+                prompt=prompt,
+                timeout_sec=timeout_sec,
+            )
+        except Exception:
+            hint = ""
+
+        normalized_hint = str(hint or "").strip()
+        _set_cached_image_hint(image_url, normalized_hint)
+        if normalized_hint:
+            hints[m.id] = normalized_hint
+
+        model_call_count += 1
+
+    return hints
+
+
+def _build_image_understanding_list(materials: List[RawMaterial], image_hints: dict) -> List[str]:
+    """按素材顺序汇总图片理解内容（去重）。"""
+    if not image_hints:
+        return []
+
+    items: List[str] = []
+    for m in materials:
+        if m.type != "image":
+            continue
+        hint = str(image_hints.get(m.id) or "").strip()
+        if hint and hint not in items:
+            items.append(hint)
+    return items
 
 
 def _collect_today_material_tags(materials: List[RawMaterial]) -> List[str]:
@@ -536,7 +651,6 @@ async def generate_diary(
             status_code=400,
         )
 
-    materials_text = _build_materials_prompt_text(materials, date)
     emotion_summary_for_prompt = _build_emotion_trend_from_materials(materials)
 
     from app.models.user import User
@@ -548,6 +662,10 @@ async def generate_diary(
             user_style = "、".join(tags) if tags else ""
         except Exception:
             pass
+
+    image_hints = await _collect_image_understand_hints(materials)
+    image_understandings = _build_image_understanding_list(materials, image_hints)
+    materials_text = _build_materials_prompt_text(materials, date, image_hints=image_hints)
 
     from app.ai.minimax_client import get_minimax_client
     client = get_minimax_client()
@@ -597,7 +715,10 @@ async def generate_diary(
 
         db.refresh(existing)
         from app.diary.schemas import DiaryOut
-        return DiaryOut(**diary_to_dict(existing)).model_dump(by_alias=True)
+
+        payload = DiaryOut(**diary_to_dict(existing)).model_dump(by_alias=True)
+        payload["imageUnderstandings"] = image_understandings
+        return payload
 
     d = Diary(
         id=_uuid(),
@@ -631,7 +752,74 @@ async def generate_diary(
 
     db.refresh(d)
     from app.diary.schemas import DiaryOut
-    return DiaryOut(**diary_to_dict(d)).model_dump(by_alias=True)
+
+    payload = DiaryOut(**diary_to_dict(d)).model_dump(by_alias=True)
+    payload["imageUnderstandings"] = image_understandings
+    return payload
+
+
+def _list_material_user_ids_by_date(db: Session, date: str) -> List[str]:
+    """查询指定日期存在素材的用户 ID（去重）。"""
+    rows = (
+        _apply_material_date_filter(
+            db.query(RawMaterial.user_id),
+            date,
+        )
+        .distinct()
+        .all()
+    )
+
+    user_ids: List[str] = []
+    for row in rows:
+        user_id = str(row[0]).strip() if row and row[0] is not None else ""
+        if user_id:
+            user_ids.append(user_id)
+    return user_ids
+
+
+async def auto_generate_missing_diaries(
+    db: Session,
+    date: str,
+    weather: str = "",
+) -> dict:
+    """为指定日期自动补生成日记（仅补未生成用户）。"""
+    candidate_user_ids = _list_material_user_ids_by_date(db, date)
+    generated = 0
+    skipped_existing = 0
+    failed = []
+
+    for user_id in candidate_user_ids:
+        has_diary = db.query(Diary.id).filter(
+            Diary.user_id == user_id,
+            Diary.date == date,
+        ).first()
+        if has_diary:
+            skipped_existing += 1
+            continue
+
+        try:
+            await generate_diary(
+                db=db,
+                user_id=user_id,
+                date=date,
+                weather=weather,
+                allow_fallback=False,
+            )
+            generated += 1
+        except ApiException as exc:
+            db.rollback()
+            failed.append({"user_id": user_id, "reason": exc.message})
+        except Exception as exc:
+            db.rollback()
+            failed.append({"user_id": user_id, "reason": str(exc)})
+
+    return {
+        "date": date,
+        "candidate_count": len(candidate_user_ids),
+        "generated_count": generated,
+        "skipped_existing_count": skipped_existing,
+        "failed": failed,
+    }
 
 
 def get_emotion_trend(db: Session, user_id: str, diary_id: str) -> dict:

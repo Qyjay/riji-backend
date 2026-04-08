@@ -39,6 +39,11 @@ def _normalize_media_urls(value) -> List[str]:
     return result
 
 
+def _normalize_thumbnail_urls(value) -> List[str]:
+    """缩略图字段与媒体字段保持同一归一化规则。"""
+    return _normalize_media_urls(value)
+
+
 # ==================== 请求 Schema ====================
 
 class MaterialCreate(BaseModel):
@@ -48,7 +53,7 @@ class MaterialCreate(BaseModel):
     type: str                           # "image" | "voice" | "text"
     content: str = ""
     media_url: List[str] = Field(default_factory=list, alias="mediaUrl")
-    thumbnail_url: str = Field(default="", alias="thumbnailUrl")
+    thumbnail_url: List[str] = Field(default_factory=list, alias="thumbnailUrl")
     location: Dict[str, Any] = {}
     emotion: Dict[str, Any] = {}
     tags: List[str] = []
@@ -59,6 +64,11 @@ class MaterialCreate(BaseModel):
     def normalize_media_url(cls, value):
         return _normalize_media_urls(value)
 
+    @field_validator("thumbnail_url", mode="before")
+    @classmethod
+    def normalize_thumbnail_url(cls, value):
+        return _normalize_thumbnail_urls(value)
+
 
 class MaterialUpdate(BaseModel):
     """更新素材请求（所有字段可选）"""
@@ -66,7 +76,7 @@ class MaterialUpdate(BaseModel):
 
     content: Optional[str] = None
     media_url: Optional[List[str]] = Field(default=None, alias="mediaUrl")
-    thumbnail_url: Optional[str] = Field(default=None, alias="thumbnailUrl")
+    thumbnail_url: Optional[List[str]] = Field(default=None, alias="thumbnailUrl")
     location: Optional[Dict[str, Any]] = None
     emotion: Optional[Dict[str, Any]] = None
     tags: Optional[List[str]] = None
@@ -77,6 +87,13 @@ class MaterialUpdate(BaseModel):
         if value is None:
             return None
         return _normalize_media_urls(value)
+
+    @field_validator("thumbnail_url", mode="before")
+    @classmethod
+    def normalize_thumbnail_url(cls, value):
+        if value is None:
+            return None
+        return _normalize_thumbnail_urls(value)
 
 
 class PolishRequest(BaseModel):
@@ -93,7 +110,7 @@ class MaterialOut(CamelModel):
     type: str
     content: str
     media_url: List[str]
-    thumbnail_url: str
+    thumbnail_url: List[str]
     location: Dict[str, Any]
     emotion: Dict[str, Any]
     tags: List[str]
