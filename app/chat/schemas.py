@@ -42,3 +42,9 @@ class SessionMessagesOut(CamelModel):
     """对话段消息列表"""
     session: ChatSessionOut
     messages: List[ChatMessageOut]
+
+
+class ChatHistoryOut(CamelModel):
+    """聊天历史响应"""
+    items: List[dict]
+    total: int

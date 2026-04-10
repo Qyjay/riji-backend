@@ -22,8 +22,8 @@ class RawMaterial(Base):
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
     type = Column(String, nullable=False)           # "image" | "voice" | "text"
     content = Column(Text, default="")              # 文字内容 / 语音转文字结果
-    media_url = Column(String, default="")          # 图片/语音文件 URL
-    thumbnail_url = Column(String, default="")      # 缩略图 URL（图片专用）
+    media_url = Column(String, default="")          # 媒体 URL 数组（JSON string）
+    thumbnail_url = Column(String, default="")      # 缩略图 URL 数组（JSON string）
     location = Column(Text, default="{}")           # JSON: {lat, lng, address}
     emotion = Column(Text, default="{}")            # JSON: {label, score, emoji}
     tags = Column(Text, default="[]")              # JSON array: 自动提取的标签

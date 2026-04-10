@@ -2,7 +2,7 @@
 
 > **本文档从实际代码提取，记录所有已注册路由的完整信息。**
 >
-> 最后更新：2026-03-31
+> 最后更新：2026-04-06
 >
 > Base URL: `http://localhost:8000/api`
 
@@ -64,6 +64,8 @@
 ### 字段命名
 
 响应字段使用 **camelCase**（如 `userId`、`createdAt`），请求 body 使用 **snake_case**。
+
+> 兼容说明：`GET /api/diaries/today-summary` 当前实现返回 snake_case（如 `material_count`、`has_diary`）。
 
 ---
 
@@ -328,8 +330,8 @@
 |------|------|------|------|
 | type | string | ✅ | "image" / "voice" / "text" / "chat"（自动生成，前端无需手动传） |
 | content | string | ❌ | 文字内容 |
-| media_url | string | ❌ | 媒体文件 URL（先调 /upload 获得） |
-| thumbnail_url | string | ❌ | 缩略图 URL |
+| media_url | string[] | ❌ | 媒体文件 URL 数组（先调 /upload 获得，可多图） |
+| thumbnail_url | string[] | ❌ | 缩略图 URL 数组（与 media_url 对齐） |
 | location | object | ❌ | 位置信息 `{lat, lng, ...}` |
 | emotion | object | ❌ | 情绪 `{label, score, emoji}`，空则自动 AI 提取 |
 | tags | string[] | ❌ | 标签 |
@@ -343,8 +345,8 @@
   "userId": "uuid",
   "type": "text",
   "content": "今天阳光真好",
-  "mediaUrl": "",
-  "thumbnailUrl": "",
+  "mediaUrl": [],
+  "thumbnailUrl": [],
   "location": {},
   "emotion": {"label": "开心", "score": 0.88, "emoji": "😊"},
   "tags": ["校园"],
@@ -364,8 +366,8 @@
   "userId": "uuid",
   "type": "chat",
   "content": "和 AI 聊了骑行路线，探讨了运动习惯...",
-  "mediaUrl": "",
-  "thumbnailUrl": "",
+  "mediaUrl": [],
+  "thumbnailUrl": [],
   "location": {},
   "emotion": {"label": "开心", "score": 0.8, "emoji": "😊"},
   "tags": ["运动", "日常"],
@@ -410,8 +412,8 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | content | string | 文字内容 |
-| media_url | string | 媒体 URL |
-| thumbnail_url | string | 缩略图 |
+| media_url | string[] | 媒体 URL 数组 |
+| thumbnail_url | string[] | 缩略图数组 |
 | location | object | 位置 |
 | emotion | object | 情绪 |
 | tags | string[] | 标签 |
@@ -491,11 +493,19 @@
 ```json
 {
   "date": "2026-03-26",
-  "materialCount": 3,
-  "materials": [...],
-  "hasDiary": true,
-  "diaryId": "uuid",
-  "diaryStatus": "generated"
+  "material_count": 3,
+  "materials": [
+    {
+      "id": "uuid",
+      "type": "text",
+      "content": "今天阳光真好",
+      "createdAt": 1711440000000,
+      "emotion": {"label": "开心", "score": 0.88, "emoji": "😊"}
+    }
+  ],
+  "has_diary": true,
+  "diary_id": "uuid",
+  "diary_status": "draft"
 }
 ```
 
@@ -511,12 +521,51 @@
 |------|------|------|------|
 | date | string | ✅ | 日期 YYYY-MM-DD |
 | weather | string | ❌ | 天气 |
+| allow_fallback | bool | ❌ | 无素材时是否允许兜底生成（默认 false） |
 
-**响应 data：** DiaryOut 对象（含 AI 生成的 title、content、emotionSummary）
+**响应 data：** DiaryOut 对象（含 AI 生成的 title、content、emotionSummary、imageUnderstandings）
 
-**素材纳入范围：** 接口会读取当日所有素材，包含 `type="chat"` 的对话素材。对话素材以 `[对话记录] (HH:MM~HH:MM) 摘要内容` 格式拼入提示词。
+**实现状态：** ✅ 已完成（调用 minimax_client.generate_diary）
 
-**实现状态：** ✅ 已完成（调用 minimax_client.generate_diary，纳入 chat 类型素材）
+**实现细节补充：**
+
+- 同日期重复调用会更新同一篇日记（upsert），不会重复新建。
+- 新建日记 `status` 初始值为 `draft`，`editCount=0`，`maxEdits=3`。
+- 每晚 22:00 后，系统后台会自动补生成：当天有素材且尚未生成日记的用户，会自动触发一次生成。
+
+**图片理解字段说明：**
+
+- `POST /api/diaries/generate` 的请求体不直接接收图片字段。
+- 日记生成使用的图片来源于当天素材（`raw_materials.media_url` / `mediaUrl`），即先通过素材接口上传并保存 URL，再在生成流程中读取。
+- 当 `ARK_VISION_ENABLED=true` 时，系统会对当天 image 素材执行视觉理解。
+- 图片理解结果会注入到日记生成提示词中的 `[图片描述]` 上下文段落，并同时在响应字段 `imageUnderstandings` 中返回（数组类型，按素材顺序去重）。
+- 图片理解失败会自动降级为“仅使用原素材文本继续生成日记”，不阻断主流程。
+
+**Ark 视觉理解配置说明（启用方式 + 推荐值）：**
+
+| 环境变量 | 默认值 | 作用 | 推荐值 |
+|------|------|------|------|
+| ARK_API_KEY | 空 | Ark API Key | 必填 |
+| ARK_BASE_URL | https://ark.cn-beijing.volces.com/api/v3 | Ark 接口地址 | 默认即可 |
+| ARK_VISION_MODEL | doubao-seed-2-0-mini-260215 | 视觉理解模型 | 默认即可 |
+| ARK_VISION_ENABLED | true | 是否开启视觉理解 | true |
+| ARK_VISION_PROMPT | 见配置文件 | 视觉理解提示词模板 | 保持“客观+细节+禁臆测”风格 |
+| ARK_VISION_MAX_IMAGES | 10 | 单次生成最多识别图片数 | 6~10 |
+| ARK_VISION_TIMEOUT_SEC | 50 | 单张图片识别超时秒数 | 30~50 |
+| ARK_VISION_CACHE_TTL_SEC | 21600 | URL 级缓存有效期（秒） | 21600（6小时） |
+
+**启用步骤（环境变量示例）：**
+
+```env
+MINIMAX_MOCK=false
+ARK_API_KEY=your-ark-api-key
+ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+ARK_VISION_MODEL=doubao-seed-2-0-mini-260215
+ARK_VISION_ENABLED=true
+ARK_VISION_MAX_IMAGES=10
+ARK_VISION_TIMEOUT_SEC=50
+ARK_VISION_CACHE_TTL_SEC=21600
+```
 
 ---
 
@@ -548,15 +597,18 @@
   "date": "2026-03-26",
   "weather": "晴",
   "specialDate": "",
-  "emotionSummary": {"dominant": "平静", "distribution": {"开心": 0.4}},
+  "emotionSummary": {
+    "dominant": "平静",
+    "trend": [{"hour": 9, "label": "平静", "score": 70}]
+  },
   "materialIds": ["uuid1", "uuid2"],
-  "style": "",
+  "style": "日记式",
   "editCount": 0,
   "maxEdits": 3,
-  "status": "generated",
+  "status": "draft",
   "createdAt": 1711440000000,
   "updatedAt": 1711440000000,
-  "emotion": {},
+  "emotion": {"emoji": "😊", "label": "平静", "score": 70},
   "images": [],
   "tags": [],
   "location": "",
@@ -593,9 +645,10 @@
 
 ```json
 {
+  "dominant": "开心",
   "trend": [
-    {"time": "09:00", "emotion": "开心", "score": 0.85},
-    {"time": "14:00", "emotion": "平静", "score": 0.7}
+    {"hour": 9, "label": "开心", "score": 85},
+    {"hour": 14, "label": "平静", "score": 70}
   ]
 }
 ```
@@ -614,8 +667,9 @@
 
 ```json
 {
-  "anniversaries": [{"title": "和朋友聚餐", "date": "03-25", "related_person": "室友"}],
-  "persons": [{"name": "小明", "relation": "室友"}],
+  "anniversaries": [{"title": "和朋友聚餐", "date": "03-25", "relatedPerson": "室友"}],
+  "persons": [{"name": "小明", "relation": "室友", "mentions": 1}],
+  "relations": [{"name": "小明", "relation": "室友", "mentions": 1}],
   "preferences": ["美食", "散步"]
 }
 ```
@@ -787,7 +841,7 @@
 | title | string | ✅ | 纪念日名称 |
 | date | string | ✅ | 月-日，如 "03-25" |
 | year | int | ❌ | 年份 |
-| source | string | ❌ | "manual" / "ai"（默认 manual） |
+| source | string | ❌ | "manual" / "ai_extracted"（默认 manual） |
 | related_person | string | ❌ | 相关人物 |
 | diary_id | string | ❌ | 关联日记 ID |
 
@@ -1160,6 +1214,39 @@
 | file | File | 图片（jpeg/png/gif/webp，最大 10MB） |
 
 **响应 data：** `{"url": "/uploads/xxx/diary-image/xxx.jpg"}`
+
+**实现状态：** ✅ 已完成
+
+---
+
+### POST /api/upload/diary-images — 批量上传日记图片 🔒
+
+**Content-Type：** multipart/form-data
+
+**请求参数：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| files | File[] | 图片列表（jpeg/png/gif/webp，单张最大 10MB，单次最多 9 张） |
+
+**响应 data：**
+
+```json
+{
+  "items": [
+    {
+      "url": "/uploads/xxx/diary-image/xxx1.jpg",
+      "thumbnailUrl": "/uploads/xxx/diary-image/thumb_xxx1.jpg",
+      "location": {"lat": 39.12, "lng": 117.20, "address": "39.120000,117.200000"}
+    },
+    {
+      "url": "/uploads/xxx/diary-image/xxx2.jpg",
+      "thumbnailUrl": "/uploads/xxx/diary-image/thumb_xxx2.jpg",
+      "location": {}
+    }
+  ]
+}
+```
 
 **实现状态：** ✅ 已完成
 
@@ -1652,6 +1739,105 @@ AI 根据记忆库生成的分身人格摘要。
 
 ---
 
+## 新增数据模型参考（广场 + 分身）
+
+以下为广场和分身模块需要新建的数据表，供实现参考：
+
+```python
+# app/models/plaza.py
+
+class PlazaPost(Base):
+  __tablename__ = "plaza_posts"
+  id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+  user_id = Column(String, nullable=False)           # 作者 ID
+  type = Column(String, nullable=False)               # buddy / help / share / dating
+  content = Column(Text, nullable=False)              # 正文
+  images = Column(Text, default="[]")                 # JSON: string[]
+  location = Column(String, default="")               # 位置
+  tags = Column(Text, default="[]")                   # JSON: string[]
+  likes = Column(Integer, default=0)                  # 点赞数
+  comments = Column(Integer, default=0)               # 评论数
+  agent_responses = Column(Integer, default=0)        # 分身响应数
+  is_from_agent = Column(Boolean, default=False)      # 是否由分身发布
+  allow_agent_reply = Column(Boolean, default=True)   # 是否允许分身回复
+  school_only = Column(Boolean, default=False)        # 仅本校可见
+  created_at = Column(BigInteger, nullable=False)
+
+class PlazaComment(Base):
+  __tablename__ = "plaza_comments"
+  id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+  post_id = Column(String, nullable=False)            # 帖子 ID
+  user_id = Column(String, nullable=False)            # 评论者 ID
+  content = Column(Text, nullable=False)              # 评论内容
+  is_agent = Column(Boolean, default=False)           # 是否分身评论
+  created_at = Column(BigInteger, nullable=False)
+
+class PostLike(Base):
+  __tablename__ = "post_likes"
+  id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+  post_id = Column(String, nullable=False)
+  user_id = Column(String, nullable=False)
+  created_at = Column(BigInteger, nullable=False)
+  # UNIQUE(post_id, user_id)
+
+
+# app/models/avatar.py
+
+class AvatarMemory(Base):
+  __tablename__ = "avatar_memories"
+  id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+  user_id = Column(String, nullable=False)
+  category = Column(String, nullable=False)           # fact/interest/personality/need/habit/relation
+  content = Column(Text, nullable=False)
+  source = Column(String, default="manual")           # diary/chat/manual/behavior
+  source_ref = Column(String, default="")             # 来源引用 ID
+  confidence = Column(Float, default=1.0)             # 0.0-1.0
+  is_active = Column(Boolean, default=True)
+  is_pinned = Column(Boolean, default=False)
+  need_type = Column(String, nullable=True)           # buddy/dating/help/activity
+  urgency = Column(String, nullable=True)             # active/passive
+  expiry = Column(BigInteger, nullable=True)          # 过期时间戳
+  match_status = Column(String, nullable=True)        # searching/matched/expired
+  tags = Column(Text, default="[]")                   # JSON: string[]
+  created_at = Column(BigInteger, nullable=False)
+  updated_at = Column(BigInteger, nullable=False)
+
+class AvatarStatus(Base):
+  __tablename__ = "avatar_status"
+  id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+  user_id = Column(String, unique=True, nullable=False)
+  is_active = Column(Boolean, default=True)
+  browsed_count = Column(Integer, default=0)
+  matched_count = Column(Integer, default=0)
+  chatting_count = Column(Integer, default=0)
+  last_active_at = Column(BigInteger, default=0)
+  enabled_channels = Column(Text, default='["buddy","help","share","dating"]')
+  enabled_actions = Column(Text, default='["browse","match","comment"]')
+  match_range = Column(Text, default='{"school":"","distanceKm":10}')
+
+class AvatarMatch(Base):
+  __tablename__ = "avatar_matches"
+  id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+  user_id = Column(String, nullable=False)            # 被推荐的用户
+  post_id = Column(String, nullable=False)            # 匹配的帖子
+  match_score = Column(Integer, default=0)            # 0-100
+  match_reasons = Column(Text, default="[]")          # JSON: string[]
+  agent_conversation = Column(Text, default="[]")     # JSON: AgentConversationMessage[]
+  status = Column(String, default="new")              # new/viewed/chatting/dismissed
+  created_at = Column(BigInteger, nullable=False)
+
+class AvatarProfile(Base):
+  __tablename__ = "avatar_profiles"
+  id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+  user_id = Column(String, unique=True, nullable=False)
+  summary = Column(Text, default="")
+  diary_count = Column(Integer, default=0)
+  chat_count = Column(Integer, default=0)
+  generated_at = Column(BigInteger, default=0)
+```
+
+---
+
 ## 接口汇总
 
 | # | 方法 | 路径 | 模块 | 状态 |
@@ -1670,66 +1856,47 @@ AI 根据记忆库生成的分身人格摘要。
 | 12 | GET | /api/user/agent-portrait | 用户 | ✅ |
 | 13 | POST | /api/materials | 素材 | ✅ |
 | 14 | GET | /api/materials | 素材 | ✅ |
-| 15 | GET | /api/materials/{id} | 素材 | ✅ |
-| 16 | PUT | /api/materials/{id} | 素材 | ✅ |
-| 17 | DELETE | /api/materials/{id} | 素材 | ✅ |
-| 18 | POST | /api/materials/{id}/emotion | 素材 | ✅ |
-| 19 | POST | /api/materials/{id}/polish | 素材 | ✅ |
+| 15 | GET | /api/materials/{material_id} | 素材 | ✅ |
+| 16 | PUT | /api/materials/{material_id} | 素材 | ✅ |
+| 17 | DELETE | /api/materials/{material_id} | 素材 | ✅ |
+| 18 | POST | /api/materials/{material_id}/emotion | 素材 | ✅ |
+| 19 | POST | /api/materials/{material_id}/polish | 素材 | ✅ |
 | 20 | POST | /api/materials/voice | 素材 | 🟡 |
 | 21 | GET | /api/diaries/today-summary | 日记 | ✅ |
 | 22 | POST | /api/diaries/generate | 日记 | ✅ |
 | 23 | GET | /api/diaries | 日记 | ✅ |
-| 24 | GET | /api/diaries/{id} | 日记 | ✅ |
-| 25 | PUT | /api/diaries/{id} | 日记 | ✅ |
-| 26 | GET | /api/diaries/{id}/emotion-trend | 日记 | ✅ |
-| 27 | POST | /api/diaries/{id}/extract | 日记 | ✅ |
-| 28 | POST | /api/diaries/{id}/derivative | 日记 | ✅ |
-| 29 | GET | /api/diaries/search | 日记 | 🔴 |
-| 30 | GET | /api/derivatives | 衍生 | ✅ |
-| 31 | POST | /api/derivatives/{id}/share | 衍生 | ✅ |
-| 32 | GET | /api/anniversaries/today | 纪念日 | ✅ |
-| 33 | GET | /api/anniversaries | 纪念日 | ✅ |
-| 34 | POST | /api/anniversaries | 纪念日 | ✅ |
-| 35 | PUT | /api/anniversaries/{id} | 纪念日 | ✅ |
-| 36 | DELETE | /api/anniversaries/{id} | 纪念日 | ✅ |
-| 37 | POST | /api/ai/tts | AI | ✅ |
-| 38 | GET | /api/ai/fortune | AI | ✅ |
-| 39 | POST | /api/chat | 对话 | ✅ |
-| 40 | GET | /api/chat/history | 对话 | ✅ |
-| 41 | POST | /api/chat/close-session | 对话 | ✅ |
-| 42 | GET | /api/chat/session/{id}/messages | 对话 | ✅ |
-| 43 | GET | /api/social/matches | 社交 | ✅ |
-| 44 | POST | /api/social/match-requests | 社交 | ✅ |
-| 45 | POST | /api/social/match-requests/{id}/respond | 社交 | ✅ |
-| 46 | GET | /api/social/messages/{match_id} | 社交 | ✅ |
-| 47 | GET | /api/social/matches/{id}/report | 社交 | ✅ |
-| 48 | POST | /api/social/buddy | 社交 | ✅ |
-| 49 | POST | /api/social/buddy/{id}/respond | 社交 | ✅ |
-| 50 | POST | /api/upload/avatar | 上传 | ✅ |
-| 51 | POST | /api/upload/diary-image | 上传 | ✅ |
-| 52 | POST | /api/upload/voice | 上传 | 🟡 |
-| 53 | GET | /api/study/pomodoros | 学习⚠️ | ✅ |
-| 54 | POST | /api/study/pomodoros | 学习⚠️ | ✅ |
-| 55 | POST | /api/study/pomodoros/{id}/complete | 学习⚠️ | ✅ |
-| 56 | GET | /api/study/todos | 学习⚠️ | ✅ |
-| 57 | POST | /api/study/todos | 学习⚠️ | ✅ |
-| 58 | POST | /api/study/todos/{id}/toggle | 学习⚠️ | ✅ |
-| 59 | GET | /api/plaza/posts | 广场🆕 | 🔴 |
-| 60 | GET | /api/plaza/posts/{id} | 广场🆕 | 🔴 |
-| 61 | POST | /api/plaza/posts | 广场🆕 | 🔴 |
-| 62 | POST | /api/plaza/posts/{id}/like | 广场🆕 | 🔴 |
-| 63 | GET | /api/plaza/posts/{id}/comments | 广场🆕 | 🔴 |
-| 64 | POST | /api/plaza/posts/{id}/comments | 广场🆕 | 🔴 |
-| 65 | GET | /api/avatar/memories | 分身🆕 | 🔴 |
-| 66 | POST | /api/avatar/memories | 分身🆕 | 🔴 |
-| 67 | PUT | /api/avatar/memories/{id} | 分身🆕 | 🔴 |
-| 68 | DELETE | /api/avatar/memories/{id} | 分身🆕 | 🔴 |
-| 69 | GET | /api/avatar/status | 分身🆕 | 🔴 |
-| 70 | PUT | /api/avatar/status | 分身🆕 | 🔴 |
-| 71 | GET | /api/avatar/matches | 分身🆕 | 🔴 |
-| 72 | POST | /api/avatar/matches/{id}/action | 分身🆕 | 🔴 |
-| 73 | GET | /api/avatar/profile | 分身🆕 | 🔴 |
-| 74 | POST | /api/avatar/profile/regenerate | 分身🆕 | 🔴 |
+| 24 | GET | /api/diaries/{diary_id} | 日记 | ✅ |
+| 25 | PUT | /api/diaries/{diary_id} | 日记 | ✅ |
+| 26 | GET | /api/diaries/{diary_id}/emotion-trend | 日记 | ✅ |
+| 27 | POST | /api/diaries/{diary_id}/extract | 日记 | ✅ |
+| 28 | POST | /api/diaries/{diary_id}/derivative | 日记 | ✅ |
+| 29 | GET | /api/derivatives | 衍生 | ✅ |
+| 30 | POST | /api/derivatives/{deriv_id}/share | 衍生 | ✅ |
+| 31 | GET | /api/anniversaries/today | 纪念日 | ✅ |
+| 32 | GET | /api/anniversaries | 纪念日 | ✅ |
+| 33 | POST | /api/anniversaries | 纪念日 | ✅ |
+| 34 | PUT | /api/anniversaries/{ann_id} | 纪念日 | ✅ |
+| 35 | DELETE | /api/anniversaries/{ann_id} | 纪念日 | ✅ |
+| 36 | POST | /api/ai/tts | AI | ✅ |
+| 37 | GET | /api/ai/fortune | AI | ✅ |
+| 38 | POST | /api/chat | 对话 | ✅ |
+| 39 | GET | /api/chat/history | 对话 | ✅ |
+| 40 | GET | /api/social/matches | 社交 | ✅ |
+| 41 | POST | /api/social/match-requests | 社交 | ✅ |
+| 42 | POST | /api/social/match-requests/{request_id}/respond | 社交 | ✅ |
+| 43 | GET | /api/social/messages/{match_id} | 社交 | ✅ |
+| 44 | GET | /api/social/matches/{match_id}/report | 社交 | ✅ |
+| 45 | POST | /api/social/buddy | 社交 | ✅ |
+| 46 | POST | /api/social/buddy/{request_id}/respond | 社交 | ✅ |
+| 47 | POST | /api/upload/avatar | 上传 | ✅ |
+| 48 | POST | /api/upload/diary-image | 上传 | ✅ |
+| 49 | POST | /api/upload/voice | 上传 | 🟡 |
+| 50 | GET | /api/study/pomodoros | 学习⚠️ | ✅ |
+| 51 | POST | /api/study/pomodoros | 学习⚠️ | ✅ |
+| 52 | POST | /api/study/pomodoros/{pomodoro_id}/complete | 学习⚠️ | ✅ |
+| 53 | GET | /api/study/todos | 学习⚠️ | ✅ |
+| 54 | POST | /api/study/todos | 学习⚠️ | ✅ |
+| 55 | POST | /api/study/todos/{todo_id}/toggle | 学习⚠️ | ✅ |
 
 **统计：** 74 个路由，55 个 ✅，2 个 🟡，17 个 🔴（含 16 个广场 + 分身新增 + 1 个搜索）
 
@@ -1740,106 +1907,8 @@ AI 根据记忆库生成的分身人格摘要。
 1. **语音上传 MIME 校验**：`upload/service.py` 的 `ALLOWED_IMAGE_TYPES` 只包含图片类型，`POST /api/upload/voice` 会因 MIME 校验失败而 400。需要新增语音 MIME 类型支持。
 2. **语音转写**：`POST /api/materials/voice` 返回硬编码 Mock 数据，未接入真实语音转文字服务。
 3. **学习模块**：v2 已废弃但路由仍注册，建议后续清理。
-4. **广场 + 分身模块**：16 个接口均为新增，需要新建数据模型 + 路由 + 服务层。
-
----
-
-## 新增数据模型参考（广场 + 分身）
-
-以下为广场和分身模块需要新建的数据表，供实现参考：
-
-```python
-# app/models/plaza.py
-
-class PlazaPost(Base):
-    __tablename__ = "plaza_posts"
-    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
-    user_id = Column(String, nullable=False)           # 作者 ID
-    type = Column(String, nullable=False)               # buddy / help / share / dating
-    content = Column(Text, nullable=False)              # 正文
-    images = Column(Text, default="[]")                 # JSON: string[]
-    location = Column(String, default="")               # 位置
-    tags = Column(Text, default="[]")                   # JSON: string[]
-    likes = Column(Integer, default=0)                  # 点赞数
-    comments = Column(Integer, default=0)               # 评论数
-    agent_responses = Column(Integer, default=0)        # 分身响应数
-    is_from_agent = Column(Boolean, default=False)      # 是否由分身发布
-    allow_agent_reply = Column(Boolean, default=True)   # 是否允许分身回复
-    school_only = Column(Boolean, default=False)        # 仅本校可见
-    created_at = Column(BigInteger, nullable=False)
-
-class PlazaComment(Base):
-    __tablename__ = "plaza_comments"
-    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
-    post_id = Column(String, nullable=False)            # 帖子 ID
-    user_id = Column(String, nullable=False)            # 评论者 ID
-    content = Column(Text, nullable=False)              # 评论内容
-    is_agent = Column(Boolean, default=False)           # 是否分身评论
-    created_at = Column(BigInteger, nullable=False)
-
-class PostLike(Base):
-    __tablename__ = "post_likes"
-    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
-    post_id = Column(String, nullable=False)
-    user_id = Column(String, nullable=False)
-    created_at = Column(BigInteger, nullable=False)
-    # UNIQUE(post_id, user_id)
-
-
-# app/models/avatar.py
-
-class AvatarMemory(Base):
-    __tablename__ = "avatar_memories"
-    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
-    user_id = Column(String, nullable=False)
-    category = Column(String, nullable=False)           # fact/interest/personality/need/habit/relation
-    content = Column(Text, nullable=False)
-    source = Column(String, default="manual")           # diary/chat/manual/behavior
-    source_ref = Column(String, default="")             # 来源引用 ID
-    confidence = Column(Float, default=1.0)             # 0.0-1.0
-    is_active = Column(Boolean, default=True)
-    is_pinned = Column(Boolean, default=False)
-    need_type = Column(String, nullable=True)           # buddy/dating/help/activity
-    urgency = Column(String, nullable=True)             # active/passive
-    expiry = Column(BigInteger, nullable=True)          # 过期时间戳
-    match_status = Column(String, nullable=True)        # searching/matched/expired
-    tags = Column(Text, default="[]")                   # JSON: string[]
-    created_at = Column(BigInteger, nullable=False)
-    updated_at = Column(BigInteger, nullable=False)
-
-class AvatarStatus(Base):
-    __tablename__ = "avatar_status"
-    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
-    user_id = Column(String, unique=True, nullable=False)
-    is_active = Column(Boolean, default=True)
-    browsed_count = Column(Integer, default=0)
-    matched_count = Column(Integer, default=0)
-    chatting_count = Column(Integer, default=0)
-    last_active_at = Column(BigInteger, default=0)
-    enabled_channels = Column(Text, default='["buddy","help","share","dating"]')
-    enabled_actions = Column(Text, default='["browse","match","comment"]')
-    match_range = Column(Text, default='{"school":"","distanceKm":10}')
-
-class AvatarMatch(Base):
-    __tablename__ = "avatar_matches"
-    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
-    user_id = Column(String, nullable=False)            # 被推荐的用户
-    post_id = Column(String, nullable=False)            # 匹配的帖子
-    match_score = Column(Integer, default=0)            # 0-100
-    match_reasons = Column(Text, default="[]")          # JSON: string[]
-    agent_conversation = Column(Text, default="[]")     # JSON: AgentConversationMessage[]
-    status = Column(String, default="new")              # new/viewed/chatting/dismissed
-    created_at = Column(BigInteger, nullable=False)
-
-class AvatarProfile(Base):
-    __tablename__ = "avatar_profiles"
-    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
-    user_id = Column(String, unique=True, nullable=False)
-    summary = Column(Text, default="")
-    diary_count = Column(Integer, default=0)
-    chat_count = Column(Integer, default=0)
-    generated_at = Column(BigInteger, default=0)
-```
+4. **自动生成任务部署注意**：22:00 自动补生成依赖后端常驻进程。多实例部署时建议仅保留单实例执行定时任务，避免重复扫描。
+5. **社交消息发送接口缺失**：TASK-D 提及 `POST /api/social/messages/{match_id}`（发送消息），当前后端未注册该接口，`social_messages` 仅有读取逻辑。
 
 ---
 
@@ -1850,14 +1919,16 @@ class AvatarProfile(Base):
 | 方法 | 用途 | 模型 | 接入的路由 |
 |------|------|------|-----------|
 | chat_completion | 文本对话 | M2.7-highspeed | /chat, /ai/fortune |
-| stream_chat | 流式对话（SSE） | M2.7-highspeed | 未接入 || generate_image | 文生图 | image-01 | /user/agent-portrait, /diaries/{id}/derivative |
+| stream_chat | 流式对话（SSE） | M2.7-highspeed | 未接入 |
+| generate_image | 文生图 | image-01 | /user/agent-portrait, /diaries/{diary_id}/derivative |
 | text_to_speech | TTS | speech-2.8-hd | /ai/tts |
 | generate_music | 音乐生成 | music-2.5+ | 未接入 |
-| extract_emotion | 情绪提取 | chat_completion | /materials/{id}/emotion |
-| polish_text | 文字润色 | chat_completion | /materials/{id}/polish |
+| extract_emotion | 情绪提取 | chat_completion | /materials/{material_id}/emotion |
+| polish_text | 文字润色 | chat_completion | /materials/{material_id}/polish |
 | generate_diary | 日记生成 | chat_completion | /diaries/generate |
-| extract_info | 信息提取 | chat_completion | /diaries/{id}/extract |
+| extract_info | 信息提取 | chat_completion | /diaries/{diary_id}/extract |
 | generate_portrait | 用户画像 | chat_completion | /user/portrait/refresh |
+| generate_match_report | 匹配报告 | chat_completion | /social/matches/{match_id}/report |
 | generate_match_report | 匹配报告 | chat_completion | /social/matches/{id}/report |
 | summarize_chat_session | 对话摘要 | chat_completion | /chat（session 封闭时自动调用）|
 | *generate_avatar_profile* | *分身侧写生成* | *chat_completion* | */avatar/profile/regenerate* 🆕 待新增 |

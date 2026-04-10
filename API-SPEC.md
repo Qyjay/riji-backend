@@ -473,7 +473,27 @@ PUT /diaries/{id}
 - 检查 `editCount < maxEdits`，否则拒绝修改并返回错误
 - 更新 `content`、`editCount += 1`、`updatedAt`
 
-### 3.7 获取情绪趋势
+### 3.7 删除日记
+
+```
+DELETE /diaries/{id}
+```
+
+**需要认证：** ✅
+
+**路径参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `id` | `string` | 日记 ID |
+
+**响应 `data`**： `null`
+
+**业务逻辑：**
+- 验证日记归属（只能删除自己的日记）
+- 日记不存在时返回 404
+
+### 3.8 获取情绪趋势
 
 ```
 GET /diaries/{id}/emotion-trend
@@ -494,7 +514,7 @@ GET /diaries/{id}/emotion-trend
 }
 ```
 
-### 3.8 AI 信息提取
+### 3.9 AI 信息提取
 
 ```
 POST /diaries/{id}/extract
@@ -526,7 +546,7 @@ POST /diaries/{id}/extract
 }
 ```
 
-### 3.9 生成衍生内容
+### 3.10 生成衍生内容
 
 ```
 POST /diaries/{id}/derivative
@@ -549,7 +569,7 @@ POST /diaries/{id}/derivative
 - `novel`：调用 MiniMax 文本生成 API，返回 `content`，`mediaUrl` 为空
 - `share_card`：生成分享文案 + 卡片图片，两者都有值
 
-### 3.10 获取衍生内容列表
+### 3.11 获取衍生内容列表
 
 ```
 GET /derivatives?diary_id={diaryId}
@@ -565,7 +585,7 @@ GET /derivatives?diary_id={diaryId}
 
 **响应 `data`：** `DiaryDerivative[]` 数组
 
-### 3.11 设置衍生内容分享范围
+### 3.12 设置衍生内容分享范围
 
 ```
 POST /derivatives/{id}/share
@@ -583,7 +603,7 @@ POST /derivatives/{id}/share
 
 **响应 `data`：** `null` 或空对象
 
-### 3.12 获取今日概览
+### 3.13 获取今日概览
 
 ```
 GET /diaries/today-summary?date={date}

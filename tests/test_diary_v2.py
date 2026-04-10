@@ -4,6 +4,7 @@
 - 测试修改次数限制
 - 测试情绪趋势查询
 """
+import asyncio
 import json
 from uuid import uuid4
 
@@ -161,6 +162,53 @@ class TestDiaryGeneration:
         assert detail["materialIds"] == data["materialIds"]
         assert detail["emotionSummary"] == data["emotionSummary"]
 
+    def test_auto_generate_missing_diaries_creates_for_user_with_material(self, client: TestClient, db):
+        """22 点自动任务：有素材且未手动生成时应自动补生成。"""
+        auth, headers = _create_user_with_material(client, "diary_auto_gen1")
+
+        from app.diary import service as diary_service
+
+        result = asyncio.run(
+            diary_service.auto_generate_missing_diaries(db, "2026-03-25")
+        )
+
+        assert result["candidate_count"] == 1
+        assert result["generated_count"] == 1
+        assert result["skipped_existing_count"] == 0
+        assert result["failed"] == []
+
+        list_resp = client.get("/api/diaries", headers=headers)
+        assert list_resp.status_code == 200
+        data = list_resp.json()["data"]
+        assert data["total"] == 1
+        assert data["items"][0]["date"] == "2026-03-25"
+
+    def test_auto_generate_missing_diaries_skips_existing_manual_diary(self, client: TestClient, db):
+        """22 点自动任务：当天已有手动生成日记时应跳过。"""
+        auth, headers = _create_user_with_material(client, "diary_auto_gen2")
+
+        manual_resp = client.post(
+            "/api/diaries/generate",
+            json={"date": "2026-03-25", "weather": "晴"},
+            headers=headers,
+        )
+        assert manual_resp.status_code == 200
+
+        from app.diary import service as diary_service
+
+        result = asyncio.run(
+            diary_service.auto_generate_missing_diaries(db, "2026-03-25")
+        )
+
+        assert result["candidate_count"] == 1
+        assert result["generated_count"] == 0
+        assert result["skipped_existing_count"] == 1
+        assert result["failed"] == []
+
+        list_resp = client.get("/api/diaries", headers=headers)
+        assert list_resp.status_code == 200
+        assert list_resp.json()["data"]["total"] == 1
+
     def test_generate_diary_populates_images_and_tags(self, client: TestClient, monkeypatch):
         """生成日记时：images=当日图片URL；tags=素材标签+AI标签（去重合并）。"""
         auth = create_test_user(client, username="diary_gen_assets")
@@ -222,6 +270,152 @@ class TestDiaryGeneration:
         ]
         for tag in ["校园", "晚霞", "运动", "学习", "成长", "回忆"]:
             assert tag in data["tags"]
+
+    def test_generate_diary_image_understand_enabled_uses_cache(self, client: TestClient, monkeypatch):
+        """图片理解开启后：首轮识别、次轮命中缓存，避免重复识别。"""
+        auth = create_test_user(client, username="img_understand_c")
+        headers = get_auth_header(auth["token"])
+
+        resp = client.post("/api/materials", json={
+            "type": "image",
+            "content": "",
+            "media_url": ["https://example.com/understand-cache.jpg"],
+            "date": "2026-03-25",
+        }, headers=headers)
+        assert resp.status_code == 200
+
+        from app.diary import service as diary_service
+        from app.ai import service as ai_service
+        diary_service._IMAGE_UNDERSTAND_CACHE.clear()
+
+        calls = {"count": 0}
+
+        async def fake_understand_image_text(image_url: str, prompt: str = "", timeout_sec: int = 20):
+            calls["count"] += 1
+            return "图书馆窗边晚霞"
+
+        monkeypatch.setattr(ai_service, "understand_image_text", fake_understand_image_text)
+
+        class FakeMiniMaxClient:
+            def __init__(self):
+                self.last_materials_text = ""
+
+            async def generate_diary(self, materials_text: str, **kwargs):
+                self.last_materials_text = materials_text
+                return {
+                    "title": "测试标题",
+                    "content": "测试正文",
+                    "emotion_summary": {"dominant": "平静", "distribution": {"平静": 1.0}},
+                    "ai_tags": ["测试标签"],
+                }
+
+        fake_client = FakeMiniMaxClient()
+        monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: fake_client)
+        monkeypatch.setattr(diary_service.settings, "ARK_VISION_ENABLED", True)
+        monkeypatch.setattr(diary_service.settings, "ARK_VISION_MAX_IMAGES", 3)
+        monkeypatch.setattr(diary_service.settings, "ARK_VISION_CACHE_TTL_SEC", 3600)
+        monkeypatch.setattr(diary_service.settings, "ARK_VISION_PROMPT", "请描述图片")
+
+        first_resp = client.post("/api/diaries/generate", json={"date": "2026-03-25"}, headers=headers)
+        second_resp = client.post("/api/diaries/generate", json={"date": "2026-03-25"}, headers=headers)
+
+        assert first_resp.status_code == 200
+        assert second_resp.status_code == 200
+        assert calls["count"] == 1
+        assert "图书馆窗边晚霞" in fake_client.last_materials_text
+        first_data = first_resp.json()["data"]
+        assert "imageUnderstandings" in first_data
+        assert isinstance(first_data["imageUnderstandings"], list)
+        assert "图书馆窗边晚霞" in first_data["imageUnderstandings"]
+
+    def test_generate_diary_image_understand_merges_when_content_exists(self, client: TestClient, monkeypatch):
+        """图片素材已有 content 时，也应补充图片理解结果。"""
+        auth = create_test_user(client, username="img_understand_m")
+        headers = get_auth_header(auth["token"])
+
+        resp = client.post("/api/materials", json={
+            "type": "image",
+            "content": "操场上有人在跑步",
+            "media_url": ["https://example.com/understand-merge.jpg"],
+            "date": "2026-03-25",
+        }, headers=headers)
+        assert resp.status_code == 200
+
+        from app.diary import service as diary_service
+        from app.ai import service as ai_service
+        diary_service._IMAGE_UNDERSTAND_CACHE.clear()
+
+        calls = {"count": 0}
+
+        async def fake_understand_image_text(image_url: str, prompt: str = "", timeout_sec: int = 20):
+            calls["count"] += 1
+            return "夕阳下学生在跑道冲刺"
+
+        monkeypatch.setattr(ai_service, "understand_image_text", fake_understand_image_text)
+
+        class FakeMiniMaxClient:
+            def __init__(self):
+                self.last_materials_text = ""
+
+            async def generate_diary(self, materials_text: str, **kwargs):
+                self.last_materials_text = materials_text
+                return {
+                    "title": "测试标题",
+                    "content": "测试正文",
+                    "emotion_summary": {"dominant": "平静", "distribution": {"平静": 1.0}},
+                    "ai_tags": ["测试标签"],
+                }
+
+        fake_client = FakeMiniMaxClient()
+        monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: fake_client)
+        monkeypatch.setattr(diary_service.settings, "ARK_VISION_ENABLED", True)
+        monkeypatch.setattr(diary_service.settings, "ARK_VISION_MAX_IMAGES", 3)
+
+        gen_resp = client.post("/api/diaries/generate", json={"date": "2026-03-25"}, headers=headers)
+        assert gen_resp.status_code == 200
+        assert calls["count"] == 1
+        assert "操场上有人在跑步" in fake_client.last_materials_text
+        assert "夕阳下学生在跑道冲刺" in fake_client.last_materials_text
+
+    def test_generate_diary_image_understand_failure_fallback(self, client: TestClient, monkeypatch):
+        """图片理解失败时应降级，不影响日记生成主流程。"""
+        auth = create_test_user(client, username="img_understand_f")
+        headers = get_auth_header(auth["token"])
+
+        resp = client.post("/api/materials", json={
+            "type": "image",
+            "content": "",
+            "media_url": ["https://example.com/understand-fail.jpg"],
+            "date": "2026-03-25",
+        }, headers=headers)
+        assert resp.status_code == 200
+
+        from app.diary import service as diary_service
+        from app.ai import service as ai_service
+        diary_service._IMAGE_UNDERSTAND_CACHE.clear()
+
+        async def fake_understand_image_text(image_url: str, prompt: str = "", timeout_sec: int = 20):
+            raise RuntimeError("ark unavailable")
+
+        monkeypatch.setattr(ai_service, "understand_image_text", fake_understand_image_text)
+
+        class FakeMiniMaxClient:
+            async def generate_diary(self, materials_text: str, **kwargs):
+                return {
+                    "title": "降级标题",
+                    "content": "即使图片识别失败也可以生成",
+                    "emotion_summary": {"dominant": "平静", "distribution": {"平静": 1.0}},
+                    "ai_tags": ["降级"],
+                }
+
+        monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: FakeMiniMaxClient())
+        monkeypatch.setattr(diary_service.settings, "ARK_VISION_ENABLED", True)
+        monkeypatch.setattr(diary_service.settings, "ARK_VISION_MAX_IMAGES", 3)
+
+        gen_resp = client.post("/api/diaries/generate", json={"date": "2026-03-25"}, headers=headers)
+        assert gen_resp.status_code == 200
+        data = gen_resp.json()["data"]
+        assert data["title"] == "降级标题"
 
 
 class TestDiaryList:
