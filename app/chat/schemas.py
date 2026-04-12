@@ -36,7 +36,6 @@ class ChatMessageOut(CamelModel):
     content: str
     timestamp: int
 
-from app.serializers import CamelModel
 
 class SessionMessagesOut(CamelModel):
     """对话段消息列表"""

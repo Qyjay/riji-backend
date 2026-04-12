@@ -1,5 +1,6 @@
 """
 社交模块路由
+恢复至之前版本代码
 """
 from typing import Optional
 
@@ -15,6 +16,7 @@ from app.social.schemas import (
     SendMessageBody,
 )
 from app.social import service
+
 
 router = APIRouter(prefix="/social", tags=["社交"])
 

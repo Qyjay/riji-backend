@@ -106,40 +106,32 @@ class MiniMaxClient:
                 return MOCK_DIARY_EXPANSION
             return random.choice(MOCK_CHAT_RESPONSES)
 
+        full_messages = []
+        if system_prompt:
+            full_messages.append({"role": "system", "content": system_prompt})
+        full_messages.extend(messages)
+
         payload = {
             "model": self.model,
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "messages": messages,
-        }
-        if system_prompt:
-            payload["system"] = system_prompt
-
-        headers = {
-            **self.headers,
-            "anthropic-version": "2023-06-01",
+            "messages": full_messages,
         }
 
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
                 resp = await client.post(
-                    f"{self.api_base}/anthropic/v1/messages",
-                    headers=headers,
+                    f"{self.api_base}/v1/chat/completions",
+                    headers=self.headers,
                     json=payload,
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                content_blocks = data.get("content", [])
-                text_parts = [
-                    block["text"]
-                    for block in content_blocks
-                    if block.get("type") == "text"
-                ]
-                return "".join(text_parts)
+                return data["choices"][0]["message"]["content"]
         except httpx.HTTPStatusError as e:
             raise ApiException(
                 code=AI_SERVICE_ERROR,
-                message=f"MiniMax API 请求失败: {e.response.status_code}",
+                message=f"MiniMax API 请求失败: {e.response.status_code} {e.response.text[:200]}",
                 status_code=502,
             )
         except Exception as e:
@@ -169,27 +161,25 @@ class MiniMaxClient:
                 yield char
             return
 
+        full_messages = []
+        if system_prompt:
+            full_messages.append({"role": "system", "content": system_prompt})
+        full_messages.extend(messages)
+
         payload = {
             "model": self.model,
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "messages": messages,
+            "messages": full_messages,
             "stream": True,
-        }
-        if system_prompt:
-            payload["system"] = system_prompt
-
-        headers = {
-            **self.headers,
-            "anthropic-version": "2023-06-01",
         }
 
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
                 async with client.stream(
                     "POST",
-                    f"{self.api_base}/anthropic/v1/messages",
-                    headers=headers,
+                    f"{self.api_base}/v1/chat/completions",
+                    headers=self.headers,
                     json=payload,
                 ) as resp:
                     resp.raise_for_status()
@@ -201,14 +191,11 @@ class MiniMaxClient:
                             break
                         try:
                             data = json.loads(data_str)
-                            event_type = data.get("type", "")
-                            if event_type == "content_block_delta":
-                                delta = data.get("delta", {})
-                                if delta.get("type") == "text_delta":
-                                    text = delta.get("text", "")
-                                    if text:
-                                        yield text
-                        except json.JSONDecodeError:
+                            delta = data.get("choices", [{}])[0].get("delta", {})
+                            text = delta.get("content", "")
+                            if text:
+                                yield text
+                        except (json.JSONDecodeError, IndexError):
                             continue
         except httpx.HTTPStatusError as e:
             raise ApiException(
@@ -256,7 +243,7 @@ class MiniMaxClient:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
                 resp = await client.post(
                     f"{self.api_base}/v1/image_generation",
                     headers=self.headers,
@@ -332,7 +319,7 @@ class MiniMaxClient:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
                 resp = await client.post(
                     f"{self.api_base}/v1/t2a_v2",
                     headers=self.headers,
@@ -408,7 +395,7 @@ class MiniMaxClient:
             payload["lyrics_optimizer"] = True
 
         try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
+            async with httpx.AsyncClient(timeout=300.0, trust_env=False) as client:
                 resp = await client.post(
                     f"{self.api_base}/v1/music_generation",
                     headers=self.headers,
@@ -858,9 +845,9 @@ _minimax_client: Optional[MiniMaxClient] = None
 
 
 def get_minimax_client() -> MiniMaxClient:
-    """获取 MiniMax 客户端单例"""
+    """获取 MiniMax 客户端单例（mock 模式切换时自动重建）"""
     global _minimax_client
-    if _minimax_client is None:
+    if _minimax_client is None or _minimax_client.mock != settings.MINIMAX_MOCK:
         _minimax_client = MiniMaxClient(
             api_key=settings.MINIMAX_API_KEY,
             api_base=settings.MINIMAX_API_BASE,

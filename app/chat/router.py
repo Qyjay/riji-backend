@@ -5,27 +5,31 @@
 - POST /chat/close-session            主动关闭对话段
 - GET  /chat/session/{id}/messages    获取对话段消息
 """
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session
+import logging
+import traceback
 from time import time
 from uuid import uuid4
 
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.orm import Session
+
+logger = logging.getLogger("uvicorn.error")
+
 from app.chat import service
-from app.chat.schemas import ChatHistoryOut, ChatRequest
-from app.dependencies import get_current_user, get_db
-from app.models.chat import ChatMessage, ChatSession
-from app.models.user import User, UserSettings
-from app.response import success, ApiException, NOT_FOUND
 from app.chat.schemas import (
     ChatRequest, CloseSessionOut, ChatSessionOut, ChatMessageOut, SessionMessagesOut,
 )
 from app.chat.service import get_or_create_session, close_and_materialize
+from app.dependencies import get_current_user, get_db
+from app.models.chat import ChatMessage, ChatSession
+from app.models.user import User, UserSettings
+from app.response import success, ApiException, NOT_FOUND
 
 router = APIRouter(prefix="/chat", tags=["AI 对话"])
 
 
 def _now_ms() -> int:
-    return int(time.time() * 1000)
+    return int(time() * 1000)
 
 
 def _uuid() -> str:
@@ -50,78 +54,83 @@ async def ai_chat(
     AI 对话，返回纯文本字符串（前端用模拟打字机渲染）。
     同时保存对话历史，集成 session 管理。
     """
-    from app.ai.minimax_client import get_minimax_client
-    client = get_minimax_client()
+    try:
+        from app.ai.minimax_client import get_minimax_client
+        client = get_minimax_client()
 
-    now = _now_ms()
-    settings = _get_settings(db, current_user.id)
-    silence_threshold = getattr(settings, 'chat_silence_threshold', 30) or 30
+        now = _now_ms()
+        settings = _get_settings(db, current_user.id)
+        silence_threshold = getattr(settings, 'chat_silence_threshold', 30) or 30
 
-    # Session 管理：获取或创建 session
-    current_session, old_session = get_or_create_session(
-        db, current_user.id, now, silence_threshold
-    )
+        # Session 管理：获取或创建 session
+        current_session, old_session = get_or_create_session(
+            db, current_user.id, now, silence_threshold
+        )
 
-    # 如果有旧 session 需要封闭，先处理
-    material_generated = False
-    material_id = None
-    if old_session:
-        material = await close_and_materialize(db, old_session, settings)
-        if material:
-            material_generated = True
-            material_id = material.id
+        # 如果有旧 session 需要封闭，先处理
+        material_generated = False
+        material_id = None
+        if old_session:
+            material = await close_and_materialize(db, old_session, settings)
+            if material:
+                material_generated = True
+                material_id = material.id
 
-    # 保存用户消息
-    user_msg = ChatMessage(
-        id=_uuid(),
-        user_id=current_user.id,
-        role="user",
-        content=body.message,
-        timestamp=now,
-        session_id=current_session.id,
-    )
-    db.add(user_msg)
-    db.commit()
+        # 保存用户消息
+        user_msg = ChatMessage(
+            id=_uuid(),
+            user_id=current_user.id,
+            role="user",
+            content=body.message,
+            timestamp=now,
+            session_id=current_session.id,
+        )
+        db.add(user_msg)
+        db.commit()
 
-    # 构建历史消息（最近 20 条）
-    history = (
-        db.query(ChatMessage)
-        .filter(ChatMessage.user_id == current_user.id)
-        .order_by(ChatMessage.timestamp.desc())
-        .limit(20)
-        .all()
-    )
-    messages = [
-        {"role": msg.role, "content": msg.content}
-        for msg in reversed(history)
-    ]
+        # 构建历史消息（最近 20 条）
+        history = (
+            db.query(ChatMessage)
+            .filter(ChatMessage.user_id == current_user.id)
+            .order_by(ChatMessage.timestamp.desc())
+            .limit(20)
+            .all()
+        )
+        messages = [
+            {"role": msg.role, "content": msg.content}
+            for msg in reversed(history)
+        ]
 
-    # 调用 AI（一次性返回完整文本）
-    system_prompt = "你是日迹 App 的 AI 伙伴，帮助用户记录生活、整理情绪、分析成长。请用温暖、友善的语气回复。"
-    reply = await client.chat_completion(messages, system_prompt=system_prompt)
+        # 调用 AI（一次性返回完整文本）
+        system_prompt = "你是日迹 App 的 AI 伙伴，帮助用户记录生活、整理情绪、分析成长。请用温暖、友善的语气回复。"
+        reply = await client.chat_completion(messages, system_prompt=system_prompt)
 
-    # 保存 AI 回复
-    ai_now = _now_ms()
-    ai_msg = ChatMessage(
-        id=_uuid(),
-        user_id=current_user.id,
-        role="assistant",
-        content=reply,
-        timestamp=ai_now,
-        session_id=current_session.id,
-    )
-    db.add(ai_msg)
+        # 保存 AI 回复
+        ai_now = _now_ms()
+        ai_msg = ChatMessage(
+            id=_uuid(),
+            user_id=current_user.id,
+            role="assistant",
+            content=reply,
+            timestamp=ai_now,
+            session_id=current_session.id,
+        )
+        db.add(ai_msg)
 
-    # 更新 session 的 message_count 和 end_time
-    current_session.message_count = (current_session.message_count or 0) + 2
-    current_session.end_time = ai_now
-    db.commit()
+        # 更新 session 的 message_count 和 end_time
+        current_session.message_count = (current_session.message_count or 0) + 2
+        current_session.end_time = ai_now
+        db.commit()
 
-    # 构造响应
-    result = {"code": 0, "data": reply, "message": "ok"}
-    if material_generated:
-        result["meta"] = {"materialGenerated": True, "materialId": material_id}
-    return result
+        # 构造响应
+        result = {"code": 0, "data": reply, "message": "ok"}
+        if material_generated:
+            result["meta"] = {"materialGenerated": True, "materialId": material_id}
+        return result
+
+    except Exception as e:
+        logger.error("[chat] ai_chat failed: %s\n%s", str(e), traceback.format_exc())
+        raise
 
 
 @router.post("/close-session", summary="主动关闭当前对话段")
@@ -198,7 +207,27 @@ def get_chat_history(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """获取 AI 聊天历史"""
-    result = service.get_history(db, current_user.id, limit=limit)
-    out = ChatHistoryOut(**result)
-    return success(out.model_dump(by_alias=True))
+    """获取 AI 聊天历史，无历史时返回默认欢迎消息以激活前端聊天 UI"""
+    messages = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.user_id == current_user.id)
+        .order_by(ChatMessage.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
+    items = [
+        ChatMessageOut(role=m.role, content=m.content, timestamp=m.timestamp).model_dump(by_alias=True)
+        for m in reversed(messages)
+    ]
+
+    if not items:
+        welcome = ChatMessageOut(
+            role="assistant",
+            content=f"嗨 {current_user.name or current_user.username}！我是日迹 AI 伙伴，很高兴见到你 😊\n\n"
+                    "你可以跟我聊聊今天发生的事情，或者让我帮你记录心情、整理思绪。\n"
+                    "有什么想说的，尽管告诉我吧！",
+            timestamp=_now_ms(),
+        ).model_dump(by_alias=True)
+        items = [welcome]
+
+    return success({"items": items, "total": len(items)})

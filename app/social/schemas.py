@@ -1,5 +1,6 @@
 """
 社交模块 Pydantic Schema
+恢复之前版本中的代码
 """
 from typing import List, Optional
 from pydantic import BaseModel
@@ -14,6 +15,7 @@ class MatchRequestBody(BaseModel):
 class SendMessageBody(BaseModel):
     """发送社交消息"""
     content: str
+
 
 
 class RespondRequest(BaseModel):

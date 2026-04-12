@@ -14,13 +14,14 @@
 
 | 文件 | 操作 |
 |------|------|
-| `app/social/router.py` | 检查（已实现） |
-| `app/social/service.py` | **需要补充**（目前只有 2 个工具函数） |
-| `app/social/schemas.py` | 检查（已实现） |
-| `app/chat/router.py` | 检查（已实现） |
-| `app/chat/service.py` | **需要写**（目前为空） |
-| `app/chat/schemas.py` | 检查 + 完善 |
-| `tests/test_social.py` | 补充测试 |
+| `app/social/router.py` | 已完成（路由已薄化，调用 `service.py`） |
+| `app/social/service.py` | 已完成（已承载主要社交业务逻辑） |
+| `app/social/schemas.py` | 已完成（含 `SendMessageBody` 等 schema） |
+| `app/chat/router.py` | 已完成（路由已薄化，调用 `service.py`） |
+| `app/chat/service.py` | 已完成（AI 对话/历史逻辑已抽离） |
+| `app/chat/schemas.py` | 已完成（统一 chat schema 定义） |
+| `tests/test_social.py` | 已完成（补齐社交链路与异常场景测试） |
+| `tests/test_ai.py` | 已验证（覆盖 AI 对话与历史能力） |
 
 ## 不要碰的文件
 
@@ -33,11 +34,11 @@
 
 ## 接口清单
 
-### 社交模块（7 个接口）
+### 社交模块（8 个接口）
 
 #### GET /api/social/matches — 已匹配列表
 
-**当前状态：** ✅ 已实现（逻辑写在 router.py 中）
+**当前状态：** ✅ 已实现（路由调用 `service.match_to_out()` 等服务层逻辑）
 
 查询 status="accepted" 的匹配记录，JOIN 用户表获取对方昵称、头像、学校。返回裸数组。
 
@@ -47,7 +48,7 @@
 
 #### POST /api/social/match-requests — 发送匹配请求
 
-**当前状态：** ✅ 已实现（逻辑写在 router.py 中）
+**当前状态：** ✅ 已实现（路由调用 `service.create_match_request()`）
 
 **核心逻辑：**
 ```
@@ -71,17 +72,17 @@
 
 #### GET /api/social/messages/{match_id} — 匹配消息列表
 
-**当前状态：** ✅ 已实现（逻辑写在 router.py 中）
+**当前状态：** ✅ 已实现（路由调用 `service.get_messages()`）
 
 支持游标分页（before 参数），返回裸数组。
 
-**你需要做的：** 这个接口只查消息，但项目中没有「发送消息」的接口。**你需要新增一个发送消息的接口**（见下方「需要新增的接口」）。
+**当前说明：** 发送消息接口已补齐，消息列表接口保留游标分页能力。
 
 ---
 
 #### GET /api/social/matches/{match_id}/report — 匹配报告（AI）
 
-**当前状态：** ✅ 已实现（逻辑写在 router.py 中）
+**当前状态：** ✅ 已实现（路由调用 `service.get_match_report()`，首次生成后缓存）
 
 调用 minimax_client.generate_match_report 生成报告，缓存到 Match.match_report 字段。
 
@@ -103,11 +104,11 @@
 
 ---
 
-### 需要新增的接口
+### 已新增接口
 
 #### POST /api/social/messages/{match_id} — 发送消息
 
-当前只有「获取消息」接口，缺少「发送消息」。你需要新增：
+该接口已在仓库中完成，当前行为如下：
 
 **请求 Body：**
 ```json
@@ -116,7 +117,7 @@
 }
 ```
 
-**伪代码：**
+**当前逻辑：**
 ```python
 @router.post("/messages/{match_id}", summary="发送消息")
 def send_message(match_id, body, current_user, db):
@@ -143,7 +144,7 @@ class SocialMessage(Base):
 
 #### POST /api/chat — AI 对话
 
-**当前状态：** ✅ 已实现（逻辑写在 router.py 中）
+**当前状态：** ✅ 已实现（路由调用 `service.send_message()`）
 
 **当前实现逻辑：**
 ```
@@ -187,11 +188,11 @@ minimax_client 已经有 `stream_chat` 方法了，只是没有被任何路由�
 
 ---
 
-#### chat/service.py — 需要你写
+#### chat/service.py — 已完成
 
-当前 `chat/service.py` 是空文件。chat 的逻辑直接写在 router.py 里。
+当前 `chat/service.py` 已完成抽离，chat 逻辑不再直接堆在 router.py 里。
 
-**建议改造：** 把 router.py 中的对话逻辑抽取到 service.py，包括：
+**当前包含：**
 
 ```python
 # app/chat/service.py
@@ -207,13 +208,21 @@ def get_history(db, user_id, limit=20):
 
 ---
 
-### social/service.py — 需要补充
+### social/service.py — 已完成补充
 
-当前只有 2 个工具函数：
+当前已不再只有 2 个工具函数，而是承载了主要社交业务逻辑：
 
 ```python
-def get_other_user_id(match, current_user_id) -> str    # 获取对方 ID
-def match_to_out(match, current_user_id, db) -> dict    # 转前端格式
+def get_other_user_id(match, current_user_id) -> str
+def match_to_out(match, current_user_id, db) -> dict
+def list_matches(db, user_id) -> list[dict]
+def create_match_request(db, user_id, target_id) -> Match
+def get_messages(db, user_id, match_id, limit, before) -> list[SocialMessage]
+def send_message(db, user_id, match_id, content) -> SocialMessage
+async def get_match_report(db, user_id, match_id) -> dict
+def respond_match_request(db, user_id, request_id, accept) -> None
+def apply_buddy(db, user_id, target_id, reason) -> Match
+def respond_buddy(db, user_id, request_id, accept) -> None
 ```
 
 大量业务逻辑直接写在 router.py 里。**建议逐步抽取到 service.py**：
@@ -226,11 +235,11 @@ def match_to_out(match, current_user_id, db) -> dict    # 转前端格式
 6. `get_match_report(db, user_id, match_id)` — 获取匹配报告
 7. `apply_buddy(db, user_id, target_id, reason)` — 申请搭子
 
-这个重构不是必须的（router 里直接写也能跑），但会让代码更清晰。按优先级来：
+当前仓库状态已按建议完成重构，router 主要负责参数解析与响应包装，service 负责业务逻辑。按优先级总结如下：
 
-- **必须做：** 新增发送消息接口
-- **建议做：** 把 router 逻辑抽到 service
-- **可选做：** chat service 层抽取
+- **已完成：** 新增发送消息接口
+- **已完成：** 把 router 逻辑抽到 service
+- **已完成：** chat service 层抽取
 
 ---
 
