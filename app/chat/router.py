@@ -2,16 +2,18 @@
 聊天路由
 - POST /chat                          AI 对话（集成 session 管理）
 - GET  /chat/history                  聊天历史
-- POST /chat/close-session            主动关闭对话段
-- GET  /chat/session/{id}/messages    获取对话段消息
+- POST /chat/close-session            主动关闭当前对话段
+- GET  /chat/session/{id}/messages   获取对话段消息
+- POST /chat/stream                   AI 对话（SSE 流式）
 """
+import json
 import logging
 import traceback
+from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
 from time import time
 from uuid import uuid4
-
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -88,7 +90,7 @@ async def ai_chat(
         db.add(user_msg)
         db.commit()
 
-        # 构建历史消息（最近 20 条）
+        # 构建历史消息：获取该用户所有消息，排除刚发的这条
         history = (
             db.query(ChatMessage)
             .filter(ChatMessage.user_id == current_user.id)
@@ -96,13 +98,18 @@ async def ai_chat(
             .limit(20)
             .all()
         )
-        messages = [
+        # 历史消息（排除最后一条刚存的用户消息）
+        historical = [
             {"role": msg.role, "content": msg.content}
-            for msg in reversed(history)
-        ]
+            for msg in reversed(history[1:])
+        ] if len(history) > 1 else []
+        # 追加当前用户消息
+        historical.append({"role": "user", "content": body.message})
+        messages = historical
 
         # 调用 AI（一次性返回完整文本）
         system_prompt = "你是日迹 App 的 AI 伙伴，帮助用户记录生活、整理情绪、分析成长。请用温暖、友善的语气回复。"
+        print(f"[DEBUG] 发送给 AI 的消息: {messages}", flush=True)
         reply = await client.chat_completion(messages, system_prompt=system_prompt)
 
         # 保存 AI 回复
@@ -131,6 +138,129 @@ async def ai_chat(
     except Exception as e:
         logger.error("[chat] ai_chat failed: %s\n%s", str(e), traceback.format_exc())
         raise
+
+
+async def stream_response_generator(
+    db: Session,
+    user_id: str,
+    session_id: str,
+    messages: list,
+    system_prompt: str,
+    silence_threshold: int,
+):
+    """SSE 流式响应生成器"""
+    from app.ai.minimax_client import get_minimax_client
+    client = get_minimax_client()
+
+    # 调试：打印收到的 messages
+    print(f"[DEBUG] stream_response_generator 收到 messages: {messages}", flush=True)
+
+    # 先发送 session_id 方便前端处理
+    yield f"data: {json.dumps({'type': 'session', 'sessionId': session_id})}\n\n"
+
+    full_reply = ""
+    try:
+        async for chunk in client.stream_chat(messages, system_prompt=system_prompt):
+            full_reply += chunk
+            # SSE 格式：data: {json}\n\n
+            yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
+
+        # 流结束，保存 AI 回复到数据库
+        ai_now = _now_ms()
+        ai_msg = ChatMessage(
+            id=_uuid(),
+            user_id=user_id,
+            role="assistant",
+            content=full_reply,
+            timestamp=ai_now,
+            session_id=session_id,
+        )
+        db.add(ai_msg)
+
+        # 更新 session
+        db.query(ChatSession).filter(ChatSession.id == session_id).update({
+            "message_count": (ChatSession.message_count or 0) + 2,
+            "end_time": ai_now,
+        })
+        db.commit()
+
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    except Exception as e:
+        yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+
+@router.post("/stream", summary="AI 对话（流式 SSE）")
+async def ai_chat_stream(
+    body: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    流式 AI 对话，通过 SSE 返回文本流。
+    前端用 EventSource 或 fetch + ReadableStream 接收。
+    """
+    now = _now_ms()
+    settings = _get_settings(db, current_user.id)
+    silence_threshold = getattr(settings, 'chat_silence_threshold', 30) or 30
+
+    # Session 管理
+    current_session, old_session = get_or_create_session(
+        db, current_user.id, now, silence_threshold
+    )
+
+    # 封闭旧 session
+    if old_session:
+        await close_and_materialize(db, old_session, settings)
+
+    # 保存用户消息
+    user_msg = ChatMessage(
+        id=_uuid(),
+        user_id=current_user.id,
+        role="user",
+        content=body.message,
+        timestamp=now,
+        session_id=current_session.id,
+    )
+    db.add(user_msg)
+
+    # 构建历史消息：获取该用户所有消息（不管 session），排除刚发的这条
+    # 按 timestamp 倒序取 20 条，再反转成正序
+    history = (
+        db.query(ChatMessage)
+        .filter(
+            ChatMessage.user_id == current_user.id,
+        )
+        .order_by(ChatMessage.timestamp.desc())
+        .limit(20)
+        .all()
+    )
+    # 历史消息（排除最后一条刚存的用户消息）
+    historical = [
+        {"role": msg.role, "content": msg.content}
+        for msg in reversed(history[1:])
+    ] if len(history) > 1 else []
+    # 追加当前用户消息（这是本次发送的消息）
+    historical.append({"role": "user", "content": body.message})
+    messages = historical
+
+    system_prompt = "你是日迹 App 的 AI 伙伴，帮助用户记录生活、整理情绪、分析成长。请用温暖、友善的语气回复。"
+
+    # 调试：打印发送给 AI 的消息
+    print(f"[DEBUG] 发送给 AI 的消息: {messages}", flush=True)
+
+    return StreamingResponse(
+        stream_response_generator(
+            db, current_user.id, current_session.id,
+            messages, system_prompt, silence_threshold,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/close-session", summary="主动关闭当前对话段")

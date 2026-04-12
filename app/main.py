@@ -117,6 +117,7 @@ from app.diary.router import router as diary_router
 from app.derivative.router import router as derivative_router
 from app.ai.router import router as ai_router
 from app.chat.router import router as chat_router
+from app.chat.websocket import router as chat_ws_router
 from app.user.router import router as user_router
 from app.social.router import router as social_router
 from app.anniversary.router import router as anniversary_router
@@ -133,6 +134,7 @@ app.include_router(user_router, prefix="/api")
 app.include_router(social_router, prefix="/api")
 app.include_router(anniversary_router, prefix="/api")
 app.include_router(study_router, prefix="/api")
+app.include_router(chat_ws_router)  # WebSocket 路由（/ws/chat）
 
 
 @app.get("/")

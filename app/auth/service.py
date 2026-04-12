@@ -2,6 +2,7 @@
 认证服务：密码哈希 + JWT 签发/验证
 """
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from jose import JWTError, ExpiredSignatureError, jwt
 from passlib.context import CryptContext
@@ -54,3 +55,14 @@ def decode_token(token: str) -> str:
         raise ApiException(code=AUTH_TOKEN_EXPIRED, message="Token 已过期，请重新登录", status_code=401)
     except JWTError:
         raise ApiException(code=AUTH_UNAUTHORIZED, message="无效的 Token", status_code=401)
+
+
+def verify_token(token: str) -> Optional[dict]:
+    """
+    验证 JWT Token，返回 payload 字典或 None（无效/过期不抛异常）
+    """
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
+        return payload
+    except (ExpiredSignatureError, JWTError):
+        return None
