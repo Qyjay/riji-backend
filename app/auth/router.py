@@ -2,6 +2,7 @@
 认证路由
 - POST /auth/register  注册
 - POST /auth/login     登录
+- POST /auth/logout    登出
 """
 import time
 from uuid import uuid4
@@ -10,6 +11,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.dependencies import get_current_user
 from app.models.user import User, UserSettings
 from app.response import (
     success, ApiException,
@@ -108,3 +110,12 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
 
     token = create_token(user.id)
     return success(data=_build_auth_response(user, token), message="登录成功")
+
+
+@router.post("/logout", summary="用户登出")
+def logout(current_user: User = Depends(get_current_user)):
+    """
+    登出接口：验证 Token 有效后返回成功。
+    由于使用 JWT 无状态认证，前端收到成功响应后清除本地存储的 Token 即可。
+    """
+    return success(data=None, message="已成功登出")
