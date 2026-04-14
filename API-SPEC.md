@@ -2,7 +2,7 @@
 
 > **本文档从前端代码逆向提取，精确到字段名、类型、枚举值。后端实现必须严格遵循此规范，确保前后端零适配对接。**
 >
-> 生成时间：2026-03-25 18:30 CST
+> 生成时间：2026-04-14 18:30 CST
 > 前端仓库：https://github.com/Qyjay/riji-frontend
 
 ---
@@ -139,6 +139,45 @@ POST /auth/login
 **错误码：**
 - 用户名/密码错误 → `code` 非 0 + `message` 说明
 
+### 1.3 登出
+
+```
+POST /auth/logout
+```
+
+**需要认证：** ✅
+
+**请求体：** 无
+
+**响应 `data`：** `null`
+
+**响应 `message`：** `"已成功登出"`
+
+**实现说明：**
+- 后端采用 JWT 无状态认证，登出接口仅验证当前 Token 有效性后返回成功
+- 前端收到成功响应后需自行清除本地存储的 Token 并跳转登录页
+- Token 失效/过期 → 401（由全局认证中间件处理）
+
+### 1.4 健康检查
+
+```
+GET /auth/health
+```
+
+**需要认证：** ❌
+
+**响应 `data`：**
+
+```typescript
+{
+  status: "ok"
+}
+```
+
+**响应 `message`：** `"日迹后端运行中"`
+
+**实现说明：** 前端「测试连接」按钮调用此接口，验证后端服务是否可达。
+
 ---
 
 ## 2. 素材模块（Material）
@@ -151,9 +190,9 @@ POST /auth/login
 interface RawMaterial {
   id: string
   userId: string
-  type: 'image' | 'voice' | 'text'    // 素材类型枚举
-  content: string                       // 文字内容（text 类型）或描述/转写文字（image/voice 类型）
-  mediaUrl: string                      // 媒体文件 URL（image/voice 类型，text 为空字符串）
+  type: 'image' | 'voice' | 'text' | 'chat'  // 素材类型枚举（chat = AI 对话自动生成的素材）
+  content: string                       // 文字内容（text 类型）或描述/转写文字（image/voice 类型）或对话摘要（chat 类型）
+  mediaUrl: string                      // 媒体文件 URL（image/voice 类型，text/chat 为空字符串）
   thumbnailUrl: string                  // 缩略图 URL（image 类型，其他为空字符串）
   location: {
     lat?: number                        // 纬度，可选
@@ -168,8 +207,14 @@ interface RawMaterial {
   tags: string[]                        // 标签数组
   date: string                          // 所属日期 "YYYY-MM-DD"
   createdAt: number                     // Unix 毫秒时间戳
+  // ========== chat 类型专属字段 ==========
+  chatSessionId?: string                // 关联的对话段 ID（仅 chat 类型）
+  startTime?: number                    // 对话开始时间 Unix 毫秒（仅 chat 类型）
+  endTime?: number                      // 对话结束时间 Unix 毫秒（仅 chat 类型）
 }
 ```
+
+> **`chat` 类型说明：** 当用户离开 AI 对话页面或对话段超时关闭时，后端自动将对话段摘要生成为一条 `type='chat'` 的素材，关联到当天日期。`content` 为 AI 总结的对话内容。
 
 ### 2.2 创建素材
 
@@ -330,6 +375,63 @@ POST /materials/voice
   transcription: string // 语音转文字结果
 }
 ```
+
+### 2.10 上传日记图片
+
+```
+POST /upload/diary-image
+```
+
+**需要认证：** ✅
+
+**Content-Type：** `multipart/form-data`
+
+**请求体：**
+
+| 字段   | 类型   | 说明                     |
+| ------ | ------ | ------------------------ |
+| `file` | `File` | 图片文件（JPEG/PNG 等） |
+
+**响应 `data`：**
+
+```typescript
+{
+  url: string            // 上传后的图片 URL
+  thumbnailUrl: string   // 缩略图 URL
+  location: any          // EXIF 中提取的地理位置信息（无则 null）
+}
+```
+
+**实现说明：** 前端在 H5 平台使用 `uni.uploadFile`，字段名为 `file`。后端需接收 multipart 请求，存储图片并生成缩略图。
+
+### 2.11 上传聊天文件
+
+```
+POST /upload/chat-file
+```
+
+**需要认证：** ✅
+
+**Content-Type：** `multipart/form-data`
+
+**请求体：**
+
+| 字段   | 类型   | 说明                                   |
+| ------ | ------ | -------------------------------------- |
+| `file` | `File` | 附件文件（图片、PDF、文档等） |
+
+**响应 `data`：**
+
+```typescript
+{
+  url: string            // 上传后的文件 URL
+  name: string           // 文件名
+  size: number           // 文件大小（字节）
+  mimeType: string       // MIME 类型
+}
+```
+
+**实现说明：** 前端在 H5 平台使用 `fetch` + `FormData`，在 App 平台使用 `uni.uploadFile`。字段名均为 `file`。上传成功后前端将返回的信息作为 `ChatAttachment` 附加到聊天消息中。
 
 ---
 
@@ -642,11 +744,86 @@ GET /diaries/today-summary?date={date}
 
 > **注意：** 此接口中 `materials[].emotion.score` 范围是 **0.0-1.0**（不同于 Diary 里的 0-100）
 
+### 3.14 搜索日记
+
+```
+POST /diaries/search
+```
+
+**需要认证：** ✅
+
+**请求体：**
+
+```typescript
+{
+  keyword?: string                    // 关键词（匹配标题/正文）
+  dateRange?: [string, string]        // 日期范围 ["YYYY-MM-DD", "YYYY-MM-DD"]
+  emotions?: string[]                 // 情绪标签筛选，如 ["开心", "焦虑"]
+  tags?: string[]                     // 标签筛选
+  weathers?: string[]                 // 天气筛选
+}
+```
+
+> 所有字段均可选。多条件之间为 AND 关系。
+
+**响应 `data`：** `Diary[]` — 符合条件的日记数组
+
+**实现说明：**
+- `keyword` 对 `title` 和 `content` 做模糊搜索
+- `dateRange` 为闭区间 `[start, end]`
+- `emotions` 匹配 `emotion.label` 字段
+- `tags` 匹配 `tags` 数组（包含任一即匹配）
+- `weathers` 匹配 `weather` 字段
+- 结果按 `createdAt` 降序排列
+
 ---
 
-## 4. AI 模块
+## 4. AI 对话模块（Chat）
 
-### 4.1 AI 对话
+> AI 对话支持三种模式：非流式 POST、SSE 流式 POST、WebSocket 流式。
+> 对话基于「对话段（Session）」管理：一段连续对话自动归入同一 session，静默超时后自动关闭旧 session 并生成对话素材。
+
+### 4.1 数据结构
+
+#### `ChatMessage`
+
+```typescript
+interface ChatMessage {
+  id: string
+  sessionId: string | null        // 所属对话段 ID
+  clientMessageId: string | null  // 前端消息 ID（用于去重/确认）
+  role: 'user' | 'assistant'
+  content: string
+  timestamp: number               // Unix 毫秒时间戳
+  attachments: ChatAttachment[]
+}
+
+interface ChatAttachment {
+  type: string                    // 附件类型
+  name: string                    // 文件名
+  url: string                     // 文件 URL
+  mimeType?: string
+  size?: number
+  thumbnailUrl?: string
+}
+```
+
+#### `ChatSession`
+
+```typescript
+interface ChatSession {
+  id: string
+  title: string                   // 对话段标题（AI 生成）
+  summary: string                 // 对话段摘要（AI 生成）
+  startTime: number               // 开始时间戳
+  endTime: number | null          // 结束时间戳
+  messageCount: number
+  mood: string                    // 情绪标签
+  moodEmoji: string               // 情绪 emoji
+}
+```
+
+### 4.2 AI 对话（非流式）
 
 ```
 POST /chat
@@ -658,19 +835,51 @@ POST /chat
 
 ```typescript
 {
-  message: string   // 用户消息，必填
+  message: string                              // 用户消息
+  clientMessageId?: string                     // 前端消息 ID（可选，用于去重）
+  attachments?: ChatAttachment[]               // 附件列表，默认 []
 }
 ```
 
-**响应 `data`：** `string` — AI 回复的纯文本
+> `message` 与 `attachments` 至少需要一项。
 
-> **SSE 流式说明：** 前端 `chat/index.vue` 中目前是**模拟打字机效果**（逐字显示），并未使用真正的 SSE/EventSource。当前实现是一次性拿到完整回复后用 `setInterval` 逐字渲染。
->
-> **建议后端同时支持：**
-> 1. 当前模式：`POST /chat` 返回完整文本
-> 2. 后续升级：`POST /chat/stream` 返回 SSE 流（`text/event-stream`）
+**响应 `data`：**
 
-### 4.2 获取聊天历史
+```typescript
+{
+  sessionId: string                            // 当前对话段 ID
+  userMessage: ChatMessage                     // 已保存的用户消息
+  assistantMessage: ChatMessage                // AI 回复消息
+  materialGenerated: boolean                   // 是否因旧 session 关闭而生成了素材
+  materialId: string | null                    // 生成的素材 ID
+}
+```
+
+### 4.3 AI 对话（SSE 流式）
+
+```
+POST /chat/stream
+```
+
+**需要认证：** ✅
+
+**请求体：** 同 4.2
+
+**响应：** `Content-Type: text/event-stream`
+
+SSE 事件流按顺序推送以下事件：
+
+| 事件类型 | 说明 | 数据格式 |
+|----------|------|----------|
+| `session` | 当前对话段 ID | `{ type: "session", sessionId: string }` |
+| `ack` | 用户消息已保存确认 | `{ type: "ack", clientMessageId: string, message: ChatMessage }` |
+| `chunk` | AI 回复文本片段（多次） | `{ type: "chunk", text: string }` |
+| `done` | 流式回复完成 | `{ type: "done", message: ChatMessage }` |
+| `error` | 发生错误 | `{ type: "error", message: string }` |
+
+**前端使用 XHR/fetch 接收 SSE 流，逐步拼接 `chunk` 实现打字机效果。**
+
+### 4.4 获取聊天历史
 
 ```
 GET /chat/history?limit={limit}
@@ -680,26 +889,89 @@ GET /chat/history?limit={limit}
 
 **Query 参数：**
 
-| 参数    | 类型     | 默认值 | 说明       |
-| ------- | -------- | ------ | ---------- |
-| `limit` | `number` | `20`   | 获取条数   |
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `limit` | number | 20 | 获取条数（1-100） |
 
 **响应 `data`：**
 
 ```typescript
 {
-  items: Array<{
-    role: 'user' | 'assistant'    // 消息角色枚举
-    content: string               // 消息内容
-    timestamp: number             // Unix 毫秒时间戳
-  }>
+  items: ChatMessage[]
   total: number
 }
 ```
 
-> **前端映射：** `items` → `list`
+**实现说明：**
+- 如果用户没有任何聊天记录，返回一条 AI 欢迎消息
+- 按时间倒序返回最近的消息
 
-### 4.3 文字转语音（TTS）
+### 4.5 主动关闭当前对话段
+
+```
+POST /chat/close-session
+```
+
+**需要认证：** ✅
+
+**请求体：** 无
+
+**响应 `data`：**
+
+```typescript
+{
+  sessionClosed: boolean                       // 是否有 session 被关闭
+  materialGenerated: boolean                   // 是否生成了对话素材
+  materialId: string | null                    // 生成的素材 ID
+}
+```
+
+**实现说明：** 关闭当前 open 状态的对话段。如果用户设置了自动生成素材，会调用 AI 总结对话内容并生成一条 chat 类型的素材。
+
+### 4.6 获取对话段消息
+
+```
+GET /chat/session/{sessionId}/messages
+```
+
+**需要认证：** ✅
+
+**响应 `data`：**
+
+```typescript
+{
+  session: ChatSession                         // 对话段信息
+  messages: ChatMessage[]                      // 该段内的所有消息
+}
+```
+
+### 4.7 WebSocket 流式对话
+
+```
+WebSocket /ws/chat?token={jwt_token}
+```
+
+> 通过 query 参数传递 JWT token 进行认证（WebSocket 无法使用 Authorization header）。
+
+**消息协议：**
+
+**客户端 → 服务端（JSON）：**
+
+```typescript
+{ message: string }
+```
+
+**服务端 → 客户端（JSON 事件流）：**
+
+| 类型 | 数据 |
+|------|------|
+| `chunk` | `{ type: "chunk", text: string }` |
+| `done` | `{ type: "done" }` |
+| `error` | `{ type: "error", message: string }` |
+
+**连接超时：** 30 秒内未发送消息则断开。
+
+### 4.8 文字转语音（TTS）
 
 ```
 POST /ai/tts
@@ -718,7 +990,7 @@ POST /ai/tts
 
 **响应 `data`：** `string` — 生成的音频文件 URL
 
-### 4.4 AI 运势生成
+### 4.9 AI 运势生成
 
 ```
 GET /ai/fortune
@@ -925,78 +1197,85 @@ GET /user/semester-report
 
 ## 6. 社交模块（Social）
 
+> 社交匹配分为「长期匹配」和「短期搭子」两种类型，匹配通过后可互发消息。支持 AI 生成匹配报告。
+
 ### 6.1 数据结构
 
+#### `Match`（已匹配用户）
+
 ```typescript
-// 已匹配用户
 interface Match {
   id: string
-  nickname: string
-  avatar: string              // 头像 URL
-  school: string
-  commonTags: string[]        // 共同标签
-  matchedAt: number           // Unix 毫秒时间戳
+  nickname: string              // 对方昵称
+  avatar: string                // 对方头像 URL
+  school: string                // 对方学校
+  commonTags: string[]          // 共同标签
+  matchedAt: number             // Unix 毫秒时间戳
 }
+```
 
-// 匹配请求
+#### `MatchRequest`（匹配请求）
+
+```typescript
 interface MatchRequest {
   id: string
-  fromUid: string
-  toUid: string
-  status: 'pending' | 'accepted' | 'rejected'  // 状态枚举
+  fromUid: string               // 发起方用户 ID
+  toUid: string                 // 目标方用户 ID
+  status: 'pending' | 'accepted' | 'rejected'
   createdAt: number
 }
+```
 
-// 聊天消息
+#### `Message`（社交消息）
+
+```typescript
 interface Message {
   id: string
-  matchId: string             // 关联的匹配 ID
-  fromUid: string             // 发送者 ID
-  content: string
-  timestamp: number           // Unix 毫秒时间戳
+  matchId: string               // 关联的匹配 ID
+  fromUid: string               // 发送者 ID
+  content: string               // 消息内容
+  timestamp: number             // Unix 毫秒时间戳
 }
+```
 
-// 匹配推荐
-interface MatchRecommendation {
-  id: string
-  userId: string
-  nickname: string
-  avatar: string
-  school: string
-  commonInterests: string[]   // 共同兴趣
-  compatibility: number       // 匹配度 0-100
-}
+#### `MatchReport`（AI 匹配报告）
 
-// 匹配报告
+```typescript
 interface MatchReport {
-  compatibility: number       // 匹配度 0-100
-  analysis: string            // 分析文案
-  commonPoints: string[]      // 共同点
-  differences: string[]       // 差异点
+  compatibility: number         // 匹配度 0-100
+  analysis: string              // 分析文案
+  commonPoints: string[]        // 共同点
+  differences: string[]         // 差异点
 }
+```
 
-// 搭子申请
+#### `BuddyRequest`（搭子申请）
+
+```typescript
 interface BuddyRequest {
   id: string
   fromUid: string
   toUid: string
-  reason: string              // 申请理由
+  reason: string                // 申请理由
   status: 'pending' | 'accepted' | 'rejected'
   createdAt: number
 }
+```
 
-// 用户画像
+#### `UserPortrait`（用户画像）
+
+```typescript
 interface UserPortrait {
   preferences: Array<{
-    category: string          // 偏好类别
-    items: string[]           // 具体偏好项
+    category: string            // 偏好类别
+    items: string[]             // 具体偏好项
   }>
-  personality: string[]       // 性格标签数组
+  personality: string[]         // 性格标签数组
   relations: Array<{
     name: string
-    relation: string          // 关系描述
+    relation: string            // 关系描述
   }>
-  interests: string[]         // 兴趣列表
+  interests: string[]           // 兴趣列表
 }
 ```
 
@@ -1010,6 +1289,11 @@ GET /social/matches
 
 **响应 `data`：** `Match[]`
 
+**实现说明：**
+- 返回 `status="accepted"` 的所有匹配（含长期匹配和搭子）
+- 包含对方用户的昵称、头像、学校信息（后端 JOIN 查询）
+- 按 `matchedAt` 降序排列
+
 ### 6.3 发送匹配请求
 
 ```
@@ -1018,16 +1302,22 @@ POST /social/match-requests
 
 **需要认证：** ✅
 
-**请求体：** `Partial<MatchRequest>`
+**请求体：**
 
 ```typescript
 {
-  toUid?: string    // 目标用户 ID
-  // fromUid 由后端从 token 中获取
+  toUid: string               // 目标用户 ID，必填
 }
 ```
 
-**响应 `data`：** `MatchRequest` 完整对象
+**响应 `data`：** `MatchRequest` 对象
+
+**错误码：**
+- `toUid` 为空 → `code` 非 0 + `message: "toUid 不能为空"`
+- 目标用户不存在 → 404 + `message: "用户不存在"`
+- 已存在匹配请求 → `code` 非 0 + `message: "已存在匹配请求"`
+
+**实现说明：** 创建类型为 `long_term` 的匹配请求，初始状态为 `pending`。
 
 ### 6.4 获取匹配消息
 
@@ -1037,16 +1327,58 @@ GET /social/messages/{matchId}?limit={limit}&before={before}
 
 **需要认证：** ✅
 
+**路径参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `matchId` | string | 匹配 ID |
+
 **Query 参数：**
 
-| 参数     | 类型     | 默认值 | 说明                         |
-| -------- | -------- | ------ | ---------------------------- |
-| `limit`  | `number` | `50`   | 获取条数                     |
-| `before` | `string` | 无     | 游标分页：返回此 ID 之前的消息 |
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `limit` | number | 50 | 获取条数（1-200） |
+| `before` | string | 无 | 游标分页：返回此消息 ID 之前的消息 |
 
 **响应 `data`：** `Message[]`
 
-### 6.5 获取匹配报告
+**实现说明：**
+- 验证当前用户属于该匹配关系
+- 按 `timestamp` 升序返回（最旧到最新）
+- 匹配不存在或不属于当前用户 → 404
+
+### 6.5 发送消息
+
+```
+POST /social/messages/{matchId}
+```
+
+**需要认证：** ✅
+
+**路径参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `matchId` | string | 匹配 ID |
+
+**请求体：**
+
+```typescript
+{
+  content: string             // 消息内容，必填（不能为空）
+}
+```
+
+**响应 `data`：** `Message` 对象
+
+**错误码：**
+- 匹配未通过 → `code` 非 0 + `message: "匹配未通过，暂时不能发送消息"`
+- 消息内容为空 → `code` 非 0 + `message: "消息内容不能为空"`
+- 匹配不存在 → 404
+
+**实现说明：** 仅当匹配状态为 `accepted` 时才允许发送消息。
+
+### 6.6 获取匹配报告
 
 ```
 GET /social/matches/{matchId}/report
@@ -1056,7 +1388,12 @@ GET /social/matches/{matchId}/report
 
 **响应 `data`：** `MatchReport` 对象
 
-### 6.6 响应匹配请求
+**实现说明：**
+- 如果已有缓存的报告（`match_report` 字段非空），直接返回
+- 否则调用 MiniMax AI 根据双方用户画像生成报告，并缓存到数据库
+- Mock 模式下返回预设的示例报告
+
+### 6.7 响应匹配请求
 
 ```
 POST /social/match-requests/{requestId}/respond
@@ -1064,17 +1401,28 @@ POST /social/match-requests/{requestId}/respond
 
 **需要认证：** ✅
 
+**路径参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `requestId` | string | 匹配请求 ID |
+
 **请求体：**
 
 ```typescript
 {
-  accept: boolean   // true=接受, false=拒绝
+  accept: boolean             // true=接受, false=拒绝
 }
 ```
 
-**响应 `data`：** `null` 或空对象
+**响应 `data`：** `null`
 
-### 6.7 申请搭子
+**错误码：**
+- 请求不存在或不是发给当前用户的 → 404 + `message: "匹配请求不存在"`
+
+**实现说明：** 只有 `target_id` 等于当前用户的请求才能响应。接受后匹配状态变为 `accepted`，拒绝变为 `rejected`。
+
+### 6.8 申请搭子
 
 ```
 POST /social/buddy
@@ -1086,16 +1434,19 @@ POST /social/buddy
 
 ```typescript
 {
-  target_user_id: string    // ⚠️ snake_case，目标用户 ID
-  // reason 字段在前端 applyBuddy 函数签名中有，但未传给后端
+  target_user_id: string      // ⚠️ snake_case，目标用户 ID，必填
+  reason?: string             // 申请理由，默认空字符串
 }
 ```
 
-> **注意：** 前端 `applyBuddy(targetId, reason)` 中 `reason` 参数存在于函数签名但**未包含在请求体中**。后端可选择支持 `reason` 字段。
-
 **响应 `data`：** `BuddyRequest` 对象
 
-### 6.8 响应搭子申请
+**错误码：**
+- 目标用户不存在 → 404 + `message: "用户不存在"`
+
+**实现说明：** 创建类型为 `buddy` 的匹配请求。`reason` 字段存储在 `match_report` 列中。
+
+### 6.9 响应搭子申请
 
 ```
 POST /social/buddy/{requestId}/respond
@@ -1103,17 +1454,26 @@ POST /social/buddy/{requestId}/respond
 
 **需要认证：** ✅
 
+**路径参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `requestId` | string | 搭子申请 ID |
+
 **请求体：**
 
 ```typescript
 {
-  accept: boolean   // true=接受, false=拒绝
+  accept: boolean             // true=接受, false=拒绝
 }
 ```
 
-**响应 `data`：** `null` 或空对象
+**响应 `data`：** `null`
 
-### 6.9 获取用户画像
+**错误码：**
+- 申请不存在或不是发给当前用户的搭子类型 → 404 + `message: "搭子申请不存在"`
+
+### 6.10 获取用户画像
 
 ```
 GET /user/portrait
@@ -1123,9 +1483,9 @@ GET /user/portrait
 
 **响应 `data`：** `UserPortrait` 对象
 
-> **注意路径：** 虽然在社交模块的 API 文件中定义，但路径是 `/user/portrait` 而非 `/social/portrait`。
+> **注意路径：** 虽属社交模块逻辑，但路径为 `/user/portrait`（非 `/social/portrait`）。
 
-### 6.10 刷新用户画像
+### 6.11 刷新用户画像
 
 ```
 POST /user/portrait/refresh
@@ -1137,7 +1497,7 @@ POST /user/portrait/refresh
 
 **响应 `data`：** `UserPortrait` 对象（重新生成的画像）
 
-**业务逻辑：** 综合用户的日记数据、聊天记录等，调用 MiniMax API 重新生成用户画像。
+**实现说明：** 综合用户的日记数据、聊天记录等，调用 MiniMax AI 重新生成用户画像。Mock 模式下返回预设的示例画像。
 
 ---
 
@@ -1359,64 +1719,316 @@ POST /study/todos/{id}/toggle
 
 ---
 
+## 9. 广场模块（Plaza）
+
+> 校园广场：帖子信息流、评论、AI 分身自动评论、分身推荐。
+
+### 9.1 数据结构
+
+#### `PlazaPost`
+
+```typescript
+interface PlazaPost {
+  id: string
+  authorId: string
+  authorName: string
+  authorAvatar: string
+  authorSchool: string
+  authorMajor: string
+  authorGrade: string
+  type: 'buddy' | 'help' | 'share' | 'dating'
+  content: string
+  images: string[]
+  location: string
+  tags: string[]
+  likes: number
+  comments: number
+  agentResponses: number
+  createdAt: number
+  isFromAgent: boolean
+  allowAgentReply: boolean
+  schoolOnly: boolean
+}
+```
+
+#### `PlazaComment`
+
+```typescript
+interface PlazaComment {
+  id: string
+  postId: string
+  authorId: string
+  authorName: string
+  authorAvatar: string
+  content: string
+  isAgent: boolean
+  createdAt: number
+}
+```
+
+#### `AgentMatch`
+
+```typescript
+interface AgentMatch {
+  id: string
+  postId: string
+  post: PlazaPost
+  matchScore: number
+  matchReasons: string[]
+  agentConversation: AgentConversationMessage[]
+  status: 'new' | 'viewed' | 'chatting' | 'dismissed'
+  createdAt: number
+}
+
+interface AgentConversationMessage {
+  from: 'my_agent' | 'their_agent'
+  content: string
+  timestamp: number
+}
+```
+
+### 9.2 获取帖子列表
+
+```
+GET /plaza/posts?channel=&q=&page=&page_size=
+```
+
+**需要认证：** ✅
+
+**查询参数：**
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| channel | string | 否 | 频道筛选：`buddy`/`help`/`share`/`dating` |
+| q | string | 否 | 关键词搜索（匹配帖子内容和标签） |
+| page | number | 否 | 页码，默认 1 |
+| page_size | number | 否 | 每页数量，默认 10 |
+
+**响应 `data`：**
+
+```typescript
+{ items: PlazaPost[], total: number }
+```
+
+**实现说明：**
+- `school_only=true` 的帖子只对同校用户可见
+- 排序：`createdAt` 降序
+
+### 9.3 获取帖子详情
+
+```
+GET /plaza/posts/{id}
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** `PlazaPost` 对象
+
+### 9.4 创建帖子
+
+```
+POST /plaza/posts
+```
+
+**需要认证：** ✅
+
+**请求体：**
+
+```typescript
+{
+  type: 'buddy' | 'help' | 'share' | 'dating'
+  content: string
+  images?: string[]
+  location?: string
+  tags?: string[]
+  allowAgentReply?: boolean    // 默认 true
+  schoolOnly?: boolean         // 默认 false
+}
+```
+
+**响应 `data`：** 创建的 `PlazaPost` 对象
+
+### 9.5 点赞帖子
+
+```
+POST /plaza/posts/{id}/like
+```
+
+**需要认证：** ✅
+
+**请求体：** 无
+
+**响应 `data`：** `null`
+
+**实现说明：** Toggle 逻辑——已赞则取消，未赞则点赞。
+
+### 9.6 获取评论列表
+
+```
+GET /plaza/posts/{postId}/comments
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** `PlazaComment[]`
+
+### 9.7 发送评论
+
+```
+POST /plaza/posts/{postId}/comments
+```
+
+**需要认证：** ✅
+
+**请求体：**
+
+```typescript
+{
+  content: string
+  isAgent?: boolean   // 默认 false
+}
+```
+
+**响应 `data`：** 创建的 `PlazaComment` 对象
+
+### 9.8 AI 分身自动评论
+
+```
+POST /plaza/posts/{postId}/agent-comment
+```
+
+> 后端根据当前用户的 AI 分身画像 + 帖子内容，自动生成评论并发布。
+> 前端无需传入评论内容，由 AI 生成。
+
+**需要认证：** ✅
+
+**请求体：** 无
+
+**响应 `data`：**
+
+```typescript
+{
+  comment: PlazaComment
+}
+```
+
+**错误码：**
+- 帖子不存在 → `code` 非 0 + `message: "帖子不存在"`
+- 帖子不允许分身回复 → `code` 非 0 + `message: "该帖子不允许分身回复"`
+- 用户未配置分身画像 → `code` 非 0 + `message: "请先设置分身画像"`
+
+### 9.9 获取分身推荐匹配
+
+```
+GET /avatar/matches
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** `AgentMatch[]`
+
+**实现说明：**
+- 排除 `status="dismissed"` 的记录
+- 按 `matchScore` 降序
+
+### 9.10 处理分身推荐（接受/忽略）
+
+```
+POST /avatar/matches/{matchId}/action
+```
+
+**需要认证：** ✅
+
+**请求体：**
+
+```typescript
+{
+  action: 'chat' | 'dismiss'
+}
+```
+
+**响应 `data`：** `null`
+
+---
+
 ## 附录 A：接口速查表
 
 | # | 方法 | 路径 | 模块 | 说明 |
 |---|------|------|------|------|
 | 1 | POST | `/auth/register` | Auth | 注册 |
 | 2 | POST | `/auth/login` | Auth | 登录 |
-| 3 | POST | `/materials` | Material | 创建素材 |
-| 4 | GET | `/materials?date=` | Material | 获取指定日期素材 |
-| 5 | GET | `/materials/{id}` | Material | 素材详情 |
-| 6 | PUT | `/materials/{id}` | Material | 更新素材 |
-| 7 | DELETE | `/materials/{id}` | Material | 删除素材 |
-| 8 | POST | `/materials/{id}/emotion` | Material | AI 情绪提取 |
-| 9 | POST | `/materials/{id}/polish` | Material | AI 文字润色 |
-| 10 | POST | `/materials/voice` | Material | 语音上传+转写 |
-| 11 | POST | `/diaries/generate` | Diary | AI 生成日记 |
-| 12 | GET | `/diaries?page=&page_size=` | Diary | 日记列表 |
-| 13 | GET | `/diaries/{id}` | Diary | 日记详情 |
-| 14 | PUT | `/diaries/{id}` | Diary | 更新日记 |
-| 15 | GET | `/diaries/{id}/emotion-trend` | Diary | 情绪趋势 |
-| 16 | POST | `/diaries/{id}/extract` | Diary | AI 信息提取 |
-| 17 | POST | `/diaries/{id}/derivative` | Diary | 生成衍生内容 |
-| 18 | GET | `/derivatives?diary_id=` | Diary | 衍生内容列表 |
-| 19 | POST | `/derivatives/{id}/share` | Diary | 设置分享范围 |
-| 20 | GET | `/diaries/today-summary?date=` | Diary | 今日概览 |
-| 21 | POST | `/chat` | AI | AI 对话 |
-| 22 | GET | `/chat/history?limit=` | AI | 聊天历史 |
-| 23 | POST | `/ai/tts` | AI | 文字转语音 |
-| 24 | GET | `/ai/fortune` | AI | 运势生成 |
-| 25 | GET | `/user/profile` | User | 获取用户资料 |
-| 26 | POST | `/user/profile` | User | 更新用户资料 |
-| 27 | GET | `/user/agent-portrait` | User | AI 画像图 |
-| 28 | GET | `/user/growth` | User | 成长数据 |
-| 29 | GET | `/user/achievements` | User | 成就列表 |
-| 30 | GET | `/user/settings` | User | 获取设置 |
-| 31 | POST | `/user/settings` | User | 更新设置 |
-| 32 | GET | `/user/semester-report` | User | 学期报告 |
-| 33 | GET | `/social/matches` | Social | 已匹配列表 |
-| 34 | POST | `/social/match-requests` | Social | 发送匹配请求 |
-| 35 | GET | `/social/messages/{matchId}?limit=&before=` | Social | 匹配消息 |
-| 36 | GET | `/social/matches/{matchId}/report` | Social | 匹配报告 |
-| 37 | POST | `/social/match-requests/{requestId}/respond` | Social | 响应匹配请求 |
-| 38 | POST | `/social/buddy` | Social | 申请搭子 |
-| 39 | POST | `/social/buddy/{requestId}/respond` | Social | 响应搭子申请 |
-| 40 | GET | `/user/portrait` | Social | 用户画像 |
-| 41 | POST | `/user/portrait/refresh` | Social | 刷新画像 |
-| 42 | GET | `/anniversaries` | Anniversary | 纪念日列表 |
-| 43 | POST | `/anniversaries` | Anniversary | 创建纪念日 |
-| 44 | PUT | `/anniversaries/{id}` | Anniversary | 更新纪念日 |
-| 45 | DELETE | `/anniversaries/{id}` | Anniversary | 删除纪念日 |
-| 46 | GET | `/anniversaries/today` | Anniversary | 今日纪念日 |
-| 47 | GET | `/study/pomodoros` | Study | 番茄钟列表 |
-| 48 | POST | `/study/pomodoros` | Study | 创建番茄钟 |
-| 49 | POST | `/study/pomodoros/{id}/complete` | Study | 完成番茄钟 |
-| 50 | GET | `/study/todos` | Study | 待办列表 |
-| 51 | POST | `/study/todos` | Study | 创建待办 |
-| 52 | POST | `/study/todos/{id}/toggle` | Study | 切换待办状态 |
+| 3 | POST | `/auth/logout` | Auth | 登出 |
+| 4 | GET | `/auth/health` | Auth | 健康检查 |
+| 5 | POST | `/materials` | Material | 创建素材 |
+| 6 | GET | `/materials?date=` | Material | 获取指定日期素材 |
+| 7 | GET | `/materials/{id}` | Material | 素材详情 |
+| 8 | PUT | `/materials/{id}` | Material | 更新素材 |
+| 9 | DELETE | `/materials/{id}` | Material | 删除素材 |
+| 10 | POST | `/materials/{id}/emotion` | Material | AI 情绪提取 |
+| 11 | POST | `/materials/{id}/polish` | Material | AI 文字润色 |
+| 12 | POST | `/materials/voice` | Material | 语音上传+转写 |
+| 13 | POST | `/upload/diary-image` | Upload | 上传日记图片 |
+| 14 | POST | `/upload/chat-file` | Upload | 上传聊天文件 |
+| 15 | POST | `/diaries/generate` | Diary | AI 生成日记 |
+| 16 | GET | `/diaries?page=&page_size=` | Diary | 日记列表 |
+| 17 | GET | `/diaries/{id}` | Diary | 日记详情 |
+| 18 | PUT | `/diaries/{id}` | Diary | 更新日记 |
+| 19 | DELETE | `/diaries/{id}` | Diary | 删除日记 |
+| 20 | GET | `/diaries/{id}/emotion-trend` | Diary | 情绪趋势 |
+| 21 | POST | `/diaries/{id}/extract` | Diary | AI 信息提取 |
+| 22 | POST | `/diaries/{id}/derivative` | Diary | 生成衍生内容 |
+| 23 | GET | `/derivatives?diary_id=` | Diary | 衍生内容列表 |
+| 24 | POST | `/derivatives/{id}/share` | Diary | 设置分享范围 |
+| 25 | GET | `/diaries/today-summary?date=` | Diary | 今日概览 |
+| 26 | POST | `/diaries/search` | Diary | 搜索日记 |
+| 27 | POST | `/chat` | Chat | AI 对话（非流式） |
+| 28 | POST | `/chat/stream` | Chat | AI 对话（SSE 流式） |
+| 29 | GET | `/chat/history?limit=` | Chat | 聊天历史 |
+| 30 | POST | `/chat/close-session` | Chat | 关闭当前对话段 |
+| 31 | GET | `/chat/session/{sessionId}/messages` | Chat | 获取对话段消息 |
+| 32 | WS | `/ws/chat?token=` | Chat | WebSocket 流式对话 |
+| 33 | POST | `/ai/tts` | AI | 文字转语音 |
+| 34 | GET | `/ai/fortune` | AI | 运势生成 |
+| 35 | GET | `/user/profile` | User | 获取用户资料 |
+| 36 | POST | `/user/profile` | User | 更新用户资料 |
+| 37 | GET | `/user/agent-portrait` | User | AI 画像图 |
+| 38 | GET | `/user/growth` | User | 成长数据 |
+| 39 | GET | `/user/achievements` | User | 成就列表 |
+| 40 | GET | `/user/settings` | User | 获取设置 |
+| 41 | POST | `/user/settings` | User | 更新设置 |
+| 42 | GET | `/user/semester-report` | User | 学期报告 |
+| 43 | GET | `/social/matches` | Social | 已匹配列表 |
+| 44 | POST | `/social/match-requests` | Social | 发送匹配请求 |
+| 45 | GET | `/social/messages/{matchId}?limit=&before=` | Social | 获取匹配消息 |
+| 46 | POST | `/social/messages/{matchId}` | Social | 发送消息 |
+| 47 | GET | `/social/matches/{matchId}/report` | Social | AI 匹配报告 |
+| 48 | POST | `/social/match-requests/{requestId}/respond` | Social | 响应匹配请求 |
+| 49 | POST | `/social/buddy` | Social | 申请搭子 |
+| 50 | POST | `/social/buddy/{requestId}/respond` | Social | 响应搭子申请 |
+| 51 | GET | `/user/portrait` | Social | 用户画像 |
+| 52 | POST | `/user/portrait/refresh` | Social | 刷新画像 |
+| 53 | GET | `/anniversaries` | Anniversary | 纪念日列表 |
+| 54 | POST | `/anniversaries` | Anniversary | 创建纪念日 |
+| 55 | PUT | `/anniversaries/{id}` | Anniversary | 更新纪念日 |
+| 56 | DELETE | `/anniversaries/{id}` | Anniversary | 删除纪念日 |
+| 57 | GET | `/anniversaries/today` | Anniversary | 今日纪念日 |
+| 58 | GET | `/study/pomodoros` | Study | 番茄钟列表 |
+| 59 | POST | `/study/pomodoros` | Study | 创建番茄钟 |
+| 60 | POST | `/study/pomodoros/{id}/complete` | Study | 完成番茄钟 |
+| 61 | GET | `/study/todos` | Study | 待办列表 |
+| 62 | POST | `/study/todos` | Study | 创建待办 |
+| 63 | POST | `/study/todos/{id}/toggle` | Study | 切换待办状态 |
+| 64 | GET | `/plaza/posts?channel=&q=&page=&page_size=` | Plaza | 帖子列表 |
+| 65 | GET | `/plaza/posts/{id}` | Plaza | 帖子详情 |
+| 66 | POST | `/plaza/posts` | Plaza | 创建帖子 |
+| 67 | POST | `/plaza/posts/{id}/like` | Plaza | 点赞帖子 |
+| 68 | GET | `/plaza/posts/{postId}/comments` | Plaza | 评论列表 |
+| 69 | POST | `/plaza/posts/{postId}/comments` | Plaza | 发送评论 |
+| 70 | POST | `/plaza/posts/{postId}/agent-comment` | Plaza | AI 分身自动评论 |
+| 71 | GET | `/avatar/matches` | Plaza | 分身推荐匹配 |
+| 72 | POST | `/avatar/matches/{matchId}/action` | Plaza | 处理分身推荐 |
 
-**共计 52 个接口**（Auth 2 + Material 8 + Diary 10 + AI 4 + User 8 + Social 9 + Anniversary 5 + Study 6）
+**共计 72 个接口**（Auth 4 + Material 8 + Upload 2 + Diary 12 + Chat 6 + AI 2 + User 8 + Social 10 + Anniversary 5 + Study 6 + Plaza 9）
 
 ---
 
@@ -1458,7 +2070,7 @@ POST /study/todos/{id}/toggle
 
 | 枚举 | 值 | 使用位置 |
 |------|----|----------|
-| 素材类型 | `'image'` \| `'voice'` \| `'text'` | `RawMaterial.type` |
+| 素材类型 | `'image'` \| `'voice'` \| `'text'` \| `'chat'` | `RawMaterial.type` |
 | 日记状态 | `'draft'` \| `'published'` | `Diary.status` |
 | 衍生类型 | `'comic'` \| `'novel'` \| `'share_card'` | `DiaryDerivative.type` |
 | 分享范围 | `'private'` \| `'friends'` \| `'public'` | `DiaryDerivative.shareScope`, `Settings.diaryPrivacy` |
@@ -1466,6 +2078,12 @@ POST /study/todos/{id}/toggle
 | 纪念日来源 | `'manual'` \| `'ai_extracted'` | `Anniversary.source` |
 | 消息角色 | `'user'` \| `'assistant'` | `ChatMessage.role` |
 | 匹配状态 | `'pending'` \| `'accepted'` \| `'rejected'` | `MatchRequest.status`, `BuddyRequest.status` |
+| 匹配类型 | `'long_term'` \| `'buddy'` | `Match.matchType` |
+| 对话段状态 | `'open'` \| `'closed'` | `ChatSession.status` |
+| SSE 事件类型 | `'session'` \| `'ack'` \| `'chunk'` \| `'done'` \| `'error'` | `POST /chat/stream` |
+| 广场帖子类型 | `'buddy'` \| `'help'` \| `'share'` \| `'dating'` | `PlazaPost.type` |
+| 分身推荐状态 | `'new'` \| `'viewed'` \| `'chatting'` \| `'dismissed'` | `AgentMatch.status` |
+| 分身推荐操作 | `'chat'` \| `'dismiss'` | `POST /avatar/matches/{matchId}/action` |
 | 主题 | `'light'` \| `'dark'` | `Settings.theme` |
 | 待办优先级 | `'low'` \| `'medium'` \| `'high'` | `Todo.priority` |
 

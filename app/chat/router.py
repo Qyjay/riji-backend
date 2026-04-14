@@ -138,21 +138,24 @@ async def ai_chat(
 
 
 async def stream_response_generator(
-    db: Session,
     *,
-    current_session: ChatSession,
-    current_user: User,
-    user_message,
+    session_id: str,
+    user_id: str,
+    user_message_dict: dict,
+    client_message_id: Optional[str],
 ):
+    """SSE 流式生成器 — 自行管理 db session，避免 Depends(get_db) 生命周期冲突"""
     from app.ai.minimax_client import get_minimax_client
+    from app.database import SessionLocal
 
     client = get_minimax_client()
-    yield f"data: {json.dumps({'type': 'session', 'sessionId': current_session.id}, ensure_ascii=False)}\n\n"
-    yield f"data: {json.dumps({'type': 'ack', 'clientMessageId': user_message.client_message_id, 'message': serialize_message(user_message)}, ensure_ascii=False)}\n\n"
+    yield f"data: {json.dumps({'type': 'session', 'sessionId': session_id}, ensure_ascii=False)}\n\n"
+    yield f"data: {json.dumps({'type': 'ack', 'clientMessageId': client_message_id, 'message': user_message_dict}, ensure_ascii=False)}\n\n"
 
+    db = SessionLocal()
     full_reply = ""
     try:
-        messages = list_session_messages_for_ai(db, current_session.id)
+        messages = list_session_messages_for_ai(db, session_id)
         async for chunk in client.stream_chat(messages, system_prompt=SYSTEM_PROMPT):
             full_reply += chunk
             yield f"data: {json.dumps({'type': 'chunk', 'text': chunk}, ensure_ascii=False)}\n\n"
@@ -160,20 +163,25 @@ async def stream_response_generator(
         ai_now = _now_ms()
         assistant_message = create_chat_message(
             db,
-            user_id=current_user.id,
+            user_id=user_id,
             role="assistant",
             content=full_reply,
             timestamp=ai_now,
-            session_id=current_session.id,
+            session_id=session_id,
         )
-        current_session.message_count = (current_session.message_count or 0) + 1
-        current_session.end_time = ai_now
+        session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+        if session:
+            session.message_count = (session.message_count or 0) + 1
+            session.end_time = ai_now
         db.commit()
         db.refresh(assistant_message)
         yield f"data: {json.dumps({'type': 'done', 'message': serialize_message(assistant_message)}, ensure_ascii=False)}\n\n"
     except Exception as exc:
+        logger.error("[chat/stream] generator error: %s\n%s", str(exc), traceback.format_exc())
         db.rollback()
         yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+    finally:
+        db.close()
 
 
 @router.post("/stream", summary="AI 对话（流式 SSE）")
@@ -204,12 +212,18 @@ async def ai_chat_stream(
     db.commit()
     db.refresh(user_message)
 
+    # 在 Depends(get_db) session 关闭前，将 ORM 数据提取为纯 dict
+    user_message_dict = serialize_message(user_message)
+    session_id = current_session.id
+    user_id = current_user.id
+    client_message_id = body.client_message_id
+
     return StreamingResponse(
         stream_response_generator(
-            db,
-            current_session=current_session,
-            current_user=current_user,
-            user_message=user_message,
+            session_id=session_id,
+            user_id=user_id,
+            user_message_dict=user_message_dict,
+            client_message_id=client_message_id,
         ),
         media_type="text/event-stream",
         headers={
