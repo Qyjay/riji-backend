@@ -3,9 +3,8 @@
 prefix="/api/materials", tags=["素材管理"]
 """
 from typing import Optional
-from uuid import uuid4
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, UploadFile
 from sqlalchemy.orm import Session
 
 from app.dependencies import get_current_user
@@ -25,15 +24,13 @@ def _serialize(m_dict: dict) -> dict:
 
 @router.post("/voice", summary="语音上传与转写")
 async def upload_voice(
-    body: dict,
+    file: UploadFile = File(..., description="语音文件（mp3/wav/m4a/ogg，最大 20MB）"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """语音上传并转写"""
-    return success({
-        "url": f"/uploads/voice/{str(uuid4())}.mp3",
-        "transcription": "语音内容转文字（Mock）",
-    })
+    result = await service.upload_voice_and_transcribe(file, current_user.id)
+    return success(result)
 
 
 @router.post("", summary="创建素材")
