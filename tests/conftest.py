@@ -60,6 +60,7 @@ def setup_database():
     # 导入所有模型确保 Base 知道它们
     from app.models import user, diary, chat, study, social  # noqa
     from app.models import material, anniversary, user_profile, derivative  # noqa
+    from app.models import plaza, avatar  # noqa
     Base.metadata.create_all(bind=test_engine)
     yield
     Base.metadata.drop_all(bind=test_engine)

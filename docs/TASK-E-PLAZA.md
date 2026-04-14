@@ -16,12 +16,13 @@
 
 | 阶段 | 状态 | 备注 |
 |------|------|------|
-| 数据模型 | ✅ 已完成 | plaza.py（7张表）+ avatar.py 已创建并注册 |
+| 数据模型 | ✅ 已完成 | plaza.py（3张表）+ avatar.py（4张表）已创建并注册 |
 | 种子数据 | ✅ 已完成 | seed_plaza_avatar.py（10用户/15帖/28评论/39点赞/41记忆/20推荐/10侧写） |
-| 广场 CRUD | ⬜ 待开始 | 6 个接口 |
-| 分身记忆/状态 | ⬜ 待开始 | 6 个接口 |
-| 分身推荐+侧写 | ⬜ 待开始 | 4 个接口 |
-| 测试 | ⬜ 待开始 | test_plaza + test_avatar |
+| 广场 CRUD | ✅ 已完成 | 6 个接口（Step 1）— schemas/service/router |
+| 分身记忆/状态 | ✅ 已完成 | 6 个接口（Step 2）— schemas/service/router |
+| 分身推荐+侧写 | ✅ 已完成 | 4 个接口（Step 3）— 含真实 AI 调用 |
+| 路由注册 | ✅ 已完成 | main.py 已注册 plaza_router + avatar_router（Step 4） |
+| 测试 | ✅ 已完成 | 38 个用例全部通过（Step 5）— test_plaza(18) + test_avatar(20) |
 
 ---
 
@@ -685,14 +686,14 @@ pytest tests/test_plaza.py tests/test_avatar.py -v
 - [x] 数据模型已创建（plaza.py + avatar.py，共 7 张表）
 - [x] 数据库已注册（database.py + models/__init__.py）
 - [x] 种子数据已创建并验证通过（seed_plaza_avatar.py）
-- [ ] 16 个接口在 Swagger 中全部可调通
-- [ ] `pytest tests/test_plaza.py tests/test_avatar.py -v` 全部通过
-- [ ] 广场完整链路：创建帖子 → 列表浏览 → 频道筛选 → 点赞 → 评论
-- [ ] 分身记忆 CRUD 完整链路
-- [ ] 分身状态获取/更新
-- [ ] 分身推荐列表展示 + 忽略/接受操作
-- [ ] 仅本校可见逻辑正确（school_only 帖子只对同校用户可见）
-- [ ] 前端 `USE_MOCK=false` 后能正常联调
+- [x] 16 个接口在 Swagger 中全部可调通
+- [x] `pytest tests/test_plaza.py tests/test_avatar.py -v` 全部通过（38 passed）
+- [x] 广场完整链路：创建帖子 → 列表浏览 → 频道筛选 → 点赞 → 评论
+- [x] 分身记忆 CRUD 完整链路
+- [x] 分身状态获取/更新
+- [x] 分身推荐列表展示 + 忽略/接受操作
+- [x] 仅本校可见逻辑正确（school_only 帖子只对同校用户可见）
+- [ ] 前端 `USE_MOCK=false` 后能正常联调（待前端对接验证）
 
 ---
 
@@ -702,12 +703,12 @@ pytest tests/test_plaza.py tests/test_avatar.py -v
 |------|------|----------|----------|------|
 | 数据模型 | 新建 plaza.py + avatar.py | — | 0.5 天 | ✅ 已完成 |
 | 种子数据 | seed_plaza_avatar.py | — | 0.5 天 | ✅ 已完成 |
-| 广场 CRUD | 6 个接口 (schemas + service + router) | Step 1 | 1 天 | ⬜ |
-| 分身记忆/状态 | 6 个接口 (schemas + service + router) | Step 2 | 1 天 | ⬜ |
-| 分身推荐 + 侧写 | 4 个接口 (追加 service + router) | Step 3 | 1 天 | ⬜ |
-| 路由注册 | 修改 main.py | Step 4 | 0.1 天 | ⬜ |
-| 测试 | test_plaza + test_avatar | Step 5 | 0.5 天 | ⬜ |
-| **合计** | | **5 步** | **约 4 天** |
+| 广场 CRUD | 6 个接口 (schemas + service + router) | Step 1 | 1 天 | ✅ 已完成 |
+| 分身记忆/状态 | 6 个接口 (schemas + service + router) | Step 2 | 1 天 | ✅ 已完成 |
+| 分身推荐 + 侧写 | 4 个接口 (追加 service + router) | Step 3 | 1 天 | ✅ 已完成 |
+| 路由注册 | 修改 main.py + conftest.py | Step 4 | 0.1 天 | ✅ 已完成 |
+| 测试 | test_plaza(18) + test_avatar(20) | Step 5 | 0.5 天 | ✅ 已完成 |
+| **合计** | | **5 步全部完成** | **约 4 天** | ✅ |
 
 ---
 

@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     MINIMAX_API_KEY: str = ""
     MINIMAX_API_BASE: str = "https://api.minimaxi.com"
     MINIMAX_MODEL: str = "MiniMax-M2.7-highspeed"
-    MINIMAX_MOCK: bool = True  # True=返回模拟数据不调真实API，False=调真实API
+    MINIMAX_MOCK: bool = False  # True=返回模拟数据不调真实API，False=调真实API
 
     # 视觉理解模型（火山引擎 Ark）
     ARK_API_KEY: str = ""
