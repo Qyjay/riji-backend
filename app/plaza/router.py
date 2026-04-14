@@ -27,16 +27,17 @@ def _serialize_comment(d: dict) -> dict:
     return PlazaCommentOut(**d).model_dump(by_alias=True)
 
 
-@router.get("/posts", summary="帖子列表（分页 + 频道筛选）")
+@router.get("/posts", summary="帖子列表（分页 + 频道筛选 + 搜索）")
 def list_posts(
     channel: Optional[str] = Query(None, description="频道筛选：buddy/help/share/dating"),
+    q: Optional[str] = Query(None, description="关键词搜索"),
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(10, ge=1, le=50, description="每页条数"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """获取广场帖子列表，支持频道筛选和分页"""
-    result = service.list_posts(db, current_user, channel, page, page_size)
+    """获取广场帖子列表，支持频道筛选、关键词搜索和分页"""
+    result = service.list_posts(db, current_user, channel, page, page_size, q=q)
     return success({
         "items": [_serialize_post(item) for item in result["items"]],
         "total": result["total"],
@@ -97,3 +98,14 @@ def add_comment(
     """添加评论到帖子"""
     result = service.add_comment(db, current_user, post_id, body.model_dump())
     return success(_serialize_comment(result))
+
+
+@router.post("/posts/{post_id}/agent-comment", summary="AI 分身自动评论")
+async def agent_comment(
+    post_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """根据用户分身画像 + 帖子内容，AI 自动生成评论并发布"""
+    result = await service.agent_comment(db, current_user, post_id)
+    return success({"comment": _serialize_comment(result)})
