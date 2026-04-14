@@ -290,7 +290,11 @@ def test_create_material_voice_flow(client):
     user_data = create_test_user(client, username="material_voice_user")
     headers = get_auth_header(user_data["token"])
 
-    voice_resp = client.post("/api/materials/voice", json={"filePath": "mock"}, headers=headers)
+    voice_resp = client.post(
+        "/api/materials/voice",
+        files={"file": ("voice.m4a", b"fake-audio-bytes", "audio/m4a")},
+        headers=headers,
+    )
     assert voice_resp.status_code == 200
     voice_data = voice_resp.json()
     assert voice_data["code"] == 0
@@ -315,6 +319,25 @@ def test_create_material_voice_flow(client):
     assert data["type"] == "voice"
     assert data["content"] == transcription
     assert data["mediaUrl"] == [voice_url]
+
+
+def test_upload_chat_file(client):
+    """聊天文件附件单独上传，返回完整文件元信息。"""
+    user_data = create_test_user(client, username="chat_file_user")
+    headers = get_auth_header(user_data["token"])
+
+    resp = client.post(
+        "/api/upload/chat-file",
+        files={"file": ("notes.pdf", b"%PDF-1.4 fake", "application/pdf")},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["code"] == 0
+    data = payload["data"]
+    assert data["url"].startswith("/uploads/")
+    assert data["name"] == "notes.pdf"
+    assert data["mimeType"] == "application/pdf"
 
 
 def test_list_materials_bare_array(client):

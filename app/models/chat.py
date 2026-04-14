@@ -47,8 +47,11 @@ class ChatMessage(Base):
     content = Column(Text, nullable=False)
     timestamp = Column(BigInteger, nullable=False)  # 毫秒时间戳
     session_id = Column(String, nullable=True)  # 关联 chat_sessions.id
+    client_message_id = Column(String, nullable=True)
+    attachments = Column(Text, default="[]")
 
     __table_args__ = (
         # 按用户和时间排序索引
         Index("ix_chat_messages_user_timestamp", "user_id", "timestamp"),
+        Index("ix_chat_messages_session_timestamp", "session_id", "timestamp"),
     )

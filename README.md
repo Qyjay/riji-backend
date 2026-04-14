@@ -22,7 +22,7 @@ python scripts/seed.py
 
 # 5. 启动服务
 uvicorn app.main:app --reload --port 8000
-
+uvicorn app.main:app --reload --host 127.0.0.1 --log-level info #指定日志
 # 6. 打开浏览器测试
 # Swagger 文档：http://localhost:8000/docs
 ```
