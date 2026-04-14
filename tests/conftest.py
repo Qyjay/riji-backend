@@ -6,6 +6,7 @@
 - 每个测试自动 rollback（通过 scope='function'）
 """
 import pytest
+import httpx
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -14,6 +15,26 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.main import app
 from app.upload.router import router as upload_router
+
+
+def _patch_httpx_testclient_compat():
+    """
+    兼容 starlette<0.37 与 httpx>=0.28 的 TestClient 参数差异。
+    新版 httpx.Client 移除了 app 参数，这里在测试环境中静默忽略。
+    """
+    init = httpx.Client.__init__
+    if getattr(init, "_riji_patched", False):
+        return
+
+    def compat_init(self, *args, **kwargs):
+        kwargs.pop("app", None)
+        return init(self, *args, **kwargs)
+
+    compat_init._riji_patched = True  # type: ignore[attr-defined]
+    httpx.Client.__init__ = compat_init  # type: ignore[assignment]
+
+
+_patch_httpx_testclient_compat()
 
 # ==================== 测试数据库配置 ====================
 

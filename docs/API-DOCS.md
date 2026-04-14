@@ -2,7 +2,7 @@
 
 > **本文档从实际代码提取，记录所有已注册路由的完整信息。**
 >
-> 最后更新：2026-04-06
+> 最后更新：2026-04-14
 >
 > Base URL: `http://localhost:8000/api`
 
@@ -63,9 +63,14 @@
 
 ### 字段命名
 
-响应字段使用 **camelCase**（如 `userId`、`createdAt`），请求 body 使用 **snake_case**。
+响应字段默认使用 **camelCase**（如 `userId`、`createdAt`）。请求 body 以各接口 schema 为准：
 
-> 兼容说明：`GET /api/diaries/today-summary` 当前实现返回 snake_case（如 `material_count`、`has_diary`）。
+- 历史业务接口仍以 **snake_case** 为主
+- 新聊天链路（如 `/api/chat`、`/api/chat/stream`）已使用 **camelCase** 字段，如 `clientMessageId`、`thumbnailUrl`
+
+> 兼容说明：
+> 1. `GET /api/diaries/today-summary` 当前实现返回 snake_case（如 `material_count`、`has_diary`）。
+> 2. SSE 事件体中的字段同样使用 camelCase。
 
 ---
 
@@ -466,15 +471,27 @@
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| file | File | 语音文件（mp3/wav/m4a，最大 20MB） |
+| file | File | 语音文件（mp3/wav/m4a/ogg，最大 20MB） |
 
-**响应 data：** `{"url": "/uploads/voice/xxx.mp3", "transcription": "转写文字"}`
+**响应 data：**
+
+```json
+{
+  "url": "/uploads/xxx/voice/20260414_xxx.m4a",
+  "transcription": "这是一段语音记录，原文件名是《morning-note》。"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| url | string | 已上传语音文件 URL |
+| transcription | string | 当前返回转写文本，用于前端回填输入框 |
 
 **使用场景：**
 - 素材录制页录音转文字
 - AI 对话页语音输入转文字
 
-**实现状态：** 🟡 返回 Mock 数据，未实现真实语音转写（需对接 ASR API）
+**实现状态：** 🟡 已实现上传链路；当前转写文本为 fallback 文案，尚未接入真实 ASR 服务
 
 ---
 
@@ -915,40 +932,140 @@ ARK_VISION_CACHE_TTL_SEC=21600
 
 ## 8. AI 对话模块（Chat）
 
-### POST /api/chat — AI 对话 🔒
+### POST /api/chat — AI 对话（非流式） 🔒
 
-发送消息给 AI，返回纯文本回复（非 SSE 流式）。自动保存对话历史，并集成对话段（session）管理。
-
-每次发消息时，后端会：
-1. 检查是否有 open 的 ChatSession
-2. 若超过静默阈值（用户设置），关闭旧 session 并生成 chat 素材
-3. 将消息绑定到当前 session
+发送消息给 AI，返回完整的用户消息实体和 AI 消息实体。接口会自动维护 chat session，并在静默超时切段时尝试生成 chat 素材。
 
 **请求 Body：**
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| message | string | ✅ | 用户消息 |
-
-**响应 data：** AI 回复文本（string）
-
-**响应示例（触发素材生成时附带 meta）：**
-
 ```json
 {
-  "code": 0,
-  "data": "AI 回复文本",
-  "message": "ok",
-  "meta": {
-    "materialGenerated": true,
-    "materialId": "uuid-xxx"
-  }
+  "message": "今天有点累，但还是把作业写完了",
+  "clientMessageId": "cmsg_20260414_001",
+  "attachments": [
+    {
+      "type": "image",
+      "name": "sunset.jpg",
+      "url": "/uploads/xxx/diary-image/sunset.jpg",
+      "thumbnailUrl": "/uploads/xxx/diary-image/thumb_sunset.jpg",
+      "mimeType": "image/jpeg",
+      "size": 231231
+    }
+  ]
 }
 ```
 
-> `meta` 字段仅在触发了旧 session 封闭并生成素材时附带，否则不出现。
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| message | string | 条件必填 | 文本内容；与 `attachments` 至少有一项非空 |
+| clientMessageId | string | ❌ | 前端本地消息 ID，用于流式确认与重试对齐 |
+| attachments | Attachment[] | 条件必填 | 附件数组；与 `message` 至少有一项非空 |
 
-**实现状态：** ✅ 已完成（调用 minimax_client.chat_completion，取最近 20 条历史作为上下文，集成 session 管理）
+**Attachment 对象：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| type | string | ✅ | `image` / `file` / `voice` |
+| name | string | ✅ | 文件名 |
+| url | string | ✅ | 上传后的可访问 URL |
+| thumbnailUrl | string | ❌ | 图片缩略图 URL |
+| mimeType | string | ❌ | MIME 类型 |
+| size | number | ❌ | 文件大小，单位字节 |
+
+**响应 data：**
+
+```json
+{
+  "sessionId": "sess_123",
+  "userMessage": {
+    "id": "msg_user_1",
+    "sessionId": "sess_123",
+    "clientMessageId": "cmsg_20260414_001",
+    "role": "user",
+    "content": "今天有点累，但还是把作业写完了",
+    "timestamp": 1776150000000,
+    "attachments": [
+      {
+        "type": "image",
+        "name": "sunset.jpg",
+        "url": "/uploads/xxx/diary-image/sunset.jpg",
+        "thumbnailUrl": "/uploads/xxx/diary-image/thumb_sunset.jpg",
+        "mimeType": "image/jpeg",
+        "size": 231231
+      }
+    ]
+  },
+  "assistantMessage": {
+    "id": "msg_ai_1",
+    "sessionId": "sess_123",
+    "clientMessageId": null,
+    "role": "assistant",
+    "content": "辛苦啦，能在疲惫的时候把作业完成，本身就很了不起。",
+    "timestamp": 1776150001800,
+    "attachments": []
+  },
+  "materialGenerated": false,
+  "materialId": null
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| sessionId | string | 当前消息所在的会话段 ID |
+| userMessage | ChatMessage | 已入库的用户消息实体 |
+| assistantMessage | ChatMessage | 已入库的 AI 回复实体 |
+| materialGenerated | bool | 是否在本次请求前关闭旧 session 并生成 chat 素材 |
+| materialId | string \| null | 自动生成的素材 ID |
+
+**会话规则：**
+
+1. 仅当前 session 内消息参与 AI 上下文，不再跨 session 混取最近消息。
+2. 若距离上一条对话超过 `chatSilenceThreshold`，旧 session 会先关闭，再视配置决定是否转为 chat 素材。
+3. 用户消息与 AI 回复都会持久化；失败态由前端自行维护，不入库。
+
+**实现状态：** ✅ 已完成
+
+---
+
+### POST /api/chat/stream — AI 对话（SSE 流式） 🔒
+
+流式版本请求体与 `/api/chat` 完全一致，响应为 `text/event-stream`。
+
+**Content-Type：** `application/json`
+
+**Response Content-Type：** `text/event-stream`
+
+**SSE 事件协议：**
+
+| type | 说明 |
+|------|------|
+| session | 返回当前 `sessionId` |
+| ack | 确认用户消息已入库，并返回完整用户消息实体 |
+| chunk | AI 文本增量片段 |
+| done | AI 回复完成，并返回最终 assistant 消息实体 |
+| error | 本次流式生成失败 |
+
+**事件示例：**
+
+```text
+data: {"type":"session","sessionId":"sess_123"}
+
+data: {"type":"ack","clientMessageId":"cmsg_20260414_001","message":{"id":"msg_user_1","sessionId":"sess_123","clientMessageId":"cmsg_20260414_001","role":"user","content":"今天有点累，但还是把作业写完了","timestamp":1776150000000,"attachments":[]}}
+
+data: {"type":"chunk","text":"辛苦啦，"}
+
+data: {"type":"chunk","text":"能在疲惫的时候把作业完成，本身就很了不起。"}
+
+data: {"type":"done","message":{"id":"msg_ai_1","sessionId":"sess_123","clientMessageId":null,"role":"assistant","content":"辛苦啦，能在疲惫的时候把作业完成，本身就很了不起。","timestamp":1776150001800,"attachments":[]}}
+```
+
+**错误事件示例：**
+
+```text
+data: {"type":"error","message":"AI 服务暂时不可用"}
+```
+
+**实现状态：** ✅ 已完成（接入 `minimax_client.stream_chat`）
 
 ---
 
@@ -977,6 +1094,11 @@ ARK_VISION_CACHE_TTL_SEC=21600
 > 无 open session → `{"sessionClosed": false, ...}`
 > session 轮数不足或 chat_material_enabled=false → `{"sessionClosed": true, "materialGenerated": false, "materialId": null}`
 
+**补充说明：**
+
+- 若当前没有 open session，会返回 `sessionClosed=false`
+- 若 session 轮数不足、关闭了 `chatMaterialEnabled` 或摘要阶段无结果，会返回 `materialGenerated=false`
+
 **实现状态：** ✅ 已完成
 
 ---
@@ -1002,11 +1124,39 @@ ARK_VISION_CACHE_TTL_SEC=21600
     "moodEmoji": "😊"
   },
   "messages": [
-    {"role": "user", "content": "今天下午和小李去骑车了", "timestamp": 1711440180000},
-    {"role": "assistant", "content": "听起来不错！去哪里骑的？", "timestamp": 1711440182000}
+    {
+      "id": "msg_user_1",
+      "sessionId": "sess_123",
+      "clientMessageId": "cmsg_001",
+      "role": "user",
+      "content": "今天下午和小李去骑车了",
+      "timestamp": 1711440180000,
+      "attachments": []
+    },
+    {
+      "id": "msg_ai_1",
+      "sessionId": "sess_123",
+      "clientMessageId": null,
+      "role": "assistant",
+      "content": "听起来不错！去哪里骑的？",
+      "timestamp": 1711440182000,
+      "attachments": []
+    }
   ]
 }
 ```
+
+**消息字段说明：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | string | 消息 ID |
+| sessionId | string \| null | 所属 session ID |
+| clientMessageId | string \| null | 前端侧消息 ID |
+| role | string | `user` / `assistant` |
+| content | string | 消息文本 |
+| timestamp | number | Unix 毫秒时间戳 |
+| attachments | Attachment[] | 附件数组 |
 
 **权限：** 仅 session 所属用户可访问。
 
@@ -1027,12 +1177,33 @@ ARK_VISION_CACHE_TTL_SEC=21600
 ```json
 {
   "items": [
-    {"role": "user", "content": "你好", "timestamp": 1711440000000},
-    {"role": "assistant", "content": "你好呀！", "timestamp": 1711440001000}
+    {
+      "id": "msg_user_1",
+      "sessionId": "sess_123",
+      "clientMessageId": "cmsg_001",
+      "role": "user",
+      "content": "你好",
+      "timestamp": 1711440000000,
+      "attachments": []
+    },
+    {
+      "id": "msg_ai_1",
+      "sessionId": "sess_123",
+      "clientMessageId": null,
+      "role": "assistant",
+      "content": "你好呀！",
+      "timestamp": 1711440001000,
+      "attachments": []
+    }
   ],
   "total": 2
 }
 ```
+
+**补充说明：**
+
+- 当用户还没有历史消息时，接口会返回一条欢迎语消息，前端可直接渲染为空状态首条消息
+- `items` 为完整消息实体，字段结构与 `/api/chat` 返回的 `userMessage/assistantMessage` 一致
 
 **实现状态：** ✅ 已完成
 
@@ -1262,9 +1433,49 @@ ARK_VISION_CACHE_TTL_SEC=21600
 |------|------|------|
 | file | File | 语音（mp3/wav/m4a/ogg，最大 20MB） |
 
-**响应 data：** `{"url": "/uploads/xxx/voice/xxx.mp3"}`
+**响应 data：**
 
-**实现状态：** 🟡 文件保存可用，但 upload/service.py 的 MIME 校验只支持图片类型，语音上传会被拦截
+```json
+{
+  "url": "/uploads/xxx/voice/20260414_xxx.m4a"
+}
+```
+
+**实现状态：** ✅ 已完成
+
+---
+
+### POST /api/upload/chat-file — 上传聊天文件附件 🔒
+
+用于 AI 聊天页发送文件附件。前端应先调用本接口上传文件，再把返回结果组装进 `/api/chat` 或 `/api/chat/stream` 的 `attachments`。
+
+**Content-Type：** multipart/form-data
+
+**请求参数：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| file | File | 聊天文件（pdf/doc/docx/ppt/pptx/xls/xlsx/txt/csv，最大 20MB） |
+
+**响应 data：**
+
+```json
+{
+  "url": "/uploads/xxx/chat-file/notes.pdf",
+  "name": "notes.pdf",
+  "size": 102400,
+  "mimeType": "application/pdf"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| url | string | 上传后的文件 URL |
+| name | string | 原始文件名 |
+| size | number | 文件大小，单位字节 |
+| mimeType | string | MIME 类型 |
+
+**实现状态：** ✅ 已完成
 
 ---
 
@@ -1844,71 +2055,80 @@ class AvatarProfile(Base):
 |---|------|------|------|------|
 | 1 | POST | /api/auth/register | 认证 | ✅ |
 | 2 | POST | /api/auth/login | 认证 | ✅ |
-| 3 | GET | /api/user/profile | 用户 | ✅ |
-| 4 | POST | /api/user/profile | 用户 | ✅ |
-| 5 | GET | /api/user/growth | 用户 | ✅ |
-| 6 | GET | /api/user/achievements | 用户 | ✅ |
-| 7 | GET | /api/user/settings | 用户 | ✅ |
-| 8 | POST | /api/user/settings | 用户 | ✅ |
-| 9 | GET | /api/user/semester-report | 用户 | ✅ |
-| 10 | GET | /api/user/portrait | 用户 | ✅ |
-| 11 | POST | /api/user/portrait/refresh | 用户 | ✅ |
-| 12 | GET | /api/user/agent-portrait | 用户 | ✅ |
-| 13 | POST | /api/materials | 素材 | ✅ |
-| 14 | GET | /api/materials | 素材 | ✅ |
-| 15 | GET | /api/materials/{material_id} | 素材 | ✅ |
-| 16 | PUT | /api/materials/{material_id} | 素材 | ✅ |
-| 17 | DELETE | /api/materials/{material_id} | 素材 | ✅ |
-| 18 | POST | /api/materials/{material_id}/emotion | 素材 | ✅ |
-| 19 | POST | /api/materials/{material_id}/polish | 素材 | ✅ |
-| 20 | POST | /api/materials/voice | 素材 | 🟡 |
-| 21 | GET | /api/diaries/today-summary | 日记 | ✅ |
-| 22 | POST | /api/diaries/generate | 日记 | ✅ |
-| 23 | GET | /api/diaries | 日记 | ✅ |
-| 24 | GET | /api/diaries/{diary_id} | 日记 | ✅ |
-| 25 | PUT | /api/diaries/{diary_id} | 日记 | ✅ |
-| 26 | GET | /api/diaries/{diary_id}/emotion-trend | 日记 | ✅ |
-| 27 | POST | /api/diaries/{diary_id}/extract | 日记 | ✅ |
-| 28 | POST | /api/diaries/{diary_id}/derivative | 日记 | ✅ |
-| 29 | GET | /api/derivatives | 衍生 | ✅ |
-| 30 | POST | /api/derivatives/{deriv_id}/share | 衍生 | ✅ |
-| 31 | GET | /api/anniversaries/today | 纪念日 | ✅ |
-| 32 | GET | /api/anniversaries | 纪念日 | ✅ |
-| 33 | POST | /api/anniversaries | 纪念日 | ✅ |
-| 34 | PUT | /api/anniversaries/{ann_id} | 纪念日 | ✅ |
-| 35 | DELETE | /api/anniversaries/{ann_id} | 纪念日 | ✅ |
-| 36 | POST | /api/ai/tts | AI | ✅ |
-| 37 | GET | /api/ai/fortune | AI | ✅ |
-| 38 | POST | /api/chat | 对话 | ✅ |
-| 39 | GET | /api/chat/history | 对话 | ✅ |
-| 40 | GET | /api/social/matches | 社交 | ✅ |
-| 41 | POST | /api/social/match-requests | 社交 | ✅ |
-| 42 | POST | /api/social/match-requests/{request_id}/respond | 社交 | ✅ |
-| 43 | GET | /api/social/messages/{match_id} | 社交 | ✅ |
-| 44 | GET | /api/social/matches/{match_id}/report | 社交 | ✅ |
-| 45 | POST | /api/social/buddy | 社交 | ✅ |
-| 46 | POST | /api/social/buddy/{request_id}/respond | 社交 | ✅ |
-| 47 | POST | /api/upload/avatar | 上传 | ✅ |
-| 48 | POST | /api/upload/diary-image | 上传 | ✅ |
-| 49 | POST | /api/upload/voice | 上传 | 🟡 |
-| 50 | GET | /api/study/pomodoros | 学习⚠️ | ✅ |
-| 51 | POST | /api/study/pomodoros | 学习⚠️ | ✅ |
-| 52 | POST | /api/study/pomodoros/{pomodoro_id}/complete | 学习⚠️ | ✅ |
-| 53 | GET | /api/study/todos | 学习⚠️ | ✅ |
-| 54 | POST | /api/study/todos | 学习⚠️ | ✅ |
-| 55 | POST | /api/study/todos/{todo_id}/toggle | 学习⚠️ | ✅ |
+| 3 | POST | /api/auth/logout | 认证 | ✅ |
+| 4 | GET | /api/auth/health | 认证 | ✅ |
+| 5 | GET | /api/user/profile | 用户 | ✅ |
+| 6 | POST | /api/user/profile | 用户 | ✅ |
+| 7 | GET | /api/user/growth | 用户 | ✅ |
+| 8 | GET | /api/user/achievements | 用户 | ✅ |
+| 9 | GET | /api/user/settings | 用户 | ✅ |
+| 10 | POST | /api/user/settings | 用户 | ✅ |
+| 11 | GET | /api/user/semester-report | 用户 | ✅ |
+| 12 | GET | /api/user/portrait | 用户 | ✅ |
+| 13 | POST | /api/user/portrait/refresh | 用户 | ✅ |
+| 14 | GET | /api/user/agent-portrait | 用户 | ✅ |
+| 15 | POST | /api/materials | 素材 | ✅ |
+| 16 | GET | /api/materials | 素材 | ✅ |
+| 17 | GET | /api/materials/{material_id} | 素材 | ✅ |
+| 18 | PUT | /api/materials/{material_id} | 素材 | ✅ |
+| 19 | DELETE | /api/materials/{material_id} | 素材 | ✅ |
+| 20 | POST | /api/materials/{material_id}/emotion | 素材 | ✅ |
+| 21 | POST | /api/materials/{material_id}/polish | 素材 | ✅ |
+| 22 | POST | /api/materials/voice | 素材 | 🟡 |
+| 23 | GET | /api/diaries/today-summary | 日记 | ✅ |
+| 24 | POST | /api/diaries/generate | 日记 | ✅ |
+| 25 | GET | /api/diaries | 日记 | ✅ |
+| 26 | GET | /api/diaries/search | 日记 | ✅ |
+| 27 | GET | /api/diaries/{diary_id} | 日记 | ✅ |
+| 28 | PUT | /api/diaries/{diary_id} | 日记 | ✅ |
+| 29 | DELETE | /api/diaries/{diary_id} | 日记 | ✅ |
+| 30 | GET | /api/diaries/{diary_id}/emotion-trend | 日记 | ✅ |
+| 31 | POST | /api/diaries/{diary_id}/extract | 日记 | ✅ |
+| 32 | POST | /api/diaries/{diary_id}/derivative | 日记 | ✅ |
+| 33 | GET | /api/derivatives | 衍生 | ✅ |
+| 34 | POST | /api/derivatives/{deriv_id}/share | 衍生 | ✅ |
+| 35 | GET | /api/anniversaries/today | 纪念日 | ✅ |
+| 36 | GET | /api/anniversaries | 纪念日 | ✅ |
+| 37 | POST | /api/anniversaries | 纪念日 | ✅ |
+| 38 | PUT | /api/anniversaries/{ann_id} | 纪念日 | ✅ |
+| 39 | DELETE | /api/anniversaries/{ann_id} | 纪念日 | ✅ |
+| 40 | POST | /api/ai/tts | AI | ✅ |
+| 41 | GET | /api/ai/fortune | AI | ✅ |
+| 42 | POST | /api/chat | 对话 | ✅ |
+| 43 | POST | /api/chat/stream | 对话 | ✅ |
+| 44 | POST | /api/chat/close-session | 对话 | ✅ |
+| 45 | GET | /api/chat/history | 对话 | ✅ |
+| 46 | GET | /api/chat/session/{session_id}/messages | 对话 | ✅ |
+| 47 | GET | /api/social/matches | 社交 | ✅ |
+| 48 | POST | /api/social/match-requests | 社交 | ✅ |
+| 49 | POST | /api/social/match-requests/{request_id}/respond | 社交 | ✅ |
+| 50 | GET | /api/social/messages/{match_id} | 社交 | ✅ |
+| 51 | POST | /api/social/messages/{match_id} | 社交 | ✅ |
+| 52 | GET | /api/social/matches/{match_id}/report | 社交 | ✅ |
+| 53 | POST | /api/social/buddy | 社交 | ✅ |
+| 54 | POST | /api/social/buddy/{request_id}/respond | 社交 | ✅ |
+| 55 | POST | /api/upload/avatar | 上传 | ✅ |
+| 56 | POST | /api/upload/diary-image | 上传 | ✅ |
+| 57 | POST | /api/upload/diary-images | 上传 | ✅ |
+| 58 | POST | /api/upload/voice | 上传 | ✅ |
+| 59 | POST | /api/upload/chat-file | 上传 | ✅ |
+| 60 | GET | /api/study/pomodoros | 学习⚠️ | ✅ |
+| 61 | POST | /api/study/pomodoros | 学习⚠️ | ✅ |
+| 62 | POST | /api/study/pomodoros/{pomodoro_id}/complete | 学习⚠️ | ✅ |
+| 63 | GET | /api/study/todos | 学习⚠️ | ✅ |
+| 64 | POST | /api/study/todos | 学习⚠️ | ✅ |
+| 65 | POST | /api/study/todos/{todo_id}/toggle | 学习⚠️ | ✅ |
 
-**统计：** 74 个路由，55 个 ✅，2 个 🟡，17 个 🔴（含 16 个广场 + 分身新增 + 1 个搜索）
+**统计：** 当前代码共注册 65 个 `/api` 路由，其中 64 个 ✅、1 个 🟡、0 个 🔴
 
 ---
 
 ## 已知问题
 
-1. **语音上传 MIME 校验**：`upload/service.py` 的 `ALLOWED_IMAGE_TYPES` 只包含图片类型，`POST /api/upload/voice` 会因 MIME 校验失败而 400。需要新增语音 MIME 类型支持。
-2. **语音转写**：`POST /api/materials/voice` 返回硬编码 Mock 数据，未接入真实语音转文字服务。
+1. **语音转写仍为占位实现**：`POST /api/materials/voice` 已完成上传与返回文本，但当前 `transcription` 仍为 fallback 文案，尚未接入真实语音识别服务。
+2. **聊天附件暂未深度理解**：图片、文件、语音附件当前只作为结构化上下文参与提示词拼接，未接入 OCR、视觉问答或文件解析能力。
 3. **学习模块**：v2 已废弃但路由仍注册，建议后续清理。
 4. **自动生成任务部署注意**：22:00 自动补生成依赖后端常驻进程。多实例部署时建议仅保留单实例执行定时任务，避免重复扫描。
-5. **社交消息发送接口缺失**：TASK-D 提及 `POST /api/social/messages/{match_id}`（发送消息），当前后端未注册该接口，`social_messages` 仅有读取逻辑。
 
 ---
 
@@ -1919,7 +2139,7 @@ class AvatarProfile(Base):
 | 方法 | 用途 | 模型 | 接入的路由 |
 |------|------|------|-----------|
 | chat_completion | 文本对话 | M2.7-highspeed | /chat, /ai/fortune |
-| stream_chat | 流式对话（SSE） | M2.7-highspeed | 未接入 |
+| stream_chat | 流式对话（SSE） | M2.7-highspeed | /chat/stream |
 | generate_image | 文生图 | image-01 | /user/agent-portrait, /diaries/{diary_id}/derivative |
 | text_to_speech | TTS | speech-2.8-hd | /ai/tts |
 | generate_music | 音乐生成 | music-2.5+ | 未接入 |
@@ -1930,11 +2150,11 @@ class AvatarProfile(Base):
 | generate_portrait | 用户画像 | chat_completion | /user/portrait/refresh |
 | generate_match_report | 匹配报告 | chat_completion | /social/matches/{match_id}/report |
 | generate_match_report | 匹配报告 | chat_completion | /social/matches/{id}/report |
-| summarize_chat_session | 对话摘要 | chat_completion | /chat（session 封闭时自动调用）|
+| summarize_chat_session | 对话摘要 | chat_completion | /chat/close-session, /chat（静默切段时自动调用） |
 | *generate_avatar_profile* | *分身侧写生成* | *chat_completion* | */avatar/profile/regenerate* 🆕 待新增 |
 | *match_post* | *帖子匹配打分* | *chat_completion* | */avatar/matches* 🆕 待新增 |
 | *agent_conversation* | *分身对话模拟* | *chat_completion* | */avatar/matches* 🆕 待新增 |
 
 ---
 
-*本文档从 `app/` 下所有 router.py、schemas.py、service.py 以及前端 `services/api/plaza.ts`、`services/api/avatar.ts` 提取，最后更新 2026-04-02。*
+*本文档从 `app/` 下所有 router.py、schemas.py、service.py 以及前端相关 API 调用提取，最后更新 2026-04-14。*

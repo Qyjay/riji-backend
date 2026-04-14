@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 from typing import List, Optional
 
+from fastapi import UploadFile
 from sqlalchemy.orm import Session
 
 from app.models.material import RawMaterial
@@ -129,6 +130,13 @@ def _build_unique_material_id(db: Session, user_id: str, now_dt: datetime) -> st
     return candidate_id
 
 
+def _fallback_voice_transcription(file_name: str, media_url: str) -> str:
+    stem = (file_name or "语音").rsplit(".", 1)[0].strip()
+    if stem:
+        return f"这是一段语音记录，原文件名是《{stem}》。"
+    return f"这是一段语音记录，已上传至 {media_url}。"
+
+
 def _same_payload(last: RawMaterial, payload: dict) -> bool:
     """判断两条素材是否为同一请求负载，用于防抖去重。"""
     return (
@@ -207,6 +215,17 @@ def material_to_dict(m: RawMaterial) -> dict:
         "chat_session_id": m.chat_session_id or None,
         "start_time": m.start_time or None,
         "end_time": m.end_time or None,
+    }
+
+
+async def upload_voice_and_transcribe(file: UploadFile, user_id: str) -> dict:
+    from app.upload.router import VOICE_MAX_SIZE
+    from app.upload.service import save_file
+
+    url = await save_file(file, user_id, "voice", max_size=VOICE_MAX_SIZE)
+    return {
+        "url": url,
+        "transcription": _fallback_voice_transcription(file.filename or "", url),
     }
 
 

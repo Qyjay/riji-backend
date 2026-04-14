@@ -25,6 +25,17 @@ except ImportError:  # pragma: no cover
 # 允许的图片 MIME 类型
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 ALLOWED_AUDIO_TYPES = {"audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/m4a", "audio/ogg"}
+ALLOWED_CHAT_FILE_TYPES = {
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "text/plain",
+    "text/csv",
+}
 
 IMAGE_EXT_MAP = {
     "image/jpeg": "jpg",
@@ -40,6 +51,18 @@ AUDIO_EXT_MAP = {
     "audio/x-wav": "wav",
     "audio/m4a": "m4a",
     "audio/ogg": "ogg",
+}
+
+CHAT_FILE_EXT_MAP = {
+    "application/pdf": "pdf",
+    "application/msword": "doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.ms-powerpoint": "ppt",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+    "application/vnd.ms-excel": "xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "text/plain": "txt",
+    "text/csv": "csv",
 }
 
 _UPLOADED_IMAGE_META_CACHE: Dict[str, Dict] = {}
@@ -86,6 +109,8 @@ def get_uploaded_image_meta(url: str) -> Optional[dict]:
 def _resolve_upload_rule(category: str):
     if category == "voice":
         return ALLOWED_AUDIO_TYPES, AUDIO_EXT_MAP, "mp3/wav/m4a/ogg"
+    if category == "chat-file":
+        return ALLOWED_CHAT_FILE_TYPES, CHAT_FILE_EXT_MAP, "pdf/doc/docx/ppt/pptx/xls/xlsx/txt/csv"
     return ALLOWED_IMAGE_TYPES, IMAGE_EXT_MAP, "jpeg/png/gif/webp"
 
 

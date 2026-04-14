@@ -117,6 +117,7 @@ async def upload_diary_images(
 
 # v2 新增：语音上传
 VOICE_MAX_SIZE = 20 * 1024 * 1024  # 20MB
+CHAT_FILE_MAX_SIZE = 20 * 1024 * 1024  # 20MB
 
 
 @router.post("/voice", summary="上传语音素材")
@@ -131,4 +132,21 @@ async def upload_voice(
     """
     url = await save_file(file, current_user.id, "voice", max_size=VOICE_MAX_SIZE)
     return success(data={"url": url}, message="语音上传成功")
+
+
+@router.post("/chat-file", summary="上传聊天文件附件")
+async def upload_chat_file(
+    file: UploadFile = File(..., description="聊天文件（pdf/doc/ppt/xls/txt/csv，最大 20MB）"),
+    current_user: User = Depends(get_current_user),
+):
+    url = await save_file(file, current_user.id, "chat-file", max_size=CHAT_FILE_MAX_SIZE)
+    return success(
+        data={
+            "url": url,
+            "name": file.filename or "未命名文件",
+            "size": file.size or 0,
+            "mimeType": file.content_type or "",
+        },
+        message="文件上传成功",
+    )
 
