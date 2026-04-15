@@ -17,6 +17,7 @@ API 文档：https://platform.minimaxi.com/docs/guides/models-intro
 import asyncio
 import json
 import random
+import re
 import time
 from typing import AsyncGenerator, Optional
 
@@ -837,6 +838,187 @@ class MiniMaxClient:
                 "mood_emoji": "😐",
                 "tags": ["对话"]
             }
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        return re.sub(r"\s+", "", str(text or "").strip().lower())
+
+    @staticmethod
+    def _tokenize_for_similarity(text: str) -> set[str]:
+        raw = str(text or "")
+        normalized = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", " ", raw.lower()).strip()
+        words = [w for w in normalized.split() if w]
+        if words:
+            return set(words)
+
+        # 中文短句兜底：按字比较相似度，过滤空白。
+        return {ch for ch in raw if ch.strip()}
+
+    @staticmethod
+    def _jaccard(a: set[str], b: set[str]) -> float:
+        if not a or not b:
+            return 0.0
+        union = a | b
+        if not union:
+            return 0.0
+        return len(a & b) / len(union)
+
+    async def detect_duplicate_chat_material(
+        self,
+        candidate_summary: str,
+        existing_materials: list[dict],
+    ) -> dict:
+        """
+        判断对话摘要是否与当日已有素材重复。
+
+        返回格式：
+        {
+          "is_duplicate": bool,
+          "duplicate_material_id": "string|None",
+          "reason": "string",
+          "confidence": 0.0~1.0,
+        }
+        """
+        candidates = [
+            {
+                "id": str(item.get("id") or ""),
+                "type": str(item.get("type") or ""),
+                "content": str(item.get("content") or "").strip(),
+            }
+            for item in (existing_materials or [])
+            if str(item.get("content") or "").strip()
+        ]
+
+        if not candidate_summary.strip() or not candidates:
+            return {
+                "is_duplicate": False,
+                "duplicate_material_id": None,
+                "reason": "no-candidate-or-existing-materials",
+                "confidence": 0.0,
+            }
+
+        if self.mock:
+            target = self._normalize_text(candidate_summary)
+            target_tokens = self._tokenize_for_similarity(candidate_summary)
+
+            best_item = None
+            best_score = 0.0
+
+            for item in candidates:
+                content = item["content"]
+                normalized = self._normalize_text(content)
+                if not normalized:
+                    continue
+
+                # 强重复：文本完全一致或包含关系（长度至少 12 字符避免误判）。
+                if target == normalized:
+                    return {
+                        "is_duplicate": True,
+                        "duplicate_material_id": item["id"] or None,
+                        "reason": "exact-same-content",
+                        "confidence": 1.0,
+                    }
+
+                if len(target) >= 12 and (target in normalized or normalized in target):
+                    return {
+                        "is_duplicate": True,
+                        "duplicate_material_id": item["id"] or None,
+                        "reason": "high-overlap-by-substring",
+                        "confidence": 0.92,
+                    }
+
+                score = self._jaccard(target_tokens, self._tokenize_for_similarity(content))
+                if score > best_score:
+                    best_score = score
+                    best_item = item
+
+            if best_item and best_score >= 0.72:
+                return {
+                    "is_duplicate": True,
+                    "duplicate_material_id": best_item["id"] or None,
+                    "reason": "high-semantic-overlap-in-mock-heuristic",
+                    "confidence": round(best_score, 3),
+                }
+
+            return {
+                "is_duplicate": False,
+                "duplicate_material_id": None,
+                "reason": "mock-heuristic-not-duplicate",
+                "confidence": round(best_score, 3),
+            }
+
+        materials_for_prompt = [
+            {
+                "id": item["id"],
+                "type": item["type"],
+                "content": item["content"],
+            }
+            for item in candidates[:30]
+        ]
+
+        id_set = {item["id"] for item in materials_for_prompt if item["id"]}
+
+        system_prompt = (
+            "你是素材去重助手。需要判断‘候选对话素材摘要’是否与‘已有素材列表’语义重复。"
+            "重复定义：描述同一事件/同一体验，核心信息高度重合，即使措辞不同也算重复。"
+            "必须只返回严格 JSON，不要返回任何额外文字："
+            "{\"is_duplicate\": true|false, \"duplicate_material_id\": \"字符串或空字符串\","
+            " \"reason\": \"简短原因\", \"confidence\": 0到1之间数字}"
+        )
+
+        user_prompt = (
+            "候选对话素材摘要：\n"
+            f"{candidate_summary.strip()}\n\n"
+            "已有素材列表（JSON）：\n"
+            f"{json.dumps(materials_for_prompt, ensure_ascii=False)}"
+        )
+
+        raw = await self.chat_completion(
+            [{"role": "user", "content": user_prompt}],
+            system_prompt=system_prompt,
+            temperature=0.1,
+            max_tokens=400,
+        )
+
+        try:
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                match = re.search(r"\{[\s\S]*\}", raw)
+                if not match:
+                    raise
+                payload = json.loads(match.group(0))
+        except Exception:
+            return {
+                "is_duplicate": False,
+                "duplicate_material_id": None,
+                "reason": "json-parse-failed",
+                "confidence": 0.0,
+            }
+
+        is_duplicate = bool(payload.get("is_duplicate", False))
+        duplicate_id = str(payload.get("duplicate_material_id") or "").strip() or None
+        reason = str(payload.get("reason") or "").strip() or "model-judgement"
+
+        try:
+            confidence = float(payload.get("confidence", 0.0))
+        except Exception:
+            confidence = 0.0
+        confidence = max(0.0, min(confidence, 1.0))
+
+        if duplicate_id and duplicate_id not in id_set:
+            duplicate_id = None
+
+        if is_duplicate and not duplicate_id and id_set:
+            # 容错：模型判断重复但未返回 id 时，优先返回第一条已有素材 id。
+            duplicate_id = next(iter(id_set))
+
+        return {
+            "is_duplicate": is_duplicate,
+            "duplicate_material_id": duplicate_id,
+            "reason": reason,
+            "confidence": confidence,
+        }
 
 
 # ==================== 全局单例 ====================

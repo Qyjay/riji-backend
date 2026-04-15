@@ -4,8 +4,9 @@ import os
 import json
 import re
 import logging
+import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 from uuid import uuid4
 from app.config import settings
@@ -14,6 +15,47 @@ from app.response import ApiException, PARAM_ERROR
 
 
 logger = logging.getLogger("uvicorn.error")
+
+
+_IMAGE_UNDERSTAND_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _cleanup_image_understand_cache(now_ms: int) -> None:
+    ttl_ms = max(int(settings.ARK_VISION_CACHE_TTL_SEC), 60) * 1000
+    expired_urls = [
+        url
+        for url, meta in _IMAGE_UNDERSTAND_CACHE.items()
+        if now_ms - int(meta.get("cached_at", 0)) > ttl_ms
+    ]
+    for url in expired_urls:
+        _IMAGE_UNDERSTAND_CACHE.pop(url, None)
+
+
+def _get_cached_image_hint(url: str) -> tuple[bool, str]:
+    now_ms = _now_ms()
+    _cleanup_image_understand_cache(now_ms)
+    meta = _IMAGE_UNDERSTAND_CACHE.get(url)
+    if not meta:
+        return False, ""
+    return True, str(meta.get("hint") or "").strip()
+
+
+def _set_cached_image_hint(url: str, hint: str) -> None:
+    now_ms = _now_ms()
+    _cleanup_image_understand_cache(now_ms)
+    _IMAGE_UNDERSTAND_CACHE[url] = {
+        "hint": str(hint or "").strip(),
+        "cached_at": now_ms,
+    }
+
+
+def clear_image_understand_cache() -> None:
+    """清空图片理解缓存。"""
+    _IMAGE_UNDERSTAND_CACHE.clear()
 
 
 async def text_to_speech_service(user_id: str, text: str, voice: str = "") -> str:
@@ -278,3 +320,57 @@ async def understand_image_text(
     except Exception as exc:
         logger.exception("[ark/vision] request failed: %s", str(exc))
         return ""
+
+
+async def understand_images_batch(
+    image_urls: List[str],
+    prompt: str = "",
+    timeout_sec: Optional[int] = None,
+    max_images: Optional[int] = None,
+) -> List[dict]:
+    """批量图片理解，按输入顺序返回每张图结果。"""
+    normalized_urls: List[str] = []
+    for image_url in image_urls or []:
+        cleaned = str(image_url or "").strip()
+        if cleaned:
+            normalized_urls.append(cleaned)
+
+    if not normalized_urls:
+        return []
+
+    resolved_prompt = (prompt or "").strip() or settings.ARK_VISION_PROMPT
+    resolved_timeout = int(timeout_sec or settings.ARK_VISION_TIMEOUT_SEC)
+
+    if max_images is None:
+        max_images = len(normalized_urls)
+    max_images = max(int(max_images), 0)
+
+    results: List[dict] = []
+    model_call_count = 0
+
+    for image_url in normalized_urls:
+        hit, cached_hint = _get_cached_image_hint(image_url)
+        if hit:
+            description = cached_hint
+        elif model_call_count < max_images:
+            try:
+                description = await understand_image_text(
+                    image_url=image_url,
+                    prompt=resolved_prompt,
+                    timeout_sec=resolved_timeout,
+                )
+            except Exception:
+                description = ""
+            _set_cached_image_hint(image_url, description)
+            model_call_count += 1
+        else:
+            description = ""
+
+        results.append(
+            {
+                "image_url": image_url,
+                "description": str(description or "").strip(),
+            }
+        )
+
+    return results

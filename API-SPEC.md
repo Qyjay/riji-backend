@@ -469,6 +469,7 @@ interface Diary {
     score: number                  // 主情绪分数 (0-100)
   }
   images: string[]                 // 图片 URL 数组（从关联素材中提取）
+  imageUnderstandings: string[]    // 图片视觉理解结果（按图片顺序逐条返回）
   tags: string[]                   // 标签数组
   location: string                 // 地点文字
   hasComic: boolean                // 是否已生成漫画
@@ -507,7 +508,7 @@ POST /diaries/generate
 ```typescript
 {
   date: string          // 日期 "YYYY-MM-DD"，必填
-  weather?: string      // 天气信息，可选
+  weather?: string      // 天气信息，可选；若包含温度（如"多云 18℃"）后端会规范为"多云"
 }
 ```
 
@@ -747,33 +748,42 @@ GET /diaries/today-summary?date={date}
 ### 3.14 搜索日记
 
 ```
-POST /diaries/search
+GET /diaries/search?q=&emotion=&tag=&weather=&from=&to=&page=&page_size=
 ```
 
 **需要认证：** ✅
 
-**请求体：**
+**Query 参数：**
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `q` | `string` | 否 | 关键词，匹配 `title/content/location` |
+| `emotion` | `string` | 否 | 情绪筛选，逗号分隔多值（如 `开心,幸福`） |
+| `tag` | `string` | 否 | 标签筛选，逗号分隔多值 |
+| `weather` | `string` | 否 | 天气筛选，逗号分隔多值 |
+| `from` | `string` | 否 | 起始日期 `YYYY-MM-DD` |
+| `to` | `string` | 否 | 结束日期 `YYYY-MM-DD` |
+| `page` | `number` | 否 | 页码，默认 `1` |
+| `page_size` | `number` | 否 | 每页条数，默认 `20` |
+
+**响应 `data`：**
 
 ```typescript
 {
-  keyword?: string                    // 关键词（匹配标题/正文）
-  dateRange?: [string, string]        // 日期范围 ["YYYY-MM-DD", "YYYY-MM-DD"]
-  emotions?: string[]                 // 情绪标签筛选，如 ["开心", "焦虑"]
-  tags?: string[]                     // 标签筛选
-  weathers?: string[]                 // 天气筛选
+  items: Diary[]
+  total: number
+  page: number
+  page_size: number
 }
 ```
 
-> 所有字段均可选。多条件之间为 AND 关系。
-
-**响应 `data`：** `Diary[]` — 符合条件的日记数组
-
 **实现说明：**
-- `keyword` 对 `title` 和 `content` 做模糊搜索
-- `dateRange` 为闭区间 `[start, end]`
-- `emotions` 匹配 `emotion.label` 字段
-- `tags` 匹配 `tags` 数组（包含任一即匹配）
-- `weathers` 匹配 `weather` 字段
+- `q` 对 `title/content/location` 做模糊搜索
+- `from/to` 为闭区间日期过滤
+- `emotion` 匹配 `emotionSummary.dominant`，支持逗号分隔多值（同维度 OR）
+- `tag` 匹配 `tags` 数组（命中任一标签即可）
+- `weather` 查询值会先做“去温度”规范化，再匹配 `weather` 字段；兼容历史值如 `多云 18℃`（搜索 `多云` 可命中）
+- 多条件组合为 AND 关系
 - 结果按 `createdAt` 降序排列
 
 ---
@@ -1980,7 +1990,7 @@ POST /avatar/matches/{matchId}/action
 | 23 | GET | `/derivatives?diary_id=` | Diary | 衍生内容列表 |
 | 24 | POST | `/derivatives/{id}/share` | Diary | 设置分享范围 |
 | 25 | GET | `/diaries/today-summary?date=` | Diary | 今日概览 |
-| 26 | POST | `/diaries/search` | Diary | 搜索日记 |
+| 26 | GET | `/diaries/search` | Diary | 搜索日记 |
 | 27 | POST | `/chat` | Chat | AI 对话（非流式） |
 | 28 | POST | `/chat/stream` | Chat | AI 对话（SSE 流式） |
 | 29 | GET | `/chat/history?limit=` | Chat | 聊天历史 |

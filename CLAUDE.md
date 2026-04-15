@@ -49,6 +49,10 @@ app/
 - PlazaPost / PlazaComment / PostLike（广场帖子、评论、点赞）
 - AvatarMemory / AvatarStatus / AvatarMatch / AvatarProfile（AI 分身记忆、状态、推荐匹配、侧写）
 
+## 接口规模
+- 当前 `/api` 路由总数：65（见 `docs/API-DOCS.md` 的接口汇总）
+- Task-F 相关新增接口：`POST /api/chat/close-session`、`GET /api/chat/session/{session_id}/messages`
+
 ## 规范
 - 所有时间戳用毫秒 BigInteger
 - UUID 用字符串

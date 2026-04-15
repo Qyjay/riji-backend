@@ -407,6 +407,7 @@ git push origin feat/user
 | `sqlalchemy.exc.OperationalError: no such table` | 数据库没初始化 | `python scripts/seed.py` |
 | `401 Unauthorized` | 没传 token 或 token 过期 | 重新登录拿新 token |
 | `422 Unprocessable Entity` | 请求参数格式错误 | 检查 JSON body 字段名和类型 |
+| 聊天结束后没有生成 chat 素材 | 可能是轮数不足、关闭了 `chatMaterialEnabled`、或被判重为重复 | 检查 `/api/user/settings` 的 `chatMinRounds/chatMaterialEnabled`，并确认是否命中同日素材去重 |
 | `500 Internal Server Error` | 代码有 bug | 看终端的报错信息（traceback），定位到具体行 |
 | `ImportError: cannot import name 'xxx'` | 引用路径写错 | 对照已有模块检查 import 路径 |
 | `Address already in use` | 端口 8000 被占用 | 换端口 `--port 8001` 或关掉占用的进程 |

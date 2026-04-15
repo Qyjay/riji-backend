@@ -7,7 +7,7 @@ from pathlib import Path
 from tests.conftest import create_test_user, get_auth_header
 
 
-def test_chat_returns_message_entities(client):
+def test_chat_returns_text_contract(client):
     user_data = create_test_user(client)
     headers = get_auth_header(user_data["token"])
 
@@ -15,19 +15,25 @@ def test_chat_returns_message_entities(client):
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["code"] == 0
-
-    data = payload["data"]
-    assert "sessionId" in data
-    assert data["userMessage"]["role"] == "user"
-    assert data["assistantMessage"]["role"] == "assistant"
-    assert data["userMessage"]["id"]
-    assert data["assistantMessage"]["id"]
-    assert data["userMessage"]["attachments"] == []
+    assert payload["message"] == "ok"
+    assert isinstance(payload["data"], str)
+    assert payload["data"].strip()
+    assert "meta" not in payload
 
 
-def test_chat_stream_supports_attachments(client):
+def test_chat_stream_supports_attachments(client, monkeypatch):
     user_data = create_test_user(client, username="chat_stream_user")
     headers = get_auth_header(user_data["token"])
+
+    class FakeStreamClient:
+        async def stream_chat(self, *_args, **_kwargs):
+            for chunk in ["这", "是", "流式", "回复"]:
+                yield chunk
+
+    def fake_get_minimax_client():
+        return FakeStreamClient()
+
+    monkeypatch.setattr("app.ai.minimax_client.get_minimax_client", fake_get_minimax_client)
 
     chunks = []
     with client.stream(
@@ -100,14 +106,23 @@ def test_session_messages_returns_complete_messages(client):
 
     send_resp = client.post("/api/chat", json={"message": "今天天气不错"}, headers=headers)
     assert send_resp.status_code == 200
-    session_id = send_resp.json()["data"]["sessionId"]
+
+    history_resp = client.get("/api/chat/history?limit=20", headers=headers)
+    assert history_resp.status_code == 200
+    history_items = history_resp.json()["data"]["items"]
+    session_id = next(
+        item["sessionId"]
+        for item in history_items
+        if item["role"] == "user" and item["content"] == "今天天气不错"
+    )
 
     resp = client.get(f"/api/chat/session/{session_id}/messages", headers=headers)
     assert resp.status_code == 200
     payload = resp.json()["data"]
     assert payload["session"]["id"] == session_id
     assert len(payload["messages"]) >= 2
-    assert payload["messages"][0]["id"]
+    first = payload["messages"][0]
+    assert set(first.keys()) == {"role", "content", "timestamp"}
 
 
 def test_fortune(client):

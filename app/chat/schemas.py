@@ -77,21 +77,20 @@ class ChatMessageOut(CamelModel):
     attachments: List[ChatAttachmentOut] = Field(default_factory=list)
 
 
+class SessionMessageOut(CamelModel):
+    """对话段消息（契约简版）"""
+    role: str
+    content: str
+    timestamp: int
+
+
 class SessionMessagesOut(CamelModel):
     """对话段消息列表"""
     session: ChatSessionOut
-    messages: List[ChatMessageOut]
+    messages: List[SessionMessageOut]
 
 
 class ChatHistoryOut(CamelModel):
     """聊天历史响应"""
     items: List[ChatMessageOut]
     total: int
-
-
-class ChatSendOut(CamelModel):
-    session_id: str
-    user_message: ChatMessageOut
-    assistant_message: ChatMessageOut
-    material_generated: bool = False
-    material_id: Optional[str] = None

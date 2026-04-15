@@ -20,9 +20,9 @@ from sqlalchemy.orm import Session
 from app.chat.schemas import (
     ChatMessageOut,
     ChatRequest,
-    ChatSendOut,
     ChatSessionOut,
     CloseSessionOut,
+    SessionMessageOut,
     SessionMessagesOut,
 )
 from app.chat.service import (
@@ -37,7 +37,7 @@ from app.chat.service import (
 from app.dependencies import get_current_user, get_db
 from app.models.chat import ChatSession
 from app.models.user import User, UserSettings
-from app.response import ApiException, NOT_FOUND, success
+from app.response import ApiException, NOT_FOUND, PARAM_ERROR, success
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -76,12 +76,15 @@ async def _close_old_session_if_needed(
     return material_generated, material_id
 
 
-@router.post("", summary="AI 对话（返回完整消息）")
+@router.post("", summary="AI 对话（返回文本）")
 async def ai_chat(
     body: ChatRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    if not body.message:
+        raise ApiException(code=PARAM_ERROR, message="message 不能为空", status_code=400)
+
     try:
         from app.ai.minimax_client import get_minimax_client
 
@@ -124,14 +127,13 @@ async def ai_chat(
         db.commit()
         db.refresh(assistant_message)
 
-        out = ChatSendOut(
-            session_id=current_session.id,
-            user_message=ChatMessageOut(**serialize_message(user_message)),
-            assistant_message=ChatMessageOut(**serialize_message(assistant_message)),
-            material_generated=material_generated,
-            material_id=material_id,
-        )
-        return success(out.model_dump(by_alias=True))
+        result = success(reply)
+        if material_generated:
+            result["meta"] = {
+                "materialGenerated": True,
+                "materialId": material_id,
+            }
+        return result
     except Exception as exc:
         logger.error("[chat] ai_chat failed: %s\n%s", str(exc), traceback.format_exc())
         raise
@@ -290,7 +292,14 @@ def get_session_messages(
     )
     out = SessionMessagesOut(
         session=session_out,
-        messages=[ChatMessageOut(**serialize_message(message)) for message in messages],
+        messages=[
+            SessionMessageOut(
+                role=message.role,
+                content=message.content,
+                timestamp=message.timestamp,
+            )
+            for message in messages
+        ],
     )
     return success(out.model_dump(by_alias=True))
 
