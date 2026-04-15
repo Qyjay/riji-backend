@@ -26,6 +26,7 @@ from app.chat.schemas import (
     CloseSessionOut,
     CreateSessionOut,
     SessionListOut,
+    SessionMessageOut,
     SessionMessagesOut,
 )
 from app.chat.service import (
@@ -33,7 +34,6 @@ from app.chat.service import (
     create_chat_message,
     create_new_session,
     get_history,
-    get_or_create_session,
     get_session_for_message,
     list_session_messages,
     list_session_messages_for_ai,
@@ -64,7 +64,20 @@ def _uuid() -> str:
 def _get_settings(db: Session, user_id: str) -> UserSettings:
     settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
     if not settings:
-        settings = UserSettings(user_id=user_id)
+        # 若用户还没有 settings 行，使用业务默认值构造临时对象，
+        # 避免 SQLAlchemy 列默认值在未 flush 时为 None 造成逻辑误判。
+        settings = UserSettings(
+            user_id=user_id,
+            theme="light",
+            notifications=True,
+            auto_bgm=False,
+            diary_privacy="private",
+            language="zh-CN",
+            chat_material_enabled=True,
+            chat_silence_threshold=30,
+            chat_material_toast=True,
+            chat_min_rounds=3,
+        )
     return settings
 
 
@@ -283,6 +296,10 @@ async def new_session(
         if material:
             material_generated = True
             material_id = material.id
+    else:
+        # old_sess 不存在时 close_and_materialize 不会触发提交，
+        # 需要显式 commit，确保返回的 sessionId 在下一请求可查询。
+        db.commit()
     db.refresh(new_sess)
     out = CreateSessionOut(
         session=ChatSessionOut(**serialize_session(new_sess)),
