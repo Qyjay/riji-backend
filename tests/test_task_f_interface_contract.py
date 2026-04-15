@@ -244,6 +244,80 @@ def test_close_session_contract_shape(client):
     assert set(data.keys()) == {"sessionClosed", "materialGenerated", "materialId"}
 
 
+def test_close_session_generates_material_without_settings_row(client, db, monkeypatch):
+    user_data = create_test_user(client, username="taskf_noset_u")
+    token = user_data["token"]
+    user_id = user_data["user"]["id"]
+    headers = get_auth_header(token)
+
+    # 模拟“从未保存过设置”的用户。
+    db.query(UserSettings).filter(UserSettings.user_id == user_id).delete()
+    db.commit()
+
+    now = _now_ms()
+    sess = ChatSession(
+        id=str(uuid4()),
+        user_id=user_id,
+        status="open",
+        start_time=now - 10 * 60 * 1000,
+        end_time=now - 5 * 60 * 1000,
+        message_count=0,
+        date=_today(),
+        created_at=now - 10 * 60 * 1000,
+    )
+    db.add(sess)
+    db.flush()
+
+    ts = sess.start_time
+    for role, content in [
+        ("user", "第一句"),
+        ("assistant", "回复一"),
+        ("user", "第二句"),
+        ("assistant", "回复二"),
+        ("user", "第三句"),
+        ("assistant", "回复三"),
+    ]:
+        db.add(
+            ChatMessage(
+                id=str(uuid4()),
+                user_id=user_id,
+                role=role,
+                content=content,
+                timestamp=ts,
+                session_id=sess.id,
+            )
+        )
+        ts += 1000
+    db.commit()
+
+    class FakeClient:
+        async def summarize_chat_session(self, *_args, **_kwargs):
+            return {
+                "title": "测试会话",
+                "summary": "三轮对话摘要",
+                "mood": "平静",
+                "mood_emoji": "😐",
+                "tags": ["测试"],
+            }
+
+        async def detect_duplicate_chat_material(self, *_args, **_kwargs):
+            return {
+                "is_duplicate": False,
+                "duplicate_material_id": None,
+                "reason": "test-not-duplicate",
+                "confidence": 0.0,
+            }
+
+    monkeypatch.setattr("app.ai.minimax_client.get_minimax_client", lambda: FakeClient())
+
+    resp = client.post("/api/chat/close-session", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["sessionClosed"] is True
+    assert data["materialGenerated"] is True
+    assert isinstance(data["materialId"], str) and data["materialId"]
+
+
 def test_session_messages_contract_shape(client):
     user_data = create_test_user(client, username="taskf_sess_user")
     headers = get_auth_header(user_data["token"])

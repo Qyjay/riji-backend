@@ -126,6 +126,30 @@ def test_session_messages_returns_complete_messages(client):
     assert set(first.keys()) == {"role", "content", "timestamp"}
 
 
+def test_new_session_id_can_be_reused_in_chat(client):
+    user_data = create_test_user(client, username="chat_new_sess_u")
+    headers = get_auth_header(user_data["token"])
+
+    session_resp = client.post("/api/chat/sessions", headers=headers)
+    assert session_resp.status_code == 200
+    session_payload = session_resp.json()["data"]
+    session_id = session_payload["session"]["id"]
+    assert session_id
+
+    send_resp = client.post(
+        "/api/chat",
+        json={"message": "使用新会话 ID 发消息", "sessionId": session_id},
+        headers=headers,
+    )
+    assert send_resp.status_code == 200
+
+    detail_resp = client.get(f"/api/chat/session/{session_id}/messages", headers=headers)
+    assert detail_resp.status_code == 200
+    payload = detail_resp.json()["data"]
+    assert payload["session"]["id"] == session_id
+    assert any(item["content"] == "使用新会话 ID 发消息" for item in payload["messages"])
+
+
 def test_fortune(client):
     user_data = create_test_user(client)
     headers = get_auth_header(user_data["token"])
