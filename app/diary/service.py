@@ -4,6 +4,7 @@
 """
 import json
 import os
+import re
 import time
 from datetime import datetime
 from typing import List
@@ -41,38 +42,6 @@ DEFAULT_EMOTION_EMOJI = {
     "难过": "😢",
     "生气": "😠",
 }
-
-
-_IMAGE_UNDERSTAND_CACHE = {}
-
-
-def _cleanup_image_understand_cache(now_ms: int) -> None:
-    ttl_ms = max(int(settings.ARK_VISION_CACHE_TTL_SEC), 60) * 1000
-    expired_urls = [
-        url
-        for url, meta in _IMAGE_UNDERSTAND_CACHE.items()
-        if now_ms - int(meta.get("cached_at", 0)) > ttl_ms
-    ]
-    for url in expired_urls:
-        _IMAGE_UNDERSTAND_CACHE.pop(url, None)
-
-
-def _get_cached_image_hint(url: str) -> tuple[bool, str]:
-    now_ms = _now_ms()
-    _cleanup_image_understand_cache(now_ms)
-    meta = _IMAGE_UNDERSTAND_CACHE.get(url)
-    if not meta:
-        return False, ""
-    return True, str(meta.get("hint") or "").strip()
-
-
-def _set_cached_image_hint(url: str, hint: str) -> None:
-    now_ms = _now_ms()
-    _cleanup_image_understand_cache(now_ms)
-    _IMAGE_UNDERSTAND_CACHE[url] = {
-        "hint": str(hint or "").strip(),
-        "cached_at": now_ms,
-    }
 
 
 def _now_ms() -> int:
@@ -203,18 +172,32 @@ def _build_materials_prompt_text(
         elif m.type == "image":
             image_desc = (m.content or "").strip()
             if image_hints:
-                hint = str(image_hints.get(m.id) or "").strip()
-                if hint:
-                    if image_desc and hint not in image_desc:
-                        image_desc = f"{image_desc}；AI识图补充：{hint}"
+                material_hints = image_hints.get(m.id) or []
+                if isinstance(material_hints, str):
+                    material_hints = [material_hints]
+
+                cleaned_hints = [
+                    str(hint or "").strip()
+                    for hint in material_hints
+                    if str(hint or "").strip()
+                ]
+                if cleaned_hints:
+                    hint_text = "；".join(cleaned_hints)
+                    if image_desc and hint_text not in image_desc:
+                        image_desc = f"{image_desc}；AI识图补充：{hint_text}"
                     elif not image_desc:
-                        image_desc = hint
+                        image_desc = hint_text
             if image_desc:
                 parts.append(f"[{time_label}] [图片描述] {image_desc}")
         elif m.type == "voice" and m.content:
             parts.append(f"[{time_label}] [语音转文字] {m.content}")
         elif m.type == "chat" and m.content:
-            parts.append(f"[{time_label}] [对话记录] {m.content}")
+            time_range = ""
+            if m.start_time and m.end_time:
+                s = datetime.fromtimestamp(m.start_time / 1000).strftime("%H:%M")
+                e = datetime.fromtimestamp(m.end_time / 1000).strftime("%H:%M")
+                time_range = f"({s}~{e}) "
+            parts.append(f"[对话记录] {time_range}{m.content}")
 
     return "\n".join(parts) if parts else f"今天是 {date}，无具体素材记录。"
 
@@ -258,61 +241,40 @@ def _collect_today_image_urls(materials: List[RawMaterial]) -> List[str]:
 
 
 async def _collect_image_understand_hints(materials: List[RawMaterial]) -> dict:
-    """提取图片视觉理解结果（失败降级，按 URL 缓存）。"""
-    if not settings.ARK_VISION_ENABLED:
+    """提取图片视觉理解结果：按图片数量逐张返回。"""
+    image_entries: List[tuple[str, str]] = []
+    for material in materials:
+        if material.type != "image":
+            continue
+        for image_url in _extract_material_media_urls(material):
+            image_entries.append((material.id, image_url))
+
+    if not image_entries:
         return {}
 
-    max_images = max(int(settings.ARK_VISION_MAX_IMAGES), 0)
-    if max_images <= 0:
-        return {}
+    from app.ai import service as ai_service
 
-    prompt = settings.ARK_VISION_PROMPT
-    timeout_sec = int(settings.ARK_VISION_TIMEOUT_SEC)
+    results = await ai_service.understand_images_batch(
+        image_urls=[item[1] for item in image_entries],
+        prompt=settings.ARK_VISION_PROMPT,
+        timeout_sec=int(settings.ARK_VISION_TIMEOUT_SEC),
+        max_images=len(image_entries),
+    )
 
-    hints = {}
-    model_call_count = 0
-
-    for m in materials:
-        if m.type != "image":
+    hints: dict = {}
+    for idx, (material_id, _image_url) in enumerate(image_entries):
+        description = ""
+        if idx < len(results):
+            description = str(results[idx] or "").strip()
+        if not description:
             continue
-
-        urls = _extract_material_media_urls(m)
-        if not urls:
-            continue
-
-        image_url = urls[0]
-        hit, cached_hint = _get_cached_image_hint(image_url)
-        if hit:
-            if cached_hint:
-                hints[m.id] = cached_hint
-            continue
-
-        if model_call_count >= max_images:
-            continue
-
-        try:
-            from app.ai import service as ai_service
-
-            hint = await ai_service.understand_image_text(
-                image_url=image_url,
-                prompt=prompt,
-                timeout_sec=timeout_sec,
-            )
-        except Exception:
-            hint = ""
-
-        normalized_hint = str(hint or "").strip()
-        _set_cached_image_hint(image_url, normalized_hint)
-        if normalized_hint:
-            hints[m.id] = normalized_hint
-
-        model_call_count += 1
+        hints.setdefault(material_id, []).append(description)
 
     return hints
 
 
 def _build_image_understanding_list(materials: List[RawMaterial], image_hints: dict) -> List[str]:
-    """按素材顺序汇总图片理解内容（去重）。"""
+    """按素材顺序汇总图片理解内容（按图片逐条保留）。"""
     if not image_hints:
         return []
 
@@ -320,9 +282,13 @@ def _build_image_understanding_list(materials: List[RawMaterial], image_hints: d
     for m in materials:
         if m.type != "image":
             continue
-        hint = str(image_hints.get(m.id) or "").strip()
-        if hint and hint not in items:
-            items.append(hint)
+        material_hints = image_hints.get(m.id) or []
+        if isinstance(material_hints, str):
+            material_hints = [material_hints]
+        for hint in material_hints:
+            hint_text = str(hint or "").strip()
+            if hint_text:
+                items.append(hint_text)
     return items
 
 
@@ -425,6 +391,32 @@ def _parse_csv_values(raw: str) -> List[str]:
     return result
 
 
+def _normalize_weather_text(weather: str) -> str:
+    """规范化天气文本：去除温度，仅保留天气描述。"""
+    raw = str(weather or "").strip()
+    if not raw:
+        return ""
+
+    normalized = re.sub(
+        r"(?:气温|温度|体感|最高|最低)?\s*[-+]?\d+(?:\.\d+)?\s*(?:°\s*[cC]|℃|摄氏度|度)",
+        "",
+        raw,
+    )
+    normalized = re.sub(r"\s+", " ", normalized).strip(" ,，;；/|")
+    return normalized or raw
+
+
+def _parse_weather_values(raw: str) -> List[str]:
+    """解析并规范化 weather 参数，支持逗号分隔。"""
+    values = _parse_csv_values(raw)
+    result = []
+    for value in values:
+        normalized = _normalize_weather_text(value)
+        if normalized and normalized not in result:
+            result.append(normalized)
+    return result
+
+
 def _sqlite_json_available(db: Session) -> bool:
     """检查当前 SQLite 是否支持 JSON 函数。"""
     try:
@@ -498,6 +490,7 @@ def diary_to_dict(d: Diary) -> dict:
         # legacy 兼容
         "emotion": emotion,
         "images": _decode(d.images, []),
+        "image_understandings": _decode(d.image_understandings, []),
         "tags": _decode(d.tags, []),
         "location": d.location or "",
         "has_comic": d.has_comic or False,
@@ -527,7 +520,7 @@ def search_diaries(db: Session, user_id: str, params) -> dict:
     q = (params.q or "").strip()
     emotion_list = _parse_csv_values(params.emotion)
     tag_list = _parse_csv_values(params.tag)
-    weather_list = _parse_csv_values(params.weather)
+    weather_list = _parse_weather_values(params.weather)
     from_date = (params.from_date or "").strip()
     to_date = (params.to_date or "").strip()
 
@@ -549,7 +542,11 @@ def search_diaries(db: Session, user_id: str, params) -> dict:
         )
 
     if weather_list:
-        query = query.filter(Diary.weather.in_(weather_list))
+        weather_conditions = []
+        for weather_item in weather_list:
+            weather_conditions.append(Diary.weather == weather_item)
+            weather_conditions.append(Diary.weather.ilike(f"{weather_item}%"))
+        query = query.filter(or_(*weather_conditions))
 
     if from_date:
         query = query.filter(Diary.date >= from_date)
@@ -637,6 +634,8 @@ async def generate_diary(
     allow_fallback: bool = False,
 ) -> dict:
     """AI 生成当日日记"""
+    normalized_weather = _normalize_weather_text(weather)
+
     materials_query = db.query(RawMaterial).filter(RawMaterial.user_id == user_id)
     materials = (
         _apply_material_date_filter(materials_query, date)
@@ -671,7 +670,7 @@ async def generate_diary(
     client = get_minimax_client()
     result = await client.generate_diary(
         materials_text,
-        weather=weather,
+        weather=normalized_weather,
         user_style=user_style,
         daily_emotion_summary=emotion_summary_for_prompt,
     )
@@ -682,7 +681,7 @@ async def generate_diary(
     emotion_payload = _build_legacy_emotion_payload(emotion_summary, materials)
     diary_images = _collect_today_image_urls(materials)
     material_tags = _collect_today_material_tags(materials)
-    ai_tags = _extract_ai_tags(result, weather, emotion_summary)
+    ai_tags = _extract_ai_tags(result, normalized_weather, emotion_summary)
     diary_tags = _merge_diary_tags(material_tags, ai_tags)
 
     # 同一天已有日记时，更新而不是新建
@@ -695,11 +694,12 @@ async def generate_diary(
     if existing:
         existing.content = result.get("content", "")
         existing.title = result.get("title", "今日日记")
-        existing.weather = weather
+        existing.weather = normalized_weather
         existing.material_ids = _encode(material_ids)
         existing.emotion_summary = _encode(emotion_summary)
         existing.emotion = _encode(emotion_payload)
         existing.images = _encode(diary_images)
+        existing.image_understandings = _encode(image_understandings)
         existing.tags = _encode(diary_tags)
         existing.status = "draft"
         existing.updated_at = now
@@ -726,9 +726,10 @@ async def generate_diary(
         content=result.get("content", ""),
         title=result.get("title", "今日日记"),
         images=_encode(diary_images),
+        image_understandings=_encode(image_understandings),
         emotion=_encode(emotion_payload),
         tags=_encode(diary_tags),
-        weather=weather,
+        weather=normalized_weather,
         date=date,
         material_ids=_encode(material_ids),
         emotion_summary=_encode(emotion_summary),

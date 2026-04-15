@@ -5,9 +5,10 @@ import asyncio
 from pathlib import Path
 
 from tests.conftest import create_test_user, get_auth_header
+from app.ai.minimax_client import MiniMaxClient
 
 
-def test_chat_returns_message_entities(client):
+def test_chat_returns_text_contract(client):
     user_data = create_test_user(client)
     headers = get_auth_header(user_data["token"])
 
@@ -15,19 +16,25 @@ def test_chat_returns_message_entities(client):
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["code"] == 0
-
-    data = payload["data"]
-    assert "sessionId" in data
-    assert data["userMessage"]["role"] == "user"
-    assert data["assistantMessage"]["role"] == "assistant"
-    assert data["userMessage"]["id"]
-    assert data["assistantMessage"]["id"]
-    assert data["userMessage"]["attachments"] == []
+    assert payload["message"] == "ok"
+    assert isinstance(payload["data"], str)
+    assert payload["data"].strip()
+    assert "meta" not in payload
 
 
-def test_chat_stream_supports_attachments(client):
+def test_chat_stream_supports_attachments(client, monkeypatch):
     user_data = create_test_user(client, username="chat_stream_user")
     headers = get_auth_header(user_data["token"])
+
+    class FakeStreamClient:
+        async def stream_chat(self, *_args, **_kwargs):
+            for chunk in ["这", "是", "流式", "回复"]:
+                yield chunk
+
+    def fake_get_minimax_client():
+        return FakeStreamClient()
+
+    monkeypatch.setattr("app.ai.minimax_client.get_minimax_client", fake_get_minimax_client)
 
     chunks = []
     with client.stream(
@@ -100,14 +107,23 @@ def test_session_messages_returns_complete_messages(client):
 
     send_resp = client.post("/api/chat", json={"message": "今天天气不错"}, headers=headers)
     assert send_resp.status_code == 200
-    session_id = send_resp.json()["data"]["sessionId"]
+
+    history_resp = client.get("/api/chat/history?limit=20", headers=headers)
+    assert history_resp.status_code == 200
+    history_items = history_resp.json()["data"]["items"]
+    session_id = next(
+        item["sessionId"]
+        for item in history_items
+        if item["role"] == "user" and item["content"] == "今天天气不错"
+    )
 
     resp = client.get(f"/api/chat/session/{session_id}/messages", headers=headers)
     assert resp.status_code == 200
     payload = resp.json()["data"]
     assert payload["session"]["id"] == session_id
     assert len(payload["messages"]) >= 2
-    assert payload["messages"][0]["id"]
+    first = payload["messages"][0]
+    assert set(first.keys()) == {"role", "content", "timestamp"}
 
 
 def test_fortune(client):
@@ -170,3 +186,81 @@ def test_understand_image_text_with_local_upload_url(monkeypatch):
     expected_posix = image_path.resolve().as_posix()
     assert captured["image_input"].startswith("file://")
     assert captured["image_input"].endswith(expected_posix)
+
+
+def test_understand_images_batch_uses_multi_image_input(monkeypatch):
+    from app.ai import service as ai_service
+
+    monkeypatch.setattr(ai_service.settings, "ARK_VISION_ENABLED", True)
+    monkeypatch.setattr(ai_service.settings, "ARK_API_KEY", "test-key")
+    monkeypatch.setattr(ai_service.settings, "ARK_VISION_TIMEOUT_SEC", 5)
+    monkeypatch.setattr(ai_service.settings, "ARK_VISION_PROMPT", "请客观描述图片")
+
+    ai_service.clear_image_understand_cache()
+
+    captured = {"image_inputs": [], "prompt": ""}
+
+    async def fake_multi(image_inputs, prompt):
+        captured["image_inputs"] = list(image_inputs)
+        captured["prompt"] = prompt
+        return {"output_text": '["多图结果A", "多图结果B"]'}
+
+    async def fail_single(*_args, **_kwargs):
+        raise AssertionError("multi-image path should not fallback to single-image call")
+
+    monkeypatch.setattr(ai_service, "_call_ark_vision_multi_async", fake_multi)
+    monkeypatch.setattr(ai_service, "understand_image_text", fail_single)
+
+    results = asyncio.run(
+        ai_service.understand_images_batch(
+            image_urls=[
+                "https://example.com/multi-1.jpg",
+                "https://example.com/multi-2.jpg",
+            ],
+            prompt="请描述每张图",
+            timeout_sec=5,
+            max_images=5,
+        )
+    )
+
+    assert len(captured["image_inputs"]) == 2
+    assert captured["image_inputs"][0] == "https://example.com/multi-1.jpg"
+    assert captured["image_inputs"][1] == "https://example.com/multi-2.jpg"
+    assert "JSON 数组" in captured["prompt"]
+
+    assert results == ["多图结果A", "多图结果B"]
+
+
+def test_extract_emotion_mock_prefers_keyword_signal():
+    client = MiniMaxClient(
+        api_key="test-key",
+        api_base="https://example.com",
+        model="mock-model",
+        mock=True,
+    )
+
+    result = asyncio.run(client.extract_emotion("今天真的很想哭，感觉好难受"))
+    assert result["label"] == "难过"
+    assert result["emoji"] == "😢"
+    assert 0 <= float(result["score"]) <= 1
+
+
+def test_extract_emotion_non_mock_normalizes_json_and_label(monkeypatch):
+    client = MiniMaxClient(
+        api_key="test-key",
+        api_base="https://example.com",
+        model="test-model",
+        mock=False,
+    )
+
+    async def fake_chat_completion(*_args, **_kwargs):
+        return """```json
+{\"label\": \"悲伤\", \"score\": 85}
+```"""
+
+    monkeypatch.setattr(client, "chat_completion", fake_chat_completion)
+
+    result = asyncio.run(client.extract_emotion("想哭"))
+    assert result["label"] == "难过"
+    assert result["emoji"] == "😢"
+    assert result["score"] == 0.85

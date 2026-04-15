@@ -134,6 +134,24 @@ class TestDiaryGeneration:
         assert list_resp.status_code == 200
         assert list_resp.json()["data"]["total"] == 1
 
+    def test_generate_diary_normalizes_weather_without_temperature(self, client: TestClient):
+        """生成日记时应仅保存天气，不保存温度。"""
+        auth, headers = _create_user_with_material(client, "diary_gen_weather")
+
+        resp = client.post(
+            "/api/diaries/generate",
+            json={"date": "2026-03-25", "weather": "多云 18℃"},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+
+        data = resp.json()["data"]
+        assert data["weather"] == "多云"
+
+        search_resp = client.get("/api/diaries/search?weather=多云", headers=headers)
+        assert search_resp.status_code == 200
+        assert search_resp.json()["data"]["total"] == 1
+
     def test_generate_diary_material_ids_emotion_summary_db_roundtrip(self, client: TestClient, db):
         """material_ids/emotion_summary 应在 DB 以 JSON string 存储，API 返回反序列化结构。"""
         auth, headers = _create_user_with_material(client, "diary_gen_json")
@@ -286,7 +304,7 @@ class TestDiaryGeneration:
 
         from app.diary import service as diary_service
         from app.ai import service as ai_service
-        diary_service._IMAGE_UNDERSTAND_CACHE.clear()
+        ai_service.clear_image_understand_cache()
 
         calls = {"count": 0}
 
@@ -343,7 +361,7 @@ class TestDiaryGeneration:
 
         from app.diary import service as diary_service
         from app.ai import service as ai_service
-        diary_service._IMAGE_UNDERSTAND_CACHE.clear()
+        ai_service.clear_image_understand_cache()
 
         calls = {"count": 0}
 
@@ -392,7 +410,7 @@ class TestDiaryGeneration:
 
         from app.diary import service as diary_service
         from app.ai import service as ai_service
-        diary_service._IMAGE_UNDERSTAND_CACHE.clear()
+        ai_service.clear_image_understand_cache()
 
         async def fake_understand_image_text(image_url: str, prompt: str = "", timeout_sec: int = 20):
             raise RuntimeError("ark unavailable")
@@ -416,6 +434,76 @@ class TestDiaryGeneration:
         assert gen_resp.status_code == 200
         data = gen_resp.json()["data"]
         assert data["title"] == "降级标题"
+
+    def test_generate_diary_image_understand_returns_per_image_result(self, client: TestClient, monkeypatch):
+        """同一条 image 素材含多张图时，应返回按图片数量的理解结果。"""
+        auth = create_test_user(client, username="img_understand_n")
+        headers = get_auth_header(auth["token"])
+
+        image_urls = [
+            "https://example.com/multi-a.jpg",
+            "https://example.com/multi-b.jpg",
+        ]
+
+        resp = client.post("/api/materials", json={
+            "type": "image",
+            "content": "",
+            "media_url": image_urls,
+            "date": "2026-03-25",
+        }, headers=headers)
+        assert resp.status_code == 200
+
+        from app.diary import service as diary_service
+        from app.ai import service as ai_service
+        ai_service.clear_image_understand_cache()
+
+        calls = []
+
+        async def fake_understand_image_text(image_url: str, prompt: str = "", timeout_sec: int = 20):
+            calls.append(image_url)
+            if image_url.endswith("multi-a.jpg"):
+                return "识图结果A"
+            if image_url.endswith("multi-b.jpg"):
+                return "识图结果B"
+            return ""
+
+        monkeypatch.setattr(ai_service, "understand_image_text", fake_understand_image_text)
+
+        class FakeMiniMaxClient:
+            def __init__(self):
+                self.last_materials_text = ""
+
+            async def generate_diary(self, materials_text: str, **kwargs):
+                self.last_materials_text = materials_text
+                return {
+                    "title": "测试标题",
+                    "content": "测试正文",
+                    "emotion_summary": {"dominant": "平静", "distribution": {"平静": 1.0}},
+                    "ai_tags": ["测试标签"],
+                }
+
+        fake_client = FakeMiniMaxClient()
+        monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: fake_client)
+        monkeypatch.setattr(diary_service.settings, "ARK_VISION_ENABLED", True)
+        monkeypatch.setattr(diary_service.settings, "ARK_VISION_MAX_IMAGES", 10)
+
+        gen_resp = client.post("/api/diaries/generate", json={"date": "2026-03-25"}, headers=headers)
+        assert gen_resp.status_code == 200
+
+        data = gen_resp.json()["data"]
+        assert calls == image_urls
+        assert data["imageUnderstandings"] == ["识图结果A", "识图结果B"]
+        assert "识图结果A" in fake_client.last_materials_text
+        assert "识图结果B" in fake_client.last_materials_text
+
+        search_resp = client.get(
+            "/api/diaries/search?from=2026-03-25&to=2026-03-25",
+            headers=headers,
+        )
+        assert search_resp.status_code == 200
+        search_items = search_resp.json()["data"]["items"]
+        assert len(search_items) == 1
+        assert search_items[0]["imageUnderstandings"] == ["识图结果A", "识图结果B"]
 
 
 class TestDiaryList:
@@ -957,7 +1045,7 @@ class TestDiarySearch:
                 "title": "火锅夜谈",
                 "content": "晚上和室友去吃火锅，聊到很晚",
                 "location": "天津大学附近",
-                "weather": "多云",
+                "weather": "多云 18℃",
                 "date": "2026-03-20",
                 "dominant": "幸福",
                 "tags": ["美食", "社交"],
@@ -1056,11 +1144,14 @@ class TestDiarySearch:
         headers = self._prepare(client, db, "diary_search_weather")
 
         single = client.get("/api/diaries/search?weather=晴", headers=headers)
+        cloud = client.get("/api/diaries/search?weather=多云", headers=headers)
         multi = client.get("/api/diaries/search?weather=晴,多云", headers=headers)
 
         assert single.status_code == 200
+        assert cloud.status_code == 200
         assert multi.status_code == 200
         assert single.json()["data"]["total"] == 2
+        assert cloud.json()["data"]["total"] == 1
         assert multi.json()["data"]["total"] == 3
 
     def test_search_date_range_closed_interval(self, client: TestClient, db):

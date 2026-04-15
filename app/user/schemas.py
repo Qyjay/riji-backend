@@ -24,9 +24,9 @@ class UpdateSettingsRequest(BaseModel):
     diary_privacy: Optional[str] = None
     language: Optional[str] = None
     chat_material_enabled: Optional[bool] = None
-    chat_silence_threshold: Optional[int] = None
+    chat_silence_threshold: Optional[int] = Field(default=None, ge=15, le=120)
     chat_material_toast: Optional[bool] = None
-    chat_min_rounds: Optional[int] = None
+    chat_min_rounds: Optional[int] = Field(default=None, ge=1, le=20)
 
 
 class UserProfileOut(CamelModel):

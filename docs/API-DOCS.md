@@ -2,7 +2,7 @@
 
 > **本文档从实际代码提取，记录所有已注册路由的完整信息。**
 >
-> 最后更新：2026-04-14
+> 最后更新：2026-04-15
 >
 > Base URL: `http://localhost:8000/api`
 
@@ -127,7 +127,6 @@
 **实现状态：** ✅ 已完成
 
 ---
-
 ## 2. 用户模块（User）
 
 ### GET /api/user/profile — 获取用户资料 🔒
@@ -386,6 +385,12 @@
 
 **实现状态：** ✅ 已完成
 
+**情绪提取补充说明：**
+
+- 当 `emotion` 为空且 `content` 有值时，会自动触发情绪提取并写回。
+- 输出标签会归一到固定集合：`开心 / 难过 / 愤怒 / 平静 / 感动 / 焦虑 / 期待 / 无聊`。
+- 当模型返回异常或 JSON 不可解析时，后端会基于文本关键词做兜底判断（例如“想哭”优先识别为“难过”），不再一律回退为“平静”。
+
 ---
 
 ### GET /api/materials — 素材列表 🔒
@@ -446,6 +451,11 @@
 **响应 data：** `{"label": "开心", "score": 0.88, "emoji": "😊"}`
 
 **实现状态：** ✅ 已完成（调用 minimax_client.extract_emotion）
+
+**行为说明：**
+
+- 若模型返回 `悲伤` 等同义标签，会统一规范为 `难过`。
+- `score` 支持 0~1 与 0~100 两种输入，服务端会统一归一到 0~1。
 
 ---
 
@@ -537,7 +547,7 @@
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | date | string | ✅ | 日期 YYYY-MM-DD |
-| weather | string | ❌ | 天气 |
+| weather | string | ❌ | 天气（若传入“多云 18℃”会自动规范为“多云”） |
 | allow_fallback | bool | ❌ | 无素材时是否允许兜底生成（默认 false） |
 
 **响应 data：** DiaryOut 对象（含 AI 生成的 title、content、emotionSummary、imageUnderstandings）
@@ -549,14 +559,41 @@
 - 同日期重复调用会更新同一篇日记（upsert），不会重复新建。
 - 新建日记 `status` 初始值为 `draft`，`editCount=0`，`maxEdits=3`。
 - 每晚 22:00 后，系统后台会自动补生成：当天有素材且尚未生成日记的用户，会自动触发一次生成。
+- 当天 `type="chat"` 的素材会参与生成上下文，格式为 `[对话记录] (HH:MM~HH:MM) 摘要内容`。
 
 **图片理解字段说明：**
 
 - `POST /api/diaries/generate` 的请求体不直接接收图片字段。
 - 日记生成使用的图片来源于当天素材（`raw_materials.media_url` / `mediaUrl`），即先通过素材接口上传并保存 URL，再在生成流程中读取。
 - 当 `ARK_VISION_ENABLED=true` 时，系统会对当天 image 素材执行视觉理解。
-- 图片理解结果会注入到日记生成提示词中的 `[图片描述]` 上下文段落，并同时在响应字段 `imageUnderstandings` 中返回（数组类型，按素材顺序去重）。
+- 图片理解结果会注入到日记生成提示词中的 `[图片描述]` 上下文段落，并同时在响应字段 `imageUnderstandings` 中返回（数组类型，按图片顺序逐条返回，不去重）。
+- 该字段会持久化保存到日记记录；后续通过 `GET /api/diaries`、`GET /api/diaries/{diary_id}`、`GET /api/diaries/search` 查询时会返回同一组结果。
 - 图片理解失败会自动降级为“仅使用原素材文本继续生成日记”，不阻断主流程。
+
+**图片理解复用调用（给后端开发）：**
+
+- 单图调用：`app.ai.service.understand_image_text(image_url, prompt="", timeout_sec=None) -> str`
+- 多图调用：`app.ai.service.understand_images_batch(image_urls, prompt="", timeout_sec=None, max_images=None) -> List[str]`
+- 如需带原始 URL 的详细结构，可传：`include_image_url=True`，返回 `List[dict]`
+- 多图底层调用优先使用 Ark `responses.create` 的单次多图输入格式（`content` 中多个 `input_image` + 一个 `input_text`），与官方示例一致；若返回不可解析，会自动降级为逐图调用，保证可用性。
+
+```python
+from app.ai import service as ai_service
+
+# 1) 单图
+desc = await ai_service.understand_image_text(
+  image_url="https://example.com/a.jpg",
+  prompt="请客观描述图片内容",
+)
+
+# 2) 多图
+items = await ai_service.understand_images_batch(
+  image_urls=["https://example.com/a.jpg", "https://example.com/b.jpg"],
+  prompt="请分别描述每张图",
+)
+# items 形如:
+# ["...", "..."]
+```
 
 **Ark 视觉理解配置说明（启用方式 + 推荐值）：**
 
@@ -627,6 +664,7 @@ ARK_VISION_CACHE_TTL_SEC=21600
   "updatedAt": 1711440000000,
   "emotion": {"emoji": "😊", "label": "平静", "score": 70},
   "images": [],
+  "imageUnderstandings": [],
   "tags": [],
   "location": "",
   "hasComic": false,
@@ -753,6 +791,7 @@ ARK_VISION_CACHE_TTL_SEC=21600
       "emotionSummary": {"dominant": "开心", "distribution": {"开心": 0.6}},
       "tags": ["校园", "美食"],
       "location": "南开大学",
+      "imageUnderstandings": ["图书馆窗边晚霞，桌上有复习资料"],
       "createdAt": 1711440000000
     }
   ],
@@ -769,12 +808,12 @@ ARK_VISION_CACHE_TTL_SEC=21600
 - **q 关键词**：在 title/content/location 中模糊匹配（LIKE %q%）
 - **emotion**：解析 emotion_summary JSON 字段的 dominant 值进行匹配，支持逗号分隔的多个情绪（IN 查询）
 - **tag**：解析 tags JSON 数组，检查是否有交集（任一标签匹配即可）
-- **weather**：weather 字段 IN 匹配，支持逗号分隔的多个天气
+- **weather**：对查询值先做“去温度”规范化后匹配；支持逗号分隔多值（同维度 OR），并兼容历史数据如 `多云 18℃`（搜索 `多云` 可命中）
 - **from/to**：date 字段范围过滤（闭区间 BETWEEN）
 - **排序**：结果按 created_at DESC 排序
 - **空参数处理**：所有参数为空 = 不筛选（返回全部日记，仅分页）
 
-**实现状态：** 🔴 待实现
+**实现状态：** ✅ 已完成
 
 ---
 
@@ -934,7 +973,7 @@ ARK_VISION_CACHE_TTL_SEC=21600
 
 ### POST /api/chat — AI 对话（非流式） 🔒
 
-发送消息给 AI，返回完整的用户消息实体和 AI 消息实体。接口会自动维护 chat session，并在静默超时切段时尝试生成 chat 素材。
+发送消息给 AI，返回 AI 回复文本。接口会自动维护 chat session，并在静默超时切段时尝试生成 chat 素材。
 
 **请求 Body：**
 
@@ -957,9 +996,9 @@ ARK_VISION_CACHE_TTL_SEC=21600
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| message | string | 条件必填 | 文本内容；与 `attachments` 至少有一项非空 |
-| clientMessageId | string | ❌ | 前端本地消息 ID，用于流式确认与重试对齐 |
-| attachments | Attachment[] | 条件必填 | 附件数组；与 `message` 至少有一项非空 |
+| message | string | ✅ | 文本内容（不能为空） |
+| clientMessageId | string | ❌ | 前端本地消息 ID（兼容字段） |
+| attachments | Attachment[] | ❌ | 附件数组（兼容字段） |
 
 **Attachment 对象：**
 
@@ -972,56 +1011,42 @@ ARK_VISION_CACHE_TTL_SEC=21600
 | mimeType | string | ❌ | MIME 类型 |
 | size | number | ❌ | 文件大小，单位字节 |
 
-**响应 data：**
+**响应（无素材生成）：**
 
 ```json
 {
-  "sessionId": "sess_123",
-  "userMessage": {
-    "id": "msg_user_1",
-    "sessionId": "sess_123",
-    "clientMessageId": "cmsg_20260414_001",
-    "role": "user",
-    "content": "今天有点累，但还是把作业写完了",
-    "timestamp": 1776150000000,
-    "attachments": [
-      {
-        "type": "image",
-        "name": "sunset.jpg",
-        "url": "/uploads/xxx/diary-image/sunset.jpg",
-        "thumbnailUrl": "/uploads/xxx/diary-image/thumb_sunset.jpg",
-        "mimeType": "image/jpeg",
-        "size": 231231
-      }
-    ]
-  },
-  "assistantMessage": {
-    "id": "msg_ai_1",
-    "sessionId": "sess_123",
-    "clientMessageId": null,
-    "role": "assistant",
-    "content": "辛苦啦，能在疲惫的时候把作业完成，本身就很了不起。",
-    "timestamp": 1776150001800,
-    "attachments": []
-  },
-  "materialGenerated": false,
-  "materialId": null
+  "code": 0,
+  "data": "辛苦啦，能在疲惫的时候把作业完成，本身就很了不起。",
+  "message": "ok"
+}
+```
+
+**响应（静默切段并生成素材时）：**
+
+```json
+{
+  "code": 0,
+  "data": "辛苦啦，能在疲惫的时候把作业完成，本身就很了不起。",
+  "message": "ok",
+  "meta": {
+    "materialGenerated": true,
+    "materialId": "uuid-xxx"
+  }
 }
 ```
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| sessionId | string | 当前消息所在的会话段 ID |
-| userMessage | ChatMessage | 已入库的用户消息实体 |
-| assistantMessage | ChatMessage | 已入库的 AI 回复实体 |
-| materialGenerated | bool | 是否在本次请求前关闭旧 session 并生成 chat 素材 |
-| materialId | string \| null | 自动生成的素材 ID |
+| data | string | AI 回复文本 |
+| meta.materialGenerated | bool | 是否在本次请求前关闭旧 session 并生成了新素材（仅有素材生成时出现） |
+| meta.materialId | string | 自动生成素材 ID（仅有素材生成时出现） |
 
 **会话规则：**
 
 1. 仅当前 session 内消息参与 AI 上下文，不再跨 session 混取最近消息。
 2. 若距离上一条对话超过 `chatSilenceThreshold`，旧 session 会先关闭，再视配置决定是否转为 chat 素材。
 3. 用户消息与 AI 回复都会持久化；失败态由前端自行维护，不入库。
+4. 若旧 session 被判定为“与当日已有素材重复”，不会新增 chat 素材，因此本次响应不会携带 `meta`。
 
 **实现状态：** ✅ 已完成
 
@@ -1098,6 +1123,7 @@ data: {"type":"error","message":"AI 服务暂时不可用"}
 
 - 若当前没有 open session，会返回 `sessionClosed=false`
 - 若 session 轮数不足、关闭了 `chatMaterialEnabled` 或摘要阶段无结果，会返回 `materialGenerated=false`
+- 若摘要与当日已有素材判重为重复，也会返回 `materialGenerated=false`
 
 **实现状态：** ✅ 已完成
 
@@ -1125,22 +1151,14 @@ data: {"type":"error","message":"AI 服务暂时不可用"}
   },
   "messages": [
     {
-      "id": "msg_user_1",
-      "sessionId": "sess_123",
-      "clientMessageId": "cmsg_001",
       "role": "user",
       "content": "今天下午和小李去骑车了",
-      "timestamp": 1711440180000,
-      "attachments": []
+      "timestamp": 1711440180000
     },
     {
-      "id": "msg_ai_1",
-      "sessionId": "sess_123",
-      "clientMessageId": null,
       "role": "assistant",
       "content": "听起来不错！去哪里骑的？",
-      "timestamp": 1711440182000,
-      "attachments": []
+      "timestamp": 1711440182000
     }
   ]
 }
@@ -1150,13 +1168,9 @@ data: {"type":"error","message":"AI 服务暂时不可用"}
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| id | string | 消息 ID |
-| sessionId | string \| null | 所属 session ID |
-| clientMessageId | string \| null | 前端侧消息 ID |
 | role | string | `user` / `assistant` |
 | content | string | 消息文本 |
 | timestamp | number | Unix 毫秒时间戳 |
-| attachments | Attachment[] | 附件数组 |
 
 **权限：** 仅 session 所属用户可访问。
 
@@ -2149,7 +2163,7 @@ class AvatarProfile(Base):
 | extract_info | 信息提取 | chat_completion | /diaries/{diary_id}/extract |
 | generate_portrait | 用户画像 | chat_completion | /user/portrait/refresh |
 | generate_match_report | 匹配报告 | chat_completion | /social/matches/{match_id}/report |
-| generate_match_report | 匹配报告 | chat_completion | /social/matches/{id}/report |
+| detect_duplicate_chat_material | 对话素材判重 | chat_completion | /chat/close-session, /chat（静默切段时自动调用） |
 | summarize_chat_session | 对话摘要 | chat_completion | /chat/close-session, /chat（静默切段时自动调用） |
 | *generate_avatar_profile* | *分身侧写生成* | *chat_completion* | */avatar/profile/regenerate* 🆕 待新增 |
 | *match_post* | *帖子匹配打分* | *chat_completion* | */avatar/matches* 🆕 待新增 |
@@ -2157,4 +2171,4 @@ class AvatarProfile(Base):
 
 ---
 
-*本文档从 `app/` 下所有 router.py、schemas.py、service.py 以及前端相关 API 调用提取，最后更新 2026-04-14。*
+*本文档从 `app/` 下所有 router.py、schemas.py、service.py 以及前端相关 API 调用提取，最后更新 2026-04-15。*

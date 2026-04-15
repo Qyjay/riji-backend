@@ -538,6 +538,30 @@ def test_emotion_extraction_mock_format(client, db, monkeypatch):
     assert json.loads(m.emotion) == data
 
 
+def test_create_material_auto_emotion_cry_keyword_not_calm(client, monkeypatch):
+    """创建素材自动情绪提取：'想哭' 应优先识别为难过。"""
+    user_data = create_test_user(client, username="mat_auto_emotion_cry")
+    headers = get_auth_header(user_data["token"])
+
+    monkeypatch.setattr(minimax_client.settings, "MINIMAX_MOCK", True)
+    monkeypatch.setattr(minimax_client, "_minimax_client", None)
+
+    resp = client.post(
+        "/api/materials",
+        json={
+            "type": "text",
+            "content": "今天真的有点想哭，心里很难受",
+            "date": "2026-03-25",
+        },
+        headers=headers,
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["emotion"]["label"] == "难过"
+    assert data["emotion"]["emoji"] == "😢"
+
+
 @pytest.mark.parametrize("style", POLISH_STYLES)
 def test_polish_text_returns_only_polished(client, monkeypatch, style):
     """POST /materials/{id}/polish 按配置风格遍历，且只返回 {polished}"""

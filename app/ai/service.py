@@ -4,8 +4,9 @@ import os
 import json
 import re
 import logging
+import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 from uuid import uuid4
 from app.config import settings
@@ -14,6 +15,47 @@ from app.response import ApiException, PARAM_ERROR
 
 
 logger = logging.getLogger("uvicorn.error")
+
+
+_IMAGE_UNDERSTAND_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _cleanup_image_understand_cache(now_ms: int) -> None:
+    ttl_ms = max(int(settings.ARK_VISION_CACHE_TTL_SEC), 60) * 1000
+    expired_urls = [
+        url
+        for url, meta in _IMAGE_UNDERSTAND_CACHE.items()
+        if now_ms - int(meta.get("cached_at", 0)) > ttl_ms
+    ]
+    for url in expired_urls:
+        _IMAGE_UNDERSTAND_CACHE.pop(url, None)
+
+
+def _get_cached_image_hint(url: str) -> tuple[bool, str]:
+    now_ms = _now_ms()
+    _cleanup_image_understand_cache(now_ms)
+    meta = _IMAGE_UNDERSTAND_CACHE.get(url)
+    if not meta:
+        return False, ""
+    return True, str(meta.get("hint") or "").strip()
+
+
+def _set_cached_image_hint(url: str, hint: str) -> None:
+    now_ms = _now_ms()
+    _cleanup_image_understand_cache(now_ms)
+    _IMAGE_UNDERSTAND_CACHE[url] = {
+        "hint": str(hint or "").strip(),
+        "cached_at": now_ms,
+    }
+
+
+def clear_image_understand_cache() -> None:
+    """清空图片理解缓存。"""
+    _IMAGE_UNDERSTAND_CACHE.clear()
 
 
 async def text_to_speech_service(user_id: str, text: str, voice: str = "") -> str:
@@ -174,6 +216,54 @@ async def _call_ark_vision_async(image_url: str, prompt: str):
                 await maybe_awaitable
 
 
+async def _call_ark_vision_multi_async(image_urls: List[str], prompt: str):
+    """异步调用 Ark 视觉模型（单次请求输入多图）。"""
+    try:
+        from volcenginesdkarkruntime import AsyncArk
+    except ImportError as exc:
+        raise ApiException(
+            code=PARAM_ERROR,
+            message="未安装 volcengine-python-sdk[ark]，请先安装后再调用视觉理解接口",
+            status_code=500,
+        ) from exc
+
+    client = AsyncArk(
+        base_url=settings.ARK_BASE_URL,
+        api_key=settings.ARK_API_KEY,
+    )
+
+    content_blocks = [
+        {
+            "type": "input_image",
+            "image_url": image_url,
+        }
+        for image_url in image_urls
+    ]
+    content_blocks.append(
+        {
+            "type": "input_text",
+            "text": prompt,
+        }
+    )
+
+    try:
+        return await client.responses.create(
+            model=settings.ARK_VISION_MODEL,
+            input=[
+                {
+                    "role": "user",
+                    "content": content_blocks,
+                }
+            ],
+        )
+    finally:
+        close_fn = getattr(client, "close", None)
+        if callable(close_fn):
+            maybe_awaitable = close_fn()
+            if asyncio.iscoroutine(maybe_awaitable):
+                await maybe_awaitable
+
+
 def _to_ark_file_uri(path: Path) -> str:
     """生成 Ark SDK 在 Windows 下可正确解析的 file URI。"""
     resolved = path.resolve()
@@ -230,6 +320,59 @@ def _resolve_ark_image_input(image_url: str) -> str:
     return raw
 
 
+def _build_ark_batch_prompt(prompt: str, image_count: int) -> str:
+    """构造多图输入提示词，约束模型返回可解析 JSON。"""
+    base_prompt = (prompt or "").strip() or settings.ARK_VISION_PROMPT
+    return (
+        f"{base_prompt}\n\n"
+        "你将收到多张图片。请严格按图片输入顺序输出 JSON 数组。"
+        "数组长度必须与图片数量一致。"
+        "每个元素是对应图片的客观描述字符串。"
+        "不要输出 Markdown 代码块，不要输出额外解释。"
+        f"图片数量：{image_count}。"
+    )
+
+
+def _parse_ark_batch_descriptions(raw_text: str, expected_count: int) -> Optional[List[str]]:
+    """解析多图识别返回内容，提取按顺序描述列表。"""
+    payload = str(raw_text or "").strip()
+    if not payload or expected_count <= 0:
+        return None
+
+    parsed: Any = None
+    try:
+        parsed = json.loads(payload)
+    except Exception:
+        match = re.search(r"\[[\s\S]*\]", payload)
+        if not match:
+            return None
+        try:
+            parsed = json.loads(match.group(0))
+        except Exception:
+            return None
+
+    if not isinstance(parsed, list):
+        return None
+
+    descriptions: List[str] = []
+    for item in parsed:
+        description = ""
+        if isinstance(item, str):
+            description = item
+        elif isinstance(item, dict):
+            for key in ("description", "text", "result", "caption", "content"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    description = value
+                    break
+
+        descriptions.append(str(description or "").strip())
+
+    if len(descriptions) < expected_count:
+        descriptions.extend([""] * (expected_count - len(descriptions)))
+    return descriptions[:expected_count]
+
+
 async def understand_image_text(
     image_url: str,
     prompt: str = "",
@@ -278,3 +421,121 @@ async def understand_image_text(
     except Exception as exc:
         logger.exception("[ark/vision] request failed: %s", str(exc))
         return ""
+
+
+async def understand_images_batch(
+    image_urls: List[str],
+    prompt: str = "",
+    timeout_sec: Optional[int] = None,
+    max_images: Optional[int] = None,
+    include_image_url: bool = False,
+) -> List[Any]:
+    """批量图片理解。
+
+    默认返回按输入顺序排列的描述字符串数组。
+    若 include_image_url=True，返回 [{"image_url": ..., "description": ...}, ...]。
+    """
+    normalized_urls: List[str] = []
+    for image_url in image_urls or []:
+        cleaned = str(image_url or "").strip()
+        if cleaned:
+            normalized_urls.append(cleaned)
+
+    if not normalized_urls:
+        return []
+
+    resolved_prompt = (prompt or "").strip() or settings.ARK_VISION_PROMPT
+    resolved_timeout = int(timeout_sec or settings.ARK_VISION_TIMEOUT_SEC)
+
+    if max_images is None:
+        max_images = len(normalized_urls)
+    max_images = max(int(max_images), 0)
+
+    results: List[dict] = [
+        {
+            "image_url": image_url,
+            "description": "",
+        }
+        for image_url in normalized_urls
+    ]
+
+    to_infer_indices: List[int] = []
+    to_infer_urls: List[str] = []
+    to_infer_inputs: List[str] = []
+    model_call_count = 0
+
+    for idx, image_url in enumerate(normalized_urls):
+        hit, cached_hint = _get_cached_image_hint(image_url)
+        if hit:
+            results[idx]["description"] = cached_hint
+            continue
+
+        if model_call_count >= max_images:
+            continue
+
+        resolved_input = _resolve_ark_image_input(image_url)
+        model_call_count += 1
+        if not resolved_input:
+            _set_cached_image_hint(image_url, "")
+            continue
+
+        to_infer_indices.append(idx)
+        to_infer_urls.append(image_url)
+        to_infer_inputs.append(resolved_input)
+
+    descriptions: List[str] = []
+    if to_infer_inputs:
+        if len(to_infer_inputs) == 1:
+            try:
+                descriptions = [
+                    await understand_image_text(
+                        image_url=to_infer_urls[0],
+                        prompt=resolved_prompt,
+                        timeout_sec=resolved_timeout,
+                    )
+                ]
+            except Exception:
+                descriptions = [""]
+        else:
+            can_use_multi = bool(settings.ARK_VISION_ENABLED and settings.ARK_API_KEY)
+            parsed_multi: Optional[List[str]] = None
+            if can_use_multi:
+                batch_prompt = _build_ark_batch_prompt(resolved_prompt, len(to_infer_inputs))
+                try:
+                    response = await asyncio.wait_for(
+                        _call_ark_vision_multi_async(to_infer_inputs, batch_prompt),
+                        timeout=float(resolved_timeout),
+                    )
+                    parsed_multi = _parse_ark_batch_descriptions(
+                        _extract_ark_text(response),
+                        len(to_infer_inputs),
+                    )
+                except Exception:
+                    parsed_multi = None
+
+            if parsed_multi is not None:
+                descriptions = parsed_multi
+            else:
+                descriptions = []
+                for image_url in to_infer_urls:
+                    try:
+                        desc = await understand_image_text(
+                            image_url=image_url,
+                            prompt=resolved_prompt,
+                            timeout_sec=resolved_timeout,
+                        )
+                    except Exception:
+                        desc = ""
+                    descriptions.append(desc)
+
+    for offset, idx in enumerate(to_infer_indices):
+        description = ""
+        if offset < len(descriptions):
+            description = str(descriptions[offset] or "").strip()
+        results[idx]["description"] = description
+        _set_cached_image_hint(normalized_urls[idx], description)
+
+    if include_image_url:
+        return results
+
+    return [str(item.get("description") or "").strip() for item in results]

@@ -24,6 +24,47 @@ def _uuid() -> str:
     return str(uuid4())
 
 
+def _is_same_day(material_date: str, target_date: str) -> bool:
+    left = str(material_date or "").strip()
+    right = str(target_date or "").strip()
+    if not left or not right:
+        return False
+    return left == right or left.startswith(f"{right} ")
+
+
+def _collect_existing_materials_for_dedup(
+    db: Session,
+    user_id: str,
+    date: str,
+    limit: int = 60,
+) -> list[dict]:
+    rows = (
+        db.query(RawMaterial)
+        .filter(RawMaterial.user_id == user_id)
+        .order_by(RawMaterial.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    items = []
+    for row in rows:
+        if not _is_same_day(row.date or "", date):
+            continue
+        content = str(row.content or "").strip()
+        if not content:
+            continue
+
+        items.append(
+            {
+                "id": row.id,
+                "type": row.type,
+                "content": content,
+                "created_at": row.created_at,
+            }
+        )
+    return items
+
+
 def encode_attachments(items: Optional[List[dict]]) -> str:
     return json.dumps(items or [], ensure_ascii=False)
 
@@ -149,6 +190,23 @@ async def close_and_materialize(
     session.mood = result.get("mood", "平静")
     session.mood_emoji = result.get("mood_emoji", "😐")
     session.topic_tags = json.dumps(result.get("tags", []), ensure_ascii=False)
+
+    existing_materials = _collect_existing_materials_for_dedup(
+        db,
+        user_id=session.user_id,
+        date=session.date,
+    )
+    dedup_result = await client.detect_duplicate_chat_material(
+        candidate_summary=session.summary,
+        existing_materials=existing_materials,
+    )
+
+    if dedup_result.get("is_duplicate"):
+        duplicate_id = dedup_result.get("duplicate_material_id")
+        if duplicate_id:
+            session.material_id = str(duplicate_id)
+        db.commit()
+        return None
 
     material = RawMaterial(
         id=_uuid(),

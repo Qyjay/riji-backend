@@ -23,6 +23,7 @@ class Diary(Base):
     has_bgm = Column(Boolean, default=False)
     comic_url = Column(String, default="")
     bgm_url = Column(String, default="")
+    image_understandings = Column(Text, default="[]")  # JSON array: [视觉理解文本, ...]
     created_at = Column(BigInteger, nullable=False)  # 毫秒时间戳
     updated_at = Column(BigInteger, nullable=False)  # 毫秒时间戳
 
