@@ -1,10 +1,12 @@
 """
 聊天路由
 - POST /chat                         AI 对话（非流式）
-- GET  /chat/history                 聊天历史
+- POST /chat/stream                  AI 对话（SSE 流式）
+- GET  /chat/history                 聊天历史（近期消息扁平列表）
+- GET  /chat/sessions                对话段列表（分页）
+- POST /chat/sessions                新建对话段
 - POST /chat/close-session           主动关闭当前对话段
 - GET  /chat/session/{id}/messages   获取对话段消息
-- POST /chat/stream                  AI 对话（SSE 流式）
 """
 import json
 import logging
@@ -22,17 +24,22 @@ from app.chat.schemas import (
     ChatRequest,
     ChatSessionOut,
     CloseSessionOut,
-    SessionMessageOut,
+    CreateSessionOut,
+    SessionListOut,
     SessionMessagesOut,
 )
 from app.chat.service import (
     close_and_materialize,
     create_chat_message,
+    create_new_session,
     get_history,
     get_or_create_session,
+    get_session_for_message,
     list_session_messages,
     list_session_messages_for_ai,
+    list_sessions,
     serialize_message,
+    serialize_session,
 )
 from app.dependencies import get_current_user, get_db
 from app.models.chat import ChatSession
@@ -92,7 +99,11 @@ async def ai_chat(
         now = _now_ms()
         settings = _get_settings(db, current_user.id)
         silence_threshold = getattr(settings, "chat_silence_threshold", 30) or 30
-        current_session, old_session = get_or_create_session(db, current_user.id, now, silence_threshold)
+        current_session, old_session = get_session_for_message(
+            db, current_user.id, now, body.session_id, silence_threshold
+        )
+        if current_session is None:
+            raise ApiException(code=NOT_FOUND, message="对话段不存在", status_code=404)
         material_generated, material_id = await _close_old_session_if_needed(db, old_session, settings)
 
         user_message = create_chat_message(
@@ -195,7 +206,11 @@ async def ai_chat_stream(
     now = _now_ms()
     settings = _get_settings(db, current_user.id)
     silence_threshold = getattr(settings, "chat_silence_threshold", 30) or 30
-    current_session, old_session = get_or_create_session(db, current_user.id, now, silence_threshold)
+    current_session, old_session = get_session_for_message(
+        db, current_user.id, now, body.session_id, silence_threshold
+    )
+    if current_session is None:
+        raise ApiException(code=NOT_FOUND, message="对话段不存在", status_code=404)
     if old_session:
         await close_and_materialize(db, old_session, settings)
 
@@ -234,6 +249,48 @@ async def ai_chat_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/sessions", summary="获取对话段列表（分页）")
+def get_sessions(
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=100, alias="pageSize", description="每页条数"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    result = list_sessions(db, current_user.id, page=page, page_size=page_size)
+    out = SessionListOut(
+        items=[ChatSessionOut(**item) for item in result["items"]],
+        total=result["total"],
+        page=result["page"],
+        page_size=result["page_size"],
+    )
+    return success(out.model_dump(by_alias=True))
+
+
+@router.post("/sessions", summary="新建对话段（强制开启新会话）")
+async def new_session(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    now = _now_ms()
+    settings = _get_settings(db, current_user.id)
+    new_sess, old_sess = create_new_session(db, current_user.id, now)
+    material_generated = False
+    material_id = None
+    if old_sess:
+        material = await close_and_materialize(db, old_sess, settings)
+        if material:
+            material_generated = True
+            material_id = material.id
+    db.refresh(new_sess)
+    out = CreateSessionOut(
+        session=ChatSessionOut(**serialize_session(new_sess)),
+        old_session_closed=old_sess is not None,
+        material_generated=material_generated,
+        material_id=material_id,
+    )
+    return success(out.model_dump(by_alias=True))
 
 
 @router.post("/close-session", summary="主动关闭当前对话段")
@@ -280,16 +337,7 @@ def get_session_messages(
         raise ApiException(code=NOT_FOUND, message="对话段不存在", status_code=404)
 
     messages = list_session_messages(db, session_id)
-    session_out = ChatSessionOut(
-        id=session.id,
-        title=session.title or "",
-        summary=session.summary or "",
-        start_time=session.start_time,
-        end_time=session.end_time,
-        message_count=session.message_count or 0,
-        mood=session.mood or "",
-        mood_emoji=session.mood_emoji or "",
-    )
+    session_out = ChatSessionOut(**serialize_session(session))
     out = SessionMessagesOut(
         session=session_out,
         messages=[

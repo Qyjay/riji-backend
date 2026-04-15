@@ -305,3 +305,109 @@ def get_history(db: Session, user_id: str, limit: int = 20):
 
     items = [serialize_message(message) for message in reversed(messages)]
     return {"items": items, "total": total}
+
+
+def list_sessions(db: Session, user_id: str, page: int = 1, page_size: int = 20) -> dict:
+    """分页获取用户所有对话段，按开始时间倒序"""
+    import json as _json
+    q = db.query(ChatSession).filter(ChatSession.user_id == user_id)
+    total = q.count()
+    items = (
+        q.order_by(ChatSession.start_time.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    result = []
+    for s in items:
+        try:
+            tags = _json.loads(s.topic_tags or "[]")
+        except Exception:
+            tags = []
+        result.append({
+            "id": s.id,
+            "title": s.title or "",
+            "summary": s.summary or "",
+            "start_time": s.start_time,
+            "end_time": s.end_time,
+            "message_count": s.message_count or 0,
+            "mood": s.mood or "",
+            "mood_emoji": s.mood_emoji or "",
+            "status": s.status or "open",
+            "date": s.date or "",
+            "topic_tags": tags,
+            "material_id": s.material_id,
+        })
+    return {"items": result, "total": total, "page": page, "page_size": page_size}
+
+
+def serialize_session(session: ChatSession) -> dict:
+    """将 ChatSession ORM 对象序列化为 dict"""
+    import json as _json
+    try:
+        tags = _json.loads(session.topic_tags or "[]")
+    except Exception:
+        tags = []
+    return {
+        "id": session.id,
+        "title": session.title or "",
+        "summary": session.summary or "",
+        "start_time": session.start_time,
+        "end_time": session.end_time,
+        "message_count": session.message_count or 0,
+        "mood": session.mood or "",
+        "mood_emoji": session.mood_emoji or "",
+        "status": session.status or "open",
+        "date": session.date or "",
+        "topic_tags": tags,
+        "material_id": session.material_id,
+    }
+
+
+def create_new_session(db: Session, user_id: str, now_ms: int) -> tuple:
+    """强制新建对话段，返回 (new_session, old_open_session_or_None)"""
+    old_session = (
+        db.query(ChatSession)
+        .filter(ChatSession.user_id == user_id, ChatSession.status == "open")
+        .first()
+    )
+    today = datetime.fromtimestamp(now_ms / 1000).strftime("%Y-%m-%d")
+    new_session = ChatSession(
+        id=_uuid(),
+        user_id=user_id,
+        status="open",
+        start_time=now_ms,
+        end_time=now_ms,
+        message_count=0,
+        date=today,
+        created_at=now_ms,
+    )
+    db.add(new_session)
+    db.flush()
+    return new_session, old_session
+
+
+def get_session_for_message(
+    db: Session,
+    user_id: str,
+    now_ms: int,
+    session_id: Optional[str] = None,
+    silence_threshold_min: int = 30,
+) -> tuple:
+    """
+    获取发消息时使用的对话段。
+    - 若 session_id 指定：直接使用该 session（若已关闭则重新打开），返回 (session, None)
+    - 若未指定：走自动创建/复用逻辑，返回 (session, old_session_to_close_or_None)
+    """
+    if session_id:
+        session = (
+            db.query(ChatSession)
+            .filter(ChatSession.id == session_id, ChatSession.user_id == user_id)
+            .first()
+        )
+        if not session:
+            return None, None
+        if session.status == "closed":
+            session.status = "open"
+        return session, None
+    return get_or_create_session(db, user_id, now_ms, silence_threshold_min)
