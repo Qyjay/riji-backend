@@ -202,6 +202,9 @@ cp .env.example .env
 ### 4. 初始化数据库 + 测试数据
 
 ```bash
+# 先执行数据库迁移（每次拉取到新字段后都建议执行）
+python -m alembic upgrade head
+
 # 基础测试数据（3 个用户 + 日记 + 番茄钟 + 待办）
 python scripts/seed.py
 

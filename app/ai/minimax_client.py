@@ -436,6 +436,107 @@ class MiniMaxClient:
                 status_code=502,
             )
 
+    @staticmethod
+    def _default_emotion_emoji(label: str) -> str:
+        mapping = {
+            "开心": "😊",
+            "难过": "😢",
+            "愤怒": "😠",
+            "平静": "😌",
+            "感动": "🥹",
+            "焦虑": "😟",
+            "期待": "🤩",
+            "无聊": "😑",
+        }
+        return mapping.get(label, "😐")
+
+    @classmethod
+    def _heuristic_emotion(cls, text: str) -> dict:
+        content = str(text or "").strip()
+        if not content:
+            return {"label": "平静", "score": 0.5, "emoji": "😌"}
+
+        lowered = content.lower()
+        rules = [
+            ("难过", 0.86, "😢", ["想哭", "哭", "难过", "伤心", "悲伤", "委屈", "心碎", "崩溃", "低落", "沮丧", "失落", "难受", "emo"]),
+            ("愤怒", 0.84, "😠", ["生气", "愤怒", "火大", "气死", "烦死", "暴躁", "恼火", "讨厌", "破防"]),
+            ("焦虑", 0.82, "😟", ["焦虑", "紧张", "压力", "担心", "害怕", "慌", "忐忑", "不安", "睡不着"]),
+            ("开心", 0.88, "😊", ["开心", "高兴", "快乐", "愉快", "幸福", "太棒", "好开心", "兴奋", "喜悦"]),
+            ("感动", 0.83, "🥹", ["感动", "暖心", "泪目", "被治愈", "触动", "谢谢你", "温暖"]),
+            ("期待", 0.8, "🤩", ["期待", "盼", "希望", "想要", "想去", "明天一定", "跃跃欲试"]),
+            ("无聊", 0.72, "😑", ["无聊", "没劲", "空虚", "发呆", "不知道干嘛", "好闲"]),
+            ("平静", 0.65, "😌", ["平静", "还行", "一般", "普通", "正常"]),
+        ]
+
+        for label, score, emoji, keywords in rules:
+            if any(keyword in lowered for keyword in keywords):
+                return {"label": label, "score": score, "emoji": emoji}
+
+        return {"label": "平静", "score": 0.55, "emoji": "😌"}
+
+    @staticmethod
+    def _extract_first_json_object(raw: str) -> Optional[dict]:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+        match = re.search(r"\{[\s\S]*\}", text)
+        if not match:
+            return None
+
+        try:
+            parsed = json.loads(match.group(0))
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
+
+    @classmethod
+    def _normalize_emotion_payload(cls, payload: dict, fallback_text: str = "") -> dict:
+        aliases = {
+            "悲伤": "难过",
+            "伤心": "难过",
+            "生气": "愤怒",
+            "平和": "平静",
+            "紧张": "焦虑",
+            "激动": "期待",
+            "兴奋": "期待",
+            "吐槽": "无聊",
+        }
+        allowed_labels = {"开心", "难过", "愤怒", "平静", "感动", "焦虑", "期待", "无聊"}
+
+        raw_label = str((payload or {}).get("label") or "").strip()
+        label = aliases.get(raw_label, raw_label)
+        if label not in allowed_labels:
+            label = cls._heuristic_emotion(fallback_text)["label"]
+
+        try:
+            score = float((payload or {}).get("score", 0.0))
+        except Exception:
+            score = 0.0
+
+        if score > 1 and score <= 100:
+            score /= 100
+        if score <= 0:
+            score = cls._heuristic_emotion(fallback_text)["score"]
+        score = max(0.0, min(1.0, score))
+
+        emoji = str((payload or {}).get("emoji") or "").strip()
+        if not emoji:
+            emoji = cls._default_emotion_emoji(label)
+
+        return {
+            "label": label,
+            "score": round(score, 2),
+            "emoji": emoji,
+        }
+
     # ==================== v2 新增方法 ====================
 
     async def extract_emotion(self, text: str) -> dict:
@@ -447,27 +548,23 @@ class MiniMaxClient:
         """
         if self.mock:
             await asyncio.sleep(0.2)
-            import random
-            emotions = [
-                {"label": "开心", "score": 0.88, "emoji": "😊"},
-                {"label": "平静", "score": 0.75, "emoji": "😌"},
-                {"label": "感动", "score": 0.82, "emoji": "🥹"},
-                {"label": "期待", "score": 0.70, "emoji": "🤩"},
-            ]
-            return random.choice(emotions)
+            return self._heuristic_emotion(text)
 
         system = (
             "你是情绪分析助手。分析用户文本的主要情绪，"
             "严格返回如下 JSON 格式（无其他文字）：\n"
             '{"label": "情绪名称", "score": 0.85, "emoji": "😊"}\n'
-            "情绪类型：开心、悲伤、愤怒、平静、感动、焦虑、期待、无聊。"
+            "情绪类型限定为：开心、难过、愤怒、平静、感动、焦虑、期待、无聊。"
         )
         messages = [{"role": "user", "content": f"分析这段文字的情绪：{text}"}]
         try:
             resp = await self.chat_completion(messages, system_prompt=system, temperature=0.3)
-            return json.loads(resp.strip())
+            payload = self._extract_first_json_object(resp)
+            if not payload:
+                return self._heuristic_emotion(text)
+            return self._normalize_emotion_payload(payload, fallback_text=text)
         except Exception:
-            return {"label": "平静", "score": 0.5, "emoji": "😌"}
+            return self._heuristic_emotion(text)
 
     async def polish_text(self, text: str, style: str) -> str:
         """

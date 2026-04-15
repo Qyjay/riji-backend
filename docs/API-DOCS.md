@@ -385,6 +385,12 @@
 
 **实现状态：** ✅ 已完成
 
+**情绪提取补充说明：**
+
+- 当 `emotion` 为空且 `content` 有值时，会自动触发情绪提取并写回。
+- 输出标签会归一到固定集合：`开心 / 难过 / 愤怒 / 平静 / 感动 / 焦虑 / 期待 / 无聊`。
+- 当模型返回异常或 JSON 不可解析时，后端会基于文本关键词做兜底判断（例如“想哭”优先识别为“难过”），不再一律回退为“平静”。
+
 ---
 
 ### GET /api/materials — 素材列表 🔒
@@ -445,6 +451,11 @@
 **响应 data：** `{"label": "开心", "score": 0.88, "emoji": "😊"}`
 
 **实现状态：** ✅ 已完成（调用 minimax_client.extract_emotion）
+
+**行为说明：**
+
+- 若模型返回 `悲伤` 等同义标签，会统一规范为 `难过`。
+- `score` 支持 0~1 与 0~100 两种输入，服务端会统一归一到 0~1。
 
 ---
 
@@ -558,6 +569,31 @@
 - 图片理解结果会注入到日记生成提示词中的 `[图片描述]` 上下文段落，并同时在响应字段 `imageUnderstandings` 中返回（数组类型，按图片顺序逐条返回，不去重）。
 - 该字段会持久化保存到日记记录；后续通过 `GET /api/diaries`、`GET /api/diaries/{diary_id}`、`GET /api/diaries/search` 查询时会返回同一组结果。
 - 图片理解失败会自动降级为“仅使用原素材文本继续生成日记”，不阻断主流程。
+
+**图片理解复用调用（给后端开发）：**
+
+- 单图调用：`app.ai.service.understand_image_text(image_url, prompt="", timeout_sec=None) -> str`
+- 多图调用：`app.ai.service.understand_images_batch(image_urls, prompt="", timeout_sec=None, max_images=None) -> List[str]`
+- 如需带原始 URL 的详细结构，可传：`include_image_url=True`，返回 `List[dict]`
+- 多图底层调用优先使用 Ark `responses.create` 的单次多图输入格式（`content` 中多个 `input_image` + 一个 `input_text`），与官方示例一致；若返回不可解析，会自动降级为逐图调用，保证可用性。
+
+```python
+from app.ai import service as ai_service
+
+# 1) 单图
+desc = await ai_service.understand_image_text(
+  image_url="https://example.com/a.jpg",
+  prompt="请客观描述图片内容",
+)
+
+# 2) 多图
+items = await ai_service.understand_images_batch(
+  image_urls=["https://example.com/a.jpg", "https://example.com/b.jpg"],
+  prompt="请分别描述每张图",
+)
+# items 形如:
+# ["...", "..."]
+```
 
 **Ark 视觉理解配置说明（启用方式 + 推荐值）：**
 

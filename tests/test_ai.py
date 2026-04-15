@@ -5,6 +5,7 @@ import asyncio
 from pathlib import Path
 
 from tests.conftest import create_test_user, get_auth_header
+from app.ai.minimax_client import MiniMaxClient
 
 
 def test_chat_returns_text_contract(client):
@@ -185,3 +186,81 @@ def test_understand_image_text_with_local_upload_url(monkeypatch):
     expected_posix = image_path.resolve().as_posix()
     assert captured["image_input"].startswith("file://")
     assert captured["image_input"].endswith(expected_posix)
+
+
+def test_understand_images_batch_uses_multi_image_input(monkeypatch):
+    from app.ai import service as ai_service
+
+    monkeypatch.setattr(ai_service.settings, "ARK_VISION_ENABLED", True)
+    monkeypatch.setattr(ai_service.settings, "ARK_API_KEY", "test-key")
+    monkeypatch.setattr(ai_service.settings, "ARK_VISION_TIMEOUT_SEC", 5)
+    monkeypatch.setattr(ai_service.settings, "ARK_VISION_PROMPT", "请客观描述图片")
+
+    ai_service.clear_image_understand_cache()
+
+    captured = {"image_inputs": [], "prompt": ""}
+
+    async def fake_multi(image_inputs, prompt):
+        captured["image_inputs"] = list(image_inputs)
+        captured["prompt"] = prompt
+        return {"output_text": '["多图结果A", "多图结果B"]'}
+
+    async def fail_single(*_args, **_kwargs):
+        raise AssertionError("multi-image path should not fallback to single-image call")
+
+    monkeypatch.setattr(ai_service, "_call_ark_vision_multi_async", fake_multi)
+    monkeypatch.setattr(ai_service, "understand_image_text", fail_single)
+
+    results = asyncio.run(
+        ai_service.understand_images_batch(
+            image_urls=[
+                "https://example.com/multi-1.jpg",
+                "https://example.com/multi-2.jpg",
+            ],
+            prompt="请描述每张图",
+            timeout_sec=5,
+            max_images=5,
+        )
+    )
+
+    assert len(captured["image_inputs"]) == 2
+    assert captured["image_inputs"][0] == "https://example.com/multi-1.jpg"
+    assert captured["image_inputs"][1] == "https://example.com/multi-2.jpg"
+    assert "JSON 数组" in captured["prompt"]
+
+    assert results == ["多图结果A", "多图结果B"]
+
+
+def test_extract_emotion_mock_prefers_keyword_signal():
+    client = MiniMaxClient(
+        api_key="test-key",
+        api_base="https://example.com",
+        model="mock-model",
+        mock=True,
+    )
+
+    result = asyncio.run(client.extract_emotion("今天真的很想哭，感觉好难受"))
+    assert result["label"] == "难过"
+    assert result["emoji"] == "😢"
+    assert 0 <= float(result["score"]) <= 1
+
+
+def test_extract_emotion_non_mock_normalizes_json_and_label(monkeypatch):
+    client = MiniMaxClient(
+        api_key="test-key",
+        api_base="https://example.com",
+        model="test-model",
+        mock=False,
+    )
+
+    async def fake_chat_completion(*_args, **_kwargs):
+        return """```json
+{\"label\": \"悲伤\", \"score\": 85}
+```"""
+
+    monkeypatch.setattr(client, "chat_completion", fake_chat_completion)
+
+    result = asyncio.run(client.extract_emotion("想哭"))
+    assert result["label"] == "难过"
+    assert result["emoji"] == "😢"
+    assert result["score"] == 0.85

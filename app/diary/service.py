@@ -265,7 +265,7 @@ async def _collect_image_understand_hints(materials: List[RawMaterial]) -> dict:
     for idx, (material_id, _image_url) in enumerate(image_entries):
         description = ""
         if idx < len(results):
-            description = str(results[idx].get("description") or "").strip()
+            description = str(results[idx] or "").strip()
         if not description:
             continue
         hints.setdefault(material_id, []).append(description)
