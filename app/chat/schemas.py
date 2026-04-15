@@ -34,6 +34,7 @@ class ChatRequest(BaseModel):
     message: str = ""
     client_message_id: Optional[str] = Field(default=None, alias="clientMessageId")
     attachments: List[ChatAttachmentIn] = Field(default_factory=list)
+    session_id: Optional[str] = Field(default=None, alias="sessionId")
 
     @field_validator("message", mode="before")
     @classmethod
@@ -64,6 +65,26 @@ class ChatSessionOut(CamelModel):
     message_count: int
     mood: str
     mood_emoji: str
+    status: str = "open"
+    date: str = ""
+    topic_tags: List[str] = Field(default_factory=list)
+    material_id: Optional[str] = None
+
+
+class SessionListOut(CamelModel):
+    """对话段列表响应"""
+    items: List[ChatSessionOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class CreateSessionOut(CamelModel):
+    """新建对话段响应"""
+    session: ChatSessionOut
+    old_session_closed: bool
+    material_generated: bool
+    material_id: Optional[str] = None
 
 
 class ChatMessageOut(CamelModel):
