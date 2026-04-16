@@ -40,6 +40,11 @@ class MatchActionRequest(BaseModel):
     action: str                         # "dismiss" / "chat"
 
 
+class CreateAgentCommentDraftRequest(BaseModel):
+    """创建广场分身评论草稿"""
+    post_id: str
+
+
 # ==================== 响应 Schema ====================
 
 class AvatarMemoryOut(CamelModel):
@@ -91,3 +96,28 @@ class AvatarProfileOut(CamelModel):
     diary_count: int
     chat_count: int
     generated_at: int
+
+
+class AvatarCardOut(CamelModel):
+    """分身名片响应（用于匹配/agent-to-agent 的可控摘要）"""
+    display_name: str
+    public_summary: str
+    interest_tags: list[str]
+    social_intent: list[str]
+    conversation_style: dict
+    boundaries: list[str]
+    visibility: str
+    updated_at: int
+
+
+class AgentActionOut(CamelModel):
+    """分身行动响应"""
+    id: str
+    action_type: str
+    target_type: str
+    target_id: str
+    input_context: dict
+    output_text: str
+    status: str
+    created_at: int
+    updated_at: int

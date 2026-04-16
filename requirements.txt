@@ -3,7 +3,7 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.0
 sqlalchemy==2.0.35
 alembic==1.13.0
-pydantic==2.9.2
+pydantic>=2.9.2,<3.0.0
 pydantic-settings==2.5.0
 
 # Auth & security
@@ -15,9 +15,14 @@ python-multipart==0.0.9
 Pillow==10.4.0
 
 # HTTP & AI
+# httpx is used by Exa search and DashScope/OpenAI-compatible embedding calls.
 httpx==0.27.0
 volcengine-python-sdk[ark]
 
+# Optional memory vector backend
+# DashScope text-embedding-v4 uses the HTTP compatible endpoint, so no DashScope SDK is required.
+chromadb>=0.5.0
+
 # Tests
 pytest==8.3.0
-pytest-asyncio==0.23.0
+pytest-asyncio>=0.23.8,<0.24.0

@@ -45,6 +45,37 @@ def test_create_post(client):
     assert post["createdAt"] > 0
 
 
+def test_create_post_also_creates_shared_memory_index(client, db):
+    """创建帖子后，应写入作者私有社交记忆 + public/school 共享索引。"""
+    from app.models.memory import MemoryDocument
+
+    user_data = create_test_user(client, username="plaza_memory_index", school="南开大学")
+    headers = get_auth_header(user_data["token"])
+    user_id = user_data["user"]["id"]
+
+    resp = client.post("/api/plaza/posts", json={
+        "type": "share",
+        "content": "今天想找人一起去操场跑步。",
+        "tags": ["跑步", "操场"],
+        "school_only": True,
+    }, headers=headers)
+
+    assert resp.status_code == 200
+    post_id = resp.json()["data"]["id"]
+    docs = (
+        db.query(MemoryDocument)
+        .filter(MemoryDocument.user_id == user_id, MemoryDocument.source_id == post_id)
+        .all()
+    )
+
+    assert len(docs) == 2
+    source_types = {doc.source_type for doc in docs}
+    visibilities = {doc.visibility for doc in docs}
+    assert source_types == {"plaza_post", "plaza_post_index"}
+    assert "avatar_only" in visibilities
+    assert "school" in visibilities
+
+
 # ==================== 帖子列表 ====================
 
 def test_list_posts_empty(client):
@@ -235,6 +266,54 @@ def test_add_agent_comment(client):
     detail = client.get(f"/api/plaza/posts/{post_id}", headers=headers).json()["data"]
     assert detail["agentResponses"] == 1
     assert detail["comments"] == 1
+
+
+def test_agent_comment_compat_route_returns_draft_instead_of_publishing(client, db, monkeypatch):
+    """旧的 agent-comment 路由现在应返回待审批草稿，不直接发公开评论。"""
+    from app.ai import minimax_client
+    from app.models.avatar import AvatarProfile
+    from app.models.memory import AgentAction
+    from app.models.plaza import PlazaComment
+    import time
+    from uuid import uuid4
+
+    class FakeMiniMaxClient:
+        async def chat_completion(self, messages, system_prompt="", temperature=0.8, max_tokens=2048):
+            return "我也想一起去跑步，感觉会很放松。"
+
+    monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: FakeMiniMaxClient())
+
+    user_data = create_test_user(client, username="plaza_agent_draft")
+    headers = get_auth_header(user_data["token"])
+    user_id = user_data["user"]["id"]
+    now = int(time.time() * 1000)
+    db.add(
+        AvatarProfile(
+            id=str(uuid4()),
+            user_id=user_id,
+            summary="这是一个喜欢低压力社交和运动的用户。",
+            diary_count=1,
+            chat_count=1,
+            generated_at=now,
+        )
+    )
+    db.commit()
+
+    create_resp = client.post("/api/plaza/posts", json={
+        "type": "buddy",
+        "content": "晚上想去操场慢跑，有人一起吗？",
+    }, headers=headers)
+    post_id = create_resp.json()["data"]["id"]
+
+    resp = client.post(f"/api/plaza/posts/{post_id}/agent-comment", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["requiresApproval"] is True
+    assert data["action"]["status"] == "draft"
+    assert data["action"]["targetId"] == post_id
+
+    assert db.query(PlazaComment).filter(PlazaComment.post_id == post_id, PlazaComment.user_id == user_id).count() == 0
+    assert db.query(AgentAction).filter(AgentAction.user_id == user_id, AgentAction.target_id == post_id).count() == 1
 
 
 def test_list_comments(client):

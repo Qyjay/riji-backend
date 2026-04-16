@@ -12,7 +12,14 @@ from app.database import get_db
 from app.models.user import User
 from app.response import success
 from app.avatar import schemas, service
-from app.avatar.schemas import AvatarMemoryOut, AvatarMatchOut, AvatarProfileOut, AvatarStatusOut
+from app.avatar.schemas import (
+    AgentActionOut,
+    AvatarCardOut,
+    AvatarMemoryOut,
+    AvatarMatchOut,
+    AvatarProfileOut,
+    AvatarStatusOut,
+)
 
 router = APIRouter(prefix="/avatar", tags=["AI分身"])
 
@@ -39,6 +46,16 @@ def _serialize_match(d: dict) -> dict:
 def _serialize_profile(d: dict) -> dict:
     """转 camelCase 输出"""
     return AvatarProfileOut(**d).model_dump(by_alias=True)
+
+
+def _serialize_card(d: dict) -> dict:
+    """转 camelCase 输出"""
+    return AvatarCardOut(**d).model_dump(by_alias=True)
+
+
+def _serialize_action(d: dict) -> dict:
+    """转 camelCase 输出"""
+    return AgentActionOut(**d).model_dump(by_alias=True)
 
 
 # ==================== 记忆 CRUD ====================
@@ -159,3 +176,69 @@ async def regenerate_profile(
     """调用 AI 重新生成分身侧写"""
     result = await service.regenerate_profile(db, current_user.id)
     return success(_serialize_profile(result))
+
+
+@router.get("/card", summary="获取分身名片")
+def get_avatar_card(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """获取当前用户可用于匹配/agent-to-agent 的分身名片"""
+    result = service.get_avatar_card(db, current_user.id)
+    return success(_serialize_card(result))
+
+
+@router.post("/card/regenerate", summary="重新生成分身名片")
+def regenerate_avatar_card(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """基于画像和结构化记忆重新生成分身名片"""
+    result = service.regenerate_avatar_card(db, current_user.id)
+    return success(_serialize_card(result))
+
+
+# ==================== 分身行动草稿/审批 ====================
+
+@router.get("/actions", summary="分身行动列表")
+def list_actions(
+    status: Optional[str] = Query(None, description="按状态筛选：draft/published/rejected"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """获取当前用户的分身行动草稿和历史记录。"""
+    items = service.list_actions(db, current_user.id, status)
+    return success([_serialize_action(item) for item in items])
+
+
+@router.post("/actions/plaza-comment-draft", summary="生成广场评论草稿")
+async def create_plaza_comment_draft(
+    body: schemas.CreateAgentCommentDraftRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """基于帖子、侧写和长期记忆生成评论草稿，不会直接发布。"""
+    result = await service.create_plaza_comment_draft(db, current_user, body.post_id)
+    return success(_serialize_action(result))
+
+
+@router.post("/actions/{action_id}/approve", summary="批准分身行动")
+def approve_action(
+    action_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """批准草稿并执行分身行动。当前支持发布广场评论。"""
+    result = service.approve_action(db, current_user.id, action_id)
+    return success(_serialize_action(result))
+
+
+@router.post("/actions/{action_id}/reject", summary="拒绝分身行动")
+def reject_action(
+    action_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """拒绝草稿，不执行任何外部发布动作。"""
+    result = service.reject_action(db, current_user.id, action_id)
+    return success(_serialize_action(result))
