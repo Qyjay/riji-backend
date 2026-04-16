@@ -134,3 +134,15 @@ async def generate_derivative(
     """生成衍生内容：漫画(comic) | 小说(novel) | 分享卡(share_card)"""
     result = await service.generate_derivative(db, current_user.id, diary_id, body.type)
     return success(result)
+
+
+@router.post("/{diary_id}/derivatives", summary="生成衍生内容（兼容别名）")
+async def generate_derivative_alias(
+    diary_id: str,
+    body: schemas.DerivativeRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """兼容旧版前端复数路径：/diaries/{id}/derivatives。"""
+    result = await service.generate_derivative(db, current_user.id, diary_id, body.type)
+    return success(result)

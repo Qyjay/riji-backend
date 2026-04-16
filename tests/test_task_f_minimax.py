@@ -67,9 +67,40 @@ def test_task_f_summarize_chat_session_non_mock_fallback_on_invalid_json(monkeyp
     result = asyncio.run(client.summarize_chat_session(_messages()))
 
     assert result["title"] == "对话记录"
+    assert isinstance(result["summary"], str) and result["summary"]
+    assert "我" in result["summary"]
+    assert "用户:" not in result["summary"]
     assert result["mood"] == "平静"
     assert result["mood_emoji"] == "😐"
     assert result["tags"] == ["对话"]
+
+
+def test_task_f_generate_diary_non_mock_fallback_returns_polished_text(monkeypatch):
+    client = _build_client(mock=False)
+
+    async def fake_chat_completion(*_args, **_kwargs):
+        raise RuntimeError("upstream-failed")
+
+    monkeypatch.setattr(client, "chat_completion", fake_chat_completion)
+
+    materials_text = (
+        "[08:00] [文字] 早上去图书馆复习算法\n"
+        "[对话记录] (09:00~09:25) 用户和AI讨论了今天的学习进展，并总结了复习计划"
+    )
+
+    result = asyncio.run(
+        client.generate_diary(
+            materials_text,
+            weather="晴",
+            daily_emotion_summary={"dominant": "平静", "trend": []},
+        )
+    )
+
+    assert result["title"] == "今日记录"
+    assert isinstance(result["content"], str) and result["content"]
+    assert result["content"] != materials_text
+    assert "用户和AI" not in result["content"]
+    assert "我和AI" in result["content"]
 
 
 def test_task_f_detect_duplicate_chat_material_mock_detects_exact_match():

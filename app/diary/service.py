@@ -2,6 +2,7 @@
 日记模块服务层 v2
 实现日记 CRUD + AI 生成 + 衍生内容逻辑
 """
+import asyncio
 import json
 import os
 import re
@@ -30,6 +31,20 @@ def _resolve_max_edits_default() -> int:
 
 
 DIARY_MAX_EDITS = _resolve_max_edits_default()
+
+
+def _resolve_derivative_ai_timeout_sec() -> int:
+    """读取衍生创作 AI 调用超时时间，避免前端请求先超时。"""
+    raw = os.getenv("DERIVATIVE_AI_TIMEOUT_SEC", "8")
+    try:
+        value = int(raw)
+        return value if value > 0 else 8
+    except Exception:
+        return 8
+
+
+DERIVATIVE_AI_TIMEOUT_SEC = _resolve_derivative_ai_timeout_sec()
+DERIVATIVE_COMIC_FALLBACK_IMAGE = "https://placehold.co/1024x1024/EEE/31343C?text=Diary+Comic&font=roboto"
 
 
 DEFAULT_EMOTION_EMOJI = {
@@ -155,6 +170,30 @@ def _format_material_time(m: RawMaterial) -> str:
     return "未知时间"
 
 
+def _normalize_chat_material_content(content: str) -> str:
+    """将 chat 素材内容归一到用户第一人称，便于日记叙事融合。"""
+    normalized_content = re.sub(r"\s+", " ", str(content or "").strip())
+    if not normalized_content:
+        return ""
+
+    replacements = [
+        ("用户和AI", "我和AI"),
+        ("用户与AI", "我和AI"),
+        ("用户跟AI", "我和AI"),
+        ("用户同AI", "我和AI"),
+        ("用户和 AI", "我和AI"),
+        ("用户与 AI", "我和AI"),
+        ("用户跟 AI", "我和AI"),
+        ("用户同 AI", "我和AI"),
+        ("用户：", "我："),
+        ("用户:", "我:"),
+    ]
+    for old, new in replacements:
+        normalized_content = normalized_content.replace(old, new)
+
+    return normalized_content
+
+
 def _build_materials_prompt_text(
     materials: List[RawMaterial],
     date: str,
@@ -192,12 +231,15 @@ def _build_materials_prompt_text(
         elif m.type == "voice" and m.content:
             parts.append(f"[{time_label}] [语音转文字] {m.content}")
         elif m.type == "chat" and m.content:
+            chat_content = _normalize_chat_material_content(m.content)
+            if not chat_content:
+                continue
             time_range = ""
             if m.start_time and m.end_time:
                 s = datetime.fromtimestamp(m.start_time / 1000).strftime("%H:%M")
                 e = datetime.fromtimestamp(m.end_time / 1000).strftime("%H:%M")
                 time_range = f"({s}~{e}) "
-            parts.append(f"[对话记录] {time_range}{m.content}")
+            parts.append(f"[对话记录] {time_range}{chat_content}")
 
     return "\n".join(parts) if parts else f"今天是 {date}，无具体素材记录。"
 
@@ -377,6 +419,29 @@ def _merge_diary_tags(material_tags: List[str], ai_tags: List[str]) -> List[str]
             continue
         merged.append(tag_text)
     return merged
+
+
+def _build_derivative_text_fallback(
+    dtype: str,
+    diary_excerpt: str,
+    weather_ctx: str,
+    emotion_ctx: str,
+) -> str:
+    """衍生创作兜底文案：当 AI 超时/失败时返回可读结果。"""
+    snippet = re.sub(r"\s+", " ", str(diary_excerpt or "").strip())
+    if not snippet:
+        snippet = "今天我记录了一些日常片段，也重新整理了自己的想法。"
+
+    if dtype == "novel":
+        return (
+            f"{weather_ctx}的这一天，我的情绪更偏向{emotion_ctx}。"
+            f"回头看这些经历，{snippet[:140]}。"
+            "当我把这些瞬间串起来时，才发现那些看似平常的细节，"
+            "其实都在悄悄塑造现在的我。"
+        )
+
+    # share_card
+    return f"{weather_ctx}的一天里，我带着{emotion_ctx}走过这些片段：{snippet[:48]}。"
 
 
 def _parse_csv_values(raw: str) -> List[str]:
@@ -944,8 +1009,18 @@ async def extract_diary_info(db: Session, user_id: str, diary_id: str) -> dict:
 async def generate_derivative(db: Session, user_id: str, diary_id: str, dtype: str) -> dict:
     """生成衍生内容（漫画/小说/分享卡）"""
     d = db.query(Diary).filter(Diary.id == diary_id, Diary.user_id == user_id).first()
+    # 兼容前端预览页兜底 diaryId='1' 的历史写法：回退到用户最近一篇日记。
+    if not d and str(diary_id).strip() == "1":
+        d = (
+            db.query(Diary)
+            .filter(Diary.user_id == user_id)
+            .order_by(Diary.created_at.desc())
+            .first()
+        )
     if not d:
         raise ApiException(code=NOT_FOUND, message="日记不存在", status_code=404)
+
+    target_diary_id = d.id
 
     allowed_types = {"comic", "novel", "share_card"}
     if dtype not in allowed_types:
@@ -980,7 +1055,15 @@ async def generate_derivative(db: Session, user_id: str, diary_id: str, dtype: s
             f"天气：{weather_ctx}；主要情绪：{emotion_ctx}。\n"
             f"日记内容：{diary_excerpt[:500]}"
         )
-        media_url = await client.generate_image(prompt, aspect_ratio="1:1")
+        try:
+            media_url = await asyncio.wait_for(
+                client.generate_image(prompt, aspect_ratio="1:1"),
+                timeout=DERIVATIVE_AI_TIMEOUT_SEC,
+            )
+        except Exception:
+            media_url = DERIVATIVE_COMIC_FALLBACK_IMAGE
+        if not media_url:
+            media_url = DERIVATIVE_COMIC_FALLBACK_IMAGE
     elif dtype == "novel":
         system_prompt = (
             "你是短篇小说改写编辑。"
@@ -998,7 +1081,25 @@ async def generate_derivative(db: Session, user_id: str, diary_id: str, dtype: s
             f"原始日记：\n{diary_excerpt}"
         )
         messages = [{"role": "user", "content": user_prompt}]
-        content = await client.chat_completion(messages, system_prompt=system_prompt, temperature=0.65)
+        try:
+            content = await asyncio.wait_for(
+                client.chat_completion(messages, system_prompt=system_prompt, temperature=0.65),
+                timeout=DERIVATIVE_AI_TIMEOUT_SEC,
+            )
+        except Exception:
+            content = _build_derivative_text_fallback(
+                dtype="novel",
+                diary_excerpt=diary_excerpt,
+                weather_ctx=weather_ctx,
+                emotion_ctx=emotion_ctx,
+            )
+        if not str(content or "").strip():
+            content = _build_derivative_text_fallback(
+                dtype="novel",
+                diary_excerpt=diary_excerpt,
+                weather_ctx=weather_ctx,
+                emotion_ctx=emotion_ctx,
+            )
     elif dtype == "share_card":
         system_prompt = (
             "你是社交平台分享文案编辑。"
@@ -1015,12 +1116,30 @@ async def generate_derivative(db: Session, user_id: str, diary_id: str, dtype: s
             f"日记内容：\n{diary_excerpt}"
         )
         messages = [{"role": "user", "content": user_prompt}]
-        content = await client.chat_completion(messages, system_prompt=system_prompt, temperature=0.55)
+        try:
+            content = await asyncio.wait_for(
+                client.chat_completion(messages, system_prompt=system_prompt, temperature=0.55),
+                timeout=DERIVATIVE_AI_TIMEOUT_SEC,
+            )
+        except Exception:
+            content = _build_derivative_text_fallback(
+                dtype="share_card",
+                diary_excerpt=diary_excerpt,
+                weather_ctx=weather_ctx,
+                emotion_ctx=emotion_ctx,
+            )
+        if not str(content or "").strip():
+            content = _build_derivative_text_fallback(
+                dtype="share_card",
+                diary_excerpt=diary_excerpt,
+                weather_ctx=weather_ctx,
+                emotion_ctx=emotion_ctx,
+            )
 
     from app.models.derivative import DiaryDerivative
     deriv = DiaryDerivative(
         id=_uuid(),
-        diary_id=diary_id,
+        diary_id=target_diary_id,
         type=dtype,
         content=content,
         media_url=media_url,
@@ -1034,7 +1153,7 @@ async def generate_derivative(db: Session, user_id: str, diary_id: str, dtype: s
     from app.diary.schemas import DerivativeOut
     return DerivativeOut(
         id=deriv.id,
-        diary_id=diary_id,
+        diary_id=target_diary_id,
         type=dtype,
         content=content,
         media_url=media_url,
