@@ -89,3 +89,6 @@ class TodaySummaryOut(CamelModel):
     has_diary: bool
     diary_id: Optional[str] = None
     diary_status: Optional[str] = None
+    greeting_user_name: str = "同学"
+    diary_count: int = 0
+    dominant_emotion: str = ""

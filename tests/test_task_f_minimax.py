@@ -171,3 +171,95 @@ def test_task_f_detect_duplicate_chat_material_non_mock_fallback_on_invalid_json
     assert result["duplicate_material_id"] is None
     assert result["reason"] == "json-parse-failed"
     assert result["confidence"] == 0.0
+
+
+def test_stream_chat_non_mock_char_mode_splits_chunk(monkeypatch):
+    client = _build_client(mock=False)
+
+    monkeypatch.setenv("CHAT_STREAM_CHAR_MODE", "true")
+    monkeypatch.setenv("CHAT_STREAM_CHAR_DELAY_SEC", "0")
+
+    class _FakeStreamResp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            yield 'data: {"choices": [{"delta": {"content": "你好"}}]}'
+            yield 'data: {"choices": [{"delta": {"content": "世界"}}]}'
+            yield "data: [DONE]"
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, *_args, **_kwargs):
+            return _FakeStreamResp()
+
+    monkeypatch.setattr("app.ai.minimax_client.httpx.AsyncClient", _FakeAsyncClient)
+
+    async def _collect() -> list[str]:
+        parts: list[str] = []
+        async for part in client.stream_chat([{"role": "user", "content": "hi"}]):
+            parts.append(part)
+        return parts
+
+    chunks = asyncio.run(_collect())
+    assert chunks == ["你", "好", "世", "界"]
+
+
+def test_stream_chat_non_mock_raw_mode_keeps_chunk(monkeypatch):
+    client = _build_client(mock=False)
+
+    monkeypatch.setenv("CHAT_STREAM_CHAR_MODE", "false")
+    monkeypatch.setenv("CHAT_STREAM_CHAR_DELAY_SEC", "0")
+
+    class _FakeStreamResp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            yield 'data: {"choices": [{"delta": {"content": "你好"}}]}'
+            yield 'data: {"choices": [{"delta": {"content": "世界"}}]}'
+            yield "data: [DONE]"
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, *_args, **_kwargs):
+            return _FakeStreamResp()
+
+    monkeypatch.setattr("app.ai.minimax_client.httpx.AsyncClient", _FakeAsyncClient)
+
+    async def _collect() -> list[str]:
+        parts: list[str] = []
+        async for part in client.stream_chat([{"role": "user", "content": "hi"}]):
+            parts.append(part)
+        return parts
+
+    chunks = asyncio.run(_collect())
+    assert chunks == ["你好", "世界"]
