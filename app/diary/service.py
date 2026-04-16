@@ -3,6 +3,7 @@
 实现日记 CRUD + AI 生成 + 衍生内容逻辑
 """
 import asyncio
+from collections import Counter
 import json
 import os
 import re
@@ -17,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.diary import Diary
 from app.models.material import RawMaterial
+from app.models.user import User
 from app.response import ApiException, NOT_FOUND, PARAM_ERROR
 
 
@@ -720,7 +722,6 @@ async def generate_diary(
 
     emotion_summary_for_prompt = _build_emotion_trend_from_materials(materials)
 
-    from app.models.user import User
     user = db.query(User).filter(User.id == user_id).first()
     user_style = ""
     if user and user.style_tags:
@@ -1192,11 +1193,39 @@ def get_today_summary(db: Session, user_id: str, date: str) -> dict:
             "emotion": em if em else None,
         })
 
-    diary = (
+    diaries = (
         db.query(Diary)
         .filter(Diary.user_id == user_id, Diary.date == date)
-        .first()
+        .order_by(Diary.created_at.desc())
+        .all()
     )
+    diary = diaries[0] if diaries else None
+
+    emotion_counter: Counter[str] = Counter()
+    for diary_item in diaries:
+        summary = _decode(diary_item.emotion_summary, {})
+        dominant = str(summary.get("dominant") or "").strip() if isinstance(summary, dict) else ""
+        if not dominant:
+            legacy_emotion = _decode(diary_item.emotion, {})
+            dominant = str(legacy_emotion.get("label") or "").strip() if isinstance(legacy_emotion, dict) else ""
+        if dominant:
+            emotion_counter[dominant] += 1
+
+    if not emotion_counter:
+        for material in materials:
+            material_emotion = mat_decode(material.emotion, {})
+            label = str(material_emotion.get("label") or "").strip() if isinstance(material_emotion, dict) else ""
+            if label:
+                emotion_counter[label] += 1
+
+    dominant_emotion = emotion_counter.most_common(1)[0][0] if emotion_counter else ""
+
+    user = db.query(User).filter(User.id == user_id).first()
+    greeting_user_name = "同学"
+    if user:
+        greeting_user_name = (user.name or "").strip() or (user.username or "").strip() or "同学"
+
+    diary_count = len(diaries)
 
     return {
         "date": date,
@@ -1205,6 +1234,9 @@ def get_today_summary(db: Session, user_id: str, date: str) -> dict:
         "has_diary": diary is not None,
         "diary_id": diary.id if diary else None,
         "diary_status": diary.status if diary else None,
+        "greeting_user_name": greeting_user_name,
+        "diary_count": diary_count,
+        "dominant_emotion": dominant_emotion,
     }
 
 

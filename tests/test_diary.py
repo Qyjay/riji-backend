@@ -1,7 +1,6 @@
 """
 日记模块测试
 """
-import pytest
 from app.diary.service import DIARY_MAX_EDITS
 from tests.conftest import create_test_user, get_auth_header
 
@@ -123,6 +122,38 @@ def test_today_summary_before_diary(client):
     assert "date" in d
     assert "materialCount" in d or "material_count" in d
     assert "hasDiary" in d or "has_diary" in d
+    assert "greetingUserName" in d or "greeting_user_name" in d
+    assert "diaryCount" in d or "diary_count" in d
+    assert "dominantEmotion" in d or "dominant_emotion" in d
+
+
+def test_today_summary_includes_dynamic_greeting_fields(client):
+    user_data = create_test_user(client, username="diary_summary_user")
+    headers = get_auth_header(user_data["token"])
+
+    # name 为空时会回退到 username，dominant_emotion 会从素材情绪聚合
+    client.post(
+        "/api/materials",
+        json={
+            "type": "text",
+            "content": "今天完成了不少任务",
+            "date": "2026-03-25",
+            "emotion": {"label": "开心", "score": 0.9, "emoji": "😊"},
+        },
+        headers=headers,
+    )
+
+    resp = client.get("/api/diaries/today-summary?date=2026-03-25", headers=headers)
+    assert resp.status_code == 200
+    d = resp.json()["data"]
+
+    greeting_name = d.get("greeting_user_name") or d.get("greetingUserName")
+    diary_count = d.get("diary_count") if "diary_count" in d else d.get("diaryCount")
+    dominant_emotion = d.get("dominant_emotion") if "dominant_emotion" in d else d.get("dominantEmotion")
+
+    assert isinstance(greeting_name, str) and greeting_name
+    assert diary_count == 0
+    assert dominant_emotion == "开心"
 
 
 def test_generate_derivative(client):

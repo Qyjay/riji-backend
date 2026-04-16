@@ -16,6 +16,7 @@ API 文档：https://platform.minimaxi.com/docs/guides/models-intro
 """
 import asyncio
 import json
+import os
 import random
 import re
 import time
@@ -162,6 +163,18 @@ class MiniMaxClient:
                 yield char
             return
 
+        char_mode = str(os.getenv("CHAT_STREAM_CHAR_MODE", "true")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        char_delay_raw = os.getenv("CHAT_STREAM_CHAR_DELAY_SEC", "0.008")
+        try:
+            char_delay = max(0.0, float(char_delay_raw))
+        except Exception:
+            char_delay = 0.008
+
         full_messages = []
         if system_prompt:
             full_messages.append({"role": "system", "content": system_prompt})
@@ -195,7 +208,13 @@ class MiniMaxClient:
                             delta = data.get("choices", [{}])[0].get("delta", {})
                             text = delta.get("content", "")
                             if text:
-                                yield text
+                                if char_mode and len(text) > 1:
+                                    for char in text:
+                                        yield char
+                                        if char_delay > 0:
+                                            await asyncio.sleep(char_delay)
+                                else:
+                                    yield text
                         except (json.JSONDecodeError, IndexError):
                             continue
         except httpx.HTTPStatusError as e:
