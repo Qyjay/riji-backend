@@ -829,13 +829,17 @@ interface ChatAttachment {
 ```typescript
 interface ChatSession {
   id: string
-  title: string                   // 对话段标题（AI 生成）
-  summary: string                 // 对话段摘要（AI 生成）
-  startTime: number               // 开始时间戳
-  endTime: number | null          // 结束时间戳
-  messageCount: number
-  mood: string                    // 情绪标签
+  title: string                   // 对话段标题（AI 生成，关闭前为空）
+  summary: string                 // 对话段摘要（AI 生成，关闭前为空）
+  startTime: number               // 开始时间戳（ms）
+  endTime: number | null          // 最后一条消息时间戳（ms）
+  messageCount: number            // 消息条数
+  mood: string                    // 情绪标签（AI 生成，关闭前为空）
   moodEmoji: string               // 情绪 emoji
+  status: 'open' | 'closed'      // open=进行中，closed=已关闭（已物化）
+  date: string                    // 归属日期 YYYY-MM-DD
+  topicTags: string[]             // 话题标签（AI 生成）
+  materialId: string | null       // 关联的 chat 素材 ID（closed 后才有）
 }
 ```
 
@@ -854,10 +858,12 @@ POST /chat
   message: string                              // 用户消息
   clientMessageId?: string                     // 前端消息 ID（可选，用于去重）
   attachments?: ChatAttachment[]               // 附件列表，默认 []
+  sessionId?: string                           // 指定发往的对话段 ID（可选）
 }
 ```
 
 > `message` 与 `attachments` 至少需要一项。
+> `sessionId` 不传时自动使用当前 open 对话段（超过静默阈值则新建）；传入时直接使用该对话段（若已关闭则自动重新打开）。
 
 **响应 `data`：**
 
@@ -922,7 +928,61 @@ GET /chat/history?limit={limit}
 - 如果用户没有任何聊天记录，返回一条 AI 欢迎消息
 - 按时间倒序返回最近的消息
 
-### 4.5 主动关闭当前对话段
+### 4.5 获取对话段列表
+
+```
+GET /chat/sessions
+```
+
+**需要认证：** ✅
+
+**Query 参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `page` | number | 1 | 页码（从 1 开始） |
+| `pageSize` | number | 20 | 每页条数（1-100） |
+
+**响应 `data`：**
+
+```typescript
+{
+  items: ChatSession[]                         // 对话段列表，按开始时间倒序
+  total: number                               // 总条数
+  page: number                                // 当前页
+  pageSize: number                            // 每页条数
+}
+```
+
+**实现说明：**
+- 返回该用户所有对话段（包括 open 和 closed 状态），按 `startTime` 倒序排列
+- 每个 `ChatSession` 包含 `status`、`topicTags`、`materialId` 等完整字段
+- 前端可用此接口渲染历史聊天列表页，点击某条进入 4.7 查看完整消息
+
+### 4.6 新建对话段
+
+```
+POST /chat/sessions
+```
+
+**需要认证：** ✅
+
+**请求体：** 无
+
+**响应 `data`：**
+
+```typescript
+{
+  session: ChatSession                         // 新建的对话段信息
+  oldSessionClosed: boolean                    // 是否关闭了旧的 open 对话段
+  materialGenerated: boolean                   // 是否为旧段生成了素材
+  materialId: string | null                    // 生成的素材 ID
+}
+```
+
+**实现说明：** 强制新建一个 open 对话段。若当前存在 open 的对话段，会先关闭并尝试物化（同 close-session 逻辑）。前端"新建对话"按钮调用此接口。
+
+### 4.7 主动关闭当前对话段
 
 ```
 POST /chat/close-session
@@ -944,7 +1004,7 @@ POST /chat/close-session
 
 **实现说明：** 关闭当前 open 状态的对话段。如果用户设置了自动生成素材，会调用 AI 总结对话内容并生成一条 chat 类型的素材。
 
-### 4.6 获取对话段消息
+### 4.8 获取对话段消息
 
 ```
 GET /chat/session/{sessionId}/messages
@@ -956,12 +1016,14 @@ GET /chat/session/{sessionId}/messages
 
 ```typescript
 {
-  session: ChatSession                         // 对话段信息
-  messages: ChatMessage[]                      // 该段内的所有消息
+  session: ChatSession                         // 对话段信息（含完整字段）
+  messages: ChatMessage[]                      // 该段内的所有消息，按时间升序
 }
 ```
 
-### 4.7 WebSocket 流式对话
+**实现说明：** 用于历史聊天详情页，展示某个对话段内的完整消息列表。
+
+### 4.9 WebSocket 流式对话
 
 ```
 WebSocket /ws/chat?token={jwt_token}
@@ -987,7 +1049,7 @@ WebSocket /ws/chat?token={jwt_token}
 
 **连接超时：** 30 秒内未发送消息则断开。
 
-### 4.8 文字转语音（TTS）
+### 4.10 文字转语音（TTS）
 
 ```
 POST /ai/tts
@@ -1006,7 +1068,7 @@ POST /ai/tts
 
 **响应 `data`：** `string` — 生成的音频文件 URL
 
-### 4.9 AI 运势生成
+### 4.11 AI 运势生成
 
 ```
 GET /ai/fortune
@@ -1999,10 +2061,12 @@ POST /avatar/matches/{matchId}/action
 | 26 | GET | `/diaries/search` | Diary | 搜索日记 |
 | 27 | POST | `/chat` | Chat | AI 对话（非流式） |
 | 28 | POST | `/chat/stream` | Chat | AI 对话（SSE 流式） |
-| 29 | GET | `/chat/history?limit=` | Chat | 聊天历史 |
-| 30 | POST | `/chat/close-session` | Chat | 关闭当前对话段 |
-| 31 | GET | `/chat/session/{sessionId}/messages` | Chat | 获取对话段消息 |
-| 32 | WS | `/ws/chat?token=` | Chat | WebSocket 流式对话 |
+| 29 | GET | `/chat/history?limit=` | Chat | 聊天历史（近期消息扁平列表） |
+| 30 | GET | `/chat/sessions` | Chat | 对话段列表（分页） |
+| 31 | POST | `/chat/sessions` | Chat | 新建对话段 |
+| 32 | POST | `/chat/close-session` | Chat | 关闭当前对话段 |
+| 33 | GET | `/chat/session/{sessionId}/messages` | Chat | 获取对话段消息 |
+| 34 | WS | `/ws/chat?token=` | Chat | WebSocket 流式对话 |
 | 33 | POST | `/ai/tts` | AI | 文字转语音 |
 | 34 | GET | `/ai/fortune` | AI | 运势生成 |
 | 35 | GET | `/user/profile` | User | 获取用户资料 |
