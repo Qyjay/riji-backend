@@ -19,7 +19,7 @@ from app.database import Base
 # 导入所有模型（autogenerate 需要 Base 知道所有表）
 from app.models import user, diary, chat, study, social  # noqa: F401
 from app.models import material, anniversary, derivative, user_profile  # noqa: F401
-from app.models import plaza, avatar  # noqa: F401
+from app.models import plaza, avatar, memory  # noqa: F401
 
 # Alembic 配置对象
 config = context.config

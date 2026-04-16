@@ -262,6 +262,9 @@ def create_material(db: Session, user_id: str, data: dict) -> dict:
     db.add(material)
     db.commit()
     db.refresh(material)
+    from app.memory.ingestion import ingest_material
+
+    ingest_material(db, material)
     return material_to_dict(material)
 
 
@@ -308,6 +311,9 @@ def update_material(db: Session, user_id: str, material_id: str, data: dict) -> 
 
     db.commit()
     db.refresh(m)
+    from app.memory.ingestion import ingest_material
+
+    ingest_material(db, m)
     return material_to_dict(m)
 
 
@@ -339,6 +345,9 @@ async def extract_emotion(db: Session, user_id: str, material_id: str) -> dict:
     m.emotion = _encode(emotion)
     db.commit()
     db.refresh(m)
+    from app.memory.ingestion import ingest_material
+
+    ingest_material(db, m)
     return emotion
 
 

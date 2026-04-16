@@ -41,6 +41,8 @@ from app.chat.service import (
     serialize_message,
     serialize_session,
 )
+from app.chat.web_search import search_web_for_chat
+from app.config import settings
 from app.dependencies import get_current_user, get_db
 from app.models.chat import ChatSession
 from app.models.user import User, UserSettings
@@ -59,6 +61,89 @@ def _now_ms() -> int:
 
 def _uuid() -> str:
     return str(uuid4())
+
+
+def _build_system_prompt(
+    web_context: str,
+    *,
+    web_search_requested: bool = False,
+) -> str:
+    if not web_context and not web_search_requested:
+        return SYSTEM_PROMPT
+    if web_search_requested and not web_context:
+        return (
+            f"{SYSTEM_PROMPT}\n\n"
+            "用户已开启联网搜索。你本轮已执行联网检索，但未拿到有效结果。"
+            "请直接说明“本轮未检索到可靠网页结果”，并基于已有知识给出尽可能有帮助的回答。"
+            "不要说“我无法联网”或“我没有联网能力”。"
+        )
+    return (
+        f"{SYSTEM_PROMPT}\n\n"
+        "以下是用户当前问题对应的联网搜索结果，请优先基于这些内容回答，"
+        "不要编造无法从搜索结果验证的信息；若信息不足，请明确说明。\n\n"
+        "用户已开启联网搜索，你本轮已经获得联网检索结果。"
+        "不要说“我无法联网”或“我没有联网能力”。\n\n"
+        f"{web_context}"
+    )
+
+
+def _build_prompt_with_memory(
+    db: Session,
+    *,
+    user_id: str,
+    query: str,
+    base_prompt: str,
+    scenario: str = "chat",
+) -> str:
+    """按场景检索长期记忆并附加到 system prompt，失败时静默降级。"""
+    if not getattr(settings, "MEMORY_ENABLED", True):
+        return base_prompt
+    try:
+        from app.memory.prompts import append_memory_to_system_prompt, format_memory_context
+        from app.memory.retriever import retrieve_memories
+
+        memories = retrieve_memories(
+            db,
+            user_id=user_id,
+            query=query,
+            scenario=scenario,
+            top_k=getattr(settings, "MEMORY_TOP_K", 6),
+        )
+        memory_context = format_memory_context(memories, scenario=scenario)
+        logger.info("[chat] memory retrieved=%s scenario=%s", len(memories), scenario)
+        return append_memory_to_system_prompt(base_prompt, memory_context, scenario=scenario)
+    except Exception as exc:
+        logger.warning("[chat] memory retrieval skipped: %s", str(exc))
+        return base_prompt
+
+
+def _sanitize_web_capability_claim(reply: str, *, web_search_requested: bool) -> str:
+    """
+    开启联网搜索时，兜底修正模型错误话术，避免出现“无法联网/没有联网能力”。
+    """
+    if not web_search_requested:
+        return reply
+    text = str(reply or "")
+    blocked_phrases = [
+        "我无法联网",
+        "我没法联网",
+        "我不能联网",
+        "我没有联网能力",
+        "我没有联网搜索能力",
+        "无法访问互联网",
+        "无法联网搜索",
+        "不能联网搜索",
+        "无法实时获取",
+    ]
+    if not any(phrase in text for phrase in blocked_phrases):
+        return text
+
+    for phrase in blocked_phrases:
+        text = text.replace(phrase, "本轮已尝试联网检索")
+
+    if text.startswith("<think>"):
+        return text
+    return f"说明：本轮已尝试联网检索。\n\n{text}"
 
 
 def _get_settings(db: Session, user_id: str) -> UserSettings:
@@ -134,8 +219,33 @@ async def ai_chat(
         db.commit()
         db.refresh(user_message)
 
+        web_attachments: list[dict] = []
+        web_context = ""
+        if body.use_web_search:
+            web_attachments, web_context = await search_web_for_chat(body.message)
+        logger.info(
+            "[chat] web_search requested=%s results=%s context_len=%s",
+            body.use_web_search,
+            len(web_attachments),
+            len(web_context),
+        )
+
         messages = list_session_messages_for_ai(db, current_session.id)
-        reply = await client.chat_completion(messages, system_prompt=SYSTEM_PROMPT)
+        base_system_prompt = _build_system_prompt(
+            web_context,
+            web_search_requested=body.use_web_search,
+        )
+        system_prompt = _build_prompt_with_memory(
+            db,
+            user_id=current_user.id,
+            query=body.message,
+            base_prompt=base_system_prompt,
+        )
+        reply = await client.chat_completion(
+            messages,
+            system_prompt=system_prompt,
+        )
+        reply = _sanitize_web_capability_claim(reply, web_search_requested=body.use_web_search)
 
         ai_now = _now_ms()
         assistant_message = create_chat_message(
@@ -145,6 +255,7 @@ async def ai_chat(
             content=reply,
             timestamp=ai_now,
             session_id=current_session.id,
+            attachments=web_attachments,
         )
         current_session.message_count = (current_session.message_count or 0) + 1
         current_session.end_time = ai_now
@@ -169,6 +280,10 @@ async def stream_response_generator(
     user_id: str,
     user_message_dict: dict,
     client_message_id: Optional[str],
+    web_attachments: list[dict],
+    web_context: str,
+    web_search_requested: bool,
+    memory_context: str,
 ):
     """SSE 流式生成器 — 自行管理 db session，避免 Depends(get_db) 生命周期冲突"""
     from app.ai.minimax_client import get_minimax_client
@@ -181,10 +296,46 @@ async def stream_response_generator(
     db = SessionLocal()
     full_reply = ""
     try:
+        if web_attachments:
+            yield (
+                f"data: {json.dumps({'type': 'web_search', 'results': web_attachments}, ensure_ascii=False)}\n\n"
+            )
+
         messages = list_session_messages_for_ai(db, session_id)
-        async for chunk in client.stream_chat(messages, system_prompt=SYSTEM_PROMPT):
-            full_reply += chunk
-            yield f"data: {json.dumps({'type': 'chunk', 'text': chunk}, ensure_ascii=False)}\n\n"
+        stream_system_prompt = _build_system_prompt(
+            web_context,
+            web_search_requested=web_search_requested,
+        )
+        if memory_context:
+            from app.memory.prompts import append_memory_to_system_prompt
+
+            stream_system_prompt = append_memory_to_system_prompt(
+                stream_system_prompt,
+                memory_context,
+                scenario="chat",
+            )
+
+        try:
+            async for chunk in client.stream_chat(
+                messages,
+                system_prompt=stream_system_prompt,
+            ):
+                full_reply += chunk
+                yield f"data: {json.dumps({'type': 'chunk', 'text': chunk}, ensure_ascii=False)}\n\n"
+        except Exception as stream_exc:
+            logger.warning("[chat/stream] stream failed, fallback to non-stream: %s", str(stream_exc))
+            fallback_reply = await client.chat_completion(
+                messages,
+                system_prompt=stream_system_prompt,
+            )
+            full_reply = fallback_reply
+            if fallback_reply:
+                yield f"data: {json.dumps({'type': 'chunk', 'text': fallback_reply}, ensure_ascii=False)}\n\n"
+
+        full_reply = _sanitize_web_capability_claim(
+            full_reply,
+            web_search_requested=web_search_requested,
+        )
 
         ai_now = _now_ms()
         assistant_message = create_chat_message(
@@ -194,6 +345,7 @@ async def stream_response_generator(
             content=full_reply,
             timestamp=ai_now,
             session_id=session_id,
+            attachments=web_attachments,
         )
         session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
         if session:
@@ -227,6 +379,17 @@ async def ai_chat_stream(
     if old_session:
         await close_and_materialize(db, old_session, settings)
 
+    web_attachments: list[dict] = []
+    web_context = ""
+    if body.use_web_search:
+        web_attachments, web_context = await search_web_for_chat(body.message)
+    logger.info(
+        "[chat/stream] web_search requested=%s results=%s context_len=%s",
+        body.use_web_search,
+        len(web_attachments),
+        len(web_context),
+    )
+
     user_message = create_chat_message(
         db,
         user_id=current_user.id,
@@ -247,6 +410,23 @@ async def ai_chat_stream(
     session_id = current_session.id
     user_id = current_user.id
     client_message_id = body.client_message_id
+    memory_context = ""
+    if getattr(settings, "MEMORY_ENABLED", True):
+        try:
+            from app.memory.prompts import format_memory_context
+            from app.memory.retriever import retrieve_memories
+
+            memories = retrieve_memories(
+                db,
+                user_id=user_id,
+                query=body.message,
+                scenario="chat",
+                top_k=getattr(settings, "MEMORY_TOP_K", 6),
+            )
+            memory_context = format_memory_context(memories, scenario="chat")
+            logger.info("[chat/stream] memory retrieved=%s", len(memories))
+        except Exception as exc:
+            logger.warning("[chat/stream] memory retrieval skipped: %s", str(exc))
 
     return StreamingResponse(
         stream_response_generator(
@@ -254,6 +434,10 @@ async def ai_chat_stream(
             user_id=user_id,
             user_message_dict=user_message_dict,
             client_message_id=client_message_id,
+            web_attachments=web_attachments,
+            web_context=web_context,
+            web_search_requested=body.use_web_search,
+            memory_context=memory_context,
         ),
         media_type="text/event-stream",
         headers={

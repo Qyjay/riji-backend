@@ -104,7 +104,7 @@ def _attachment_prompt_text(attachment: dict) -> str:
 def message_to_ai_payload(message: ChatMessage) -> dict:
     attachments = decode_attachments(message.attachments)
     parts = []
-    if attachments:
+    if message.role == "user" and attachments:
         parts.append("\n".join(_attachment_prompt_text(item) for item in attachments))
     if message.content:
         parts.append(message.content.strip())
@@ -152,6 +152,17 @@ def create_chat_message(
     return message
 
 
+def _ingest_closed_session_memory(db: Session, session: ChatSession) -> None:
+    """关闭会话后沉淀长期记忆；失败不影响原有素材生成流程。"""
+    try:
+        from app.memory.ingestion import ingest_chat_session
+
+        ingest_chat_session(db, session)
+    except Exception:
+        # ingest_chat_session 自身会记录 warning，这里兜底避免影响聊天。
+        pass
+
+
 async def close_and_materialize(
     db: Session,
     session: ChatSession,
@@ -166,16 +177,19 @@ async def close_and_materialize(
 
     if not getattr(settings, "chat_material_enabled", True):
         db.commit()
+        _ingest_closed_session_memory(db, session)
         return None
 
     min_rounds = getattr(settings, "chat_min_rounds", 3)
     user_msg_count = sum(1 for message in messages if message.role == "user")
     if user_msg_count < min_rounds:
         db.commit()
+        _ingest_closed_session_memory(db, session)
         return None
 
     if not messages:
         db.commit()
+        _ingest_closed_session_memory(db, session)
         return None
 
     msg_list = [message_to_ai_payload(message) for message in messages]
@@ -231,6 +245,7 @@ async def close_and_materialize(
     db.add(material)
     session.material_id = material.id
     db.commit()
+    _ingest_closed_session_memory(db, session)
     return material
 
 

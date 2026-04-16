@@ -295,3 +295,78 @@ def test_social_full_flow_with_messages_and_match_report(client):
     assert isinstance(report["commonPoints"], list)
     assert isinstance(report["differences"], list)
     assert report["analysis"]
+
+
+def test_match_report_prefers_avatar_card_context(client, db, monkeypatch):
+    """生成匹配报告时，应把 avatar_card 一并带入画像上下文。"""
+    from app.models.memory import AvatarCard
+    from app.social import service as social_service
+    import time
+    from uuid import uuid4
+
+    captured = {}
+
+    class FakeMiniMaxClient:
+        mock = False
+
+        async def generate_match_report(self, portrait_a, portrait_b):
+            captured["a"] = portrait_a
+            captured["b"] = portrait_b
+            return '{"compatibility":88,"analysis":"你们可以慢慢熟起来。","common_points":["都喜欢夜跑"],"differences":["社交节奏不同"]}'
+
+    monkeypatch.setattr(social_service, "get_minimax_client", lambda: FakeMiniMaxClient())
+
+    user1_data = create_test_user(client, username="socialcard1")
+    user2_data = create_test_user(client, username="socialcard2")
+    headers1 = get_auth_header(user1_data["token"])
+    headers2 = get_auth_header(user2_data["token"])
+    now = int(time.time() * 1000)
+
+    db.add(
+        AvatarCard(
+            id=str(uuid4()),
+            user_id=user1_data["user"]["id"],
+            display_name="一号分身",
+            public_summary="喜欢夜跑，也偏爱低压力社交。",
+            interest_tags='["夜跑"]',
+            social_intent='["认识一起运动的人"]',
+            conversation_style='{"tone":"自然"}',
+            boundaries='["不喜欢高压社交"]',
+            visibility="private",
+            updated_at=now,
+        )
+    )
+    db.add(
+        AvatarCard(
+            id=str(uuid4()),
+            user_id=user2_data["user"]["id"],
+            display_name="二号分身",
+            public_summary="最近在恢复跑步习惯。",
+            interest_tags='["夜跑","散步"]',
+            social_intent='["想认识新朋友"]',
+            conversation_style='{"tone":"温和"}',
+            boundaries='[]',
+            visibility="private",
+            updated_at=now,
+        )
+    )
+    db.commit()
+
+    req_resp = client.post(
+        "/api/social/match-requests",
+        json={"toUid": user2_data["user"]["id"]},
+        headers=headers1,
+    )
+    request_id = req_resp.json()["data"]["id"]
+    client.post(
+        f"/api/social/match-requests/{request_id}/respond",
+        json={"accept": True},
+        headers=headers2,
+    )
+
+    report_resp = client.get(f"/api/social/matches/{request_id}/report", headers=headers1)
+    assert report_resp.status_code == 200
+    assert report_resp.json()["data"]["compatibility"] == 88
+    assert "avatar_card" in captured["a"]
+    assert "avatar_card" in captured["b"]
+    assert captured["a"]["avatar_card"]["interest_tags"] == ["夜跑"]

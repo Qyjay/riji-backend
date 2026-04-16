@@ -1469,6 +1469,7 @@ GET /social/matches/{matchId}/report
 **实现说明：**
 - 如果已有缓存的报告（`match_report` 字段非空），直接返回
 - 否则调用 MiniMax AI 根据双方用户画像生成报告，并缓存到数据库
+- 如果存在 `AvatarCard`，会把双方分身名片放入匹配上下文；AI 不可用时返回 fail-open 默认报告
 - Mock 模式下返回预设的示例报告
 
 ### 6.7 响应匹配请求
@@ -1969,14 +1970,14 @@ POST /plaza/posts/{postId}/comments
 
 **响应 `data`：** 创建的 `PlazaComment` 对象
 
-### 9.8 AI 分身自动评论
+### 9.8 AI 分身评论草稿兼容入口
 
 ```
 POST /plaza/posts/{postId}/agent-comment
 ```
 
-> 后端根据当前用户的 AI 分身画像 + 帖子内容，自动生成评论并发布。
-> 前端无需传入评论内容，由 AI 生成。
+> 旧版本该接口会直接发布分身评论。现在它只生成评论草稿，不会直接公开发布。
+> 前端应展示草稿，并通过 `/avatar/actions/{actionId}/approve` 批准后再发布。
 
 **需要认证：** ✅
 
@@ -1986,7 +1987,9 @@ POST /plaza/posts/{postId}/agent-comment
 
 ```typescript
 {
-  comment: PlazaComment
+  action: AgentAction
+  requiresApproval: true
+  message: string
 }
 ```
 
@@ -2006,6 +2009,8 @@ GET /avatar/matches
 **响应 `data`：** `AgentMatch[]`
 
 **实现说明：**
+- 首次访问时会基于 `avatar_card`、结构化记忆、共享 `plaza_post_index` 和广场帖子自动生成推荐
+- `school_only=true` 的帖子只对同校用户参与推荐
 - 排除 `status="dismissed"` 的记录
 - 按 `matchScore` 降序
 
@@ -2026,6 +2031,249 @@ POST /avatar/matches/{matchId}/action
 ```
 
 **响应 `data`：** `null`
+
+---
+
+## 10. 记忆系统模块（Memory）
+
+统一记忆系统将日记、AI 对话、素材、广场帖子/评论、社交私聊沉淀为长期记忆，并为聊天、分身侧写和 agent-to-agent 行动提供上下文。
+
+### 10.1 搜索长期记忆
+
+```
+POST /memory/search
+```
+
+**需要认证：** ✅
+
+**请求体：**
+
+```typescript
+{
+  query: string
+  scenario?: 'chat' | 'profile_generation' | 'avatar_comment' | string
+  top_k?: number
+  source_types?: string[]
+}
+```
+
+**响应 `data`：** `MemorySearchItem[]`
+
+**说明：** 当前实现为 SQLite 关键词 fallback，向量索引入口保留在 `app/memory/indexer.py`。
+
+### 10.1.1 导出与删除全部记忆
+
+```
+GET /memory/export
+DELETE /memory/all
+```
+
+**需要认证：** ✅
+
+**说明：** 导出包含 documents、facts、profiles、avatarCards、agentActions；删除会清空当前用户的统一记忆数据。
+
+### 10.1.2 Agent-to-agent 安全上下文
+
+```
+POST /memory/agent-context
+```
+
+**请求体：**
+
+```typescript
+{
+  ownerUserId: string
+  query?: string
+  topK?: number
+}
+```
+
+**说明：** 只返回对方 `AvatarCard` 和 public/school/match_card 级别记忆摘要，不返回 private 原文。
+
+### 10.1.3 记忆维护
+
+```
+GET /memory/conflicts
+POST /memory/maintenance/decay
+```
+
+**说明：** `conflicts` 只提示潜在冲突；`decay` 对旧的低稳定性 facts 做置信度淡化。
+
+### 10.2 记忆文档列表
+
+```
+GET /memory/documents?source_type=&limit=50&offset=0
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** `MemoryDocument[]`
+
+### 10.3 记忆文档详情
+
+```
+GET /memory/documents/{documentId}
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** `MemoryDocument`
+
+### 10.4 删除记忆文档
+
+```
+DELETE /memory/documents/{documentId}
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** `null`
+
+**说明：** 软删除 document，并删除关联 chunks。
+
+### 10.5 抽取结构化记忆
+
+```
+POST /memory/documents/{documentId}/extract
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** `MemoryFact[]`
+
+**说明：** 从记忆原文中抽取兴趣、习惯、经历、关系、边界、需求等结构化事实。
+
+### 10.6 结构化记忆列表
+
+```
+GET /memory/facts?category=&active_only=true
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** `MemoryFact[]`
+
+### 10.7 更新结构化记忆
+
+```
+PUT /memory/facts/{factId}
+```
+
+**需要认证：** ✅
+
+**请求体：**
+
+```typescript
+{
+  content?: string
+  confidence?: number
+  is_active?: boolean
+  is_pinned?: boolean
+}
+```
+
+**响应 `data`：** `MemoryFact`
+
+### 10.8 重新生成记忆画像
+
+```
+POST /memory/profile/regenerate
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** `MemoryProfile`
+
+### 10.9 历史数据补索引
+
+```bash
+python scripts/reindex_memories.py
+python scripts/reindex_memories.py --user-id <user_id>
+python scripts/reindex_memories.py --source diary --source chat_session
+python scripts/reindex_memories.py --dry-run
+python scripts/reindex_memories.py --rebuild-vector-index
+python scripts/reindex_memories.py --progress-every 500 --fail-fast
+```
+
+**覆盖来源：** diary、material、chat_session、plaza_post、plaza_comment、social_message。
+
+**说明：** `--rebuild-vector-index` 会重建已有 `memory_chunks` 的可选向量索引；未开启 `MEMORY_VECTOR_ENABLED` 或未安装 ChromaDB 时安全 no-op。
+
+---
+
+## 11. AI 分身扩展模块（Avatar Memory / Actions）
+
+### 11.1 获取分身名片
+
+```
+GET /avatar/card
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** `AvatarCard`
+
+### 11.2 重新生成分身名片
+
+```
+POST /avatar/card/regenerate
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** `AvatarCard`
+
+### 11.3 分身行动列表
+
+```
+GET /avatar/actions?status=draft
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** `AgentAction[]`
+
+### 11.4 生成广场评论草稿
+
+```
+POST /avatar/actions/plaza-comment-draft
+```
+
+**需要认证：** ✅
+
+**请求体：**
+
+```typescript
+{
+  post_id: string
+}
+```
+
+**响应 `data`：** `AgentAction`
+
+**说明：** 只生成草稿，不直接发布。草稿会读取分身侧写与长期记忆，但提示词要求不得泄露私密原文。
+
+### 11.5 批准分身行动
+
+```
+POST /avatar/actions/{actionId}/approve
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** `AgentAction`
+
+**说明：** 当前支持批准 `comment_post`，会发布一条 `isAgent=true` 的广场评论。
+
+### 11.6 拒绝分身行动
+
+```
+POST /avatar/actions/{actionId}/reject
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** `AgentAction`
 
 ---
 

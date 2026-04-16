@@ -622,6 +622,9 @@ def update_diary(db: Session, user_id: str, diary_id: str, data: dict) -> dict:
     d.updated_at = _now_ms()
     db.commit()
     db.refresh(d)
+    from app.memory.ingestion import ingest_diary
+
+    ingest_diary(db, d)
     from app.diary.schemas import DiaryOut
     return DiaryOut(**diary_to_dict(d)).model_dump(by_alias=True)
 
@@ -714,6 +717,9 @@ async def generate_diary(
         db.commit()
 
         db.refresh(existing)
+        from app.memory.ingestion import ingest_diary
+
+        ingest_diary(db, existing)
         from app.diary.schemas import DiaryOut
 
         payload = DiaryOut(**diary_to_dict(existing)).model_dump(by_alias=True)
@@ -752,6 +758,9 @@ async def generate_diary(
     db.commit()
 
     db.refresh(d)
+    from app.memory.ingestion import ingest_diary
+
+    ingest_diary(db, d)
     from app.diary.schemas import DiaryOut
 
     payload = DiaryOut(**diary_to_dict(d)).model_dump(by_alias=True)

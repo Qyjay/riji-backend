@@ -14,6 +14,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
 from app.main import app
+from app.config import settings
 from app.upload.router import router as upload_router
 
 
@@ -78,13 +79,16 @@ _ensure_upload_router_registered_for_tests()
 @pytest.fixture(autouse=True)
 def setup_database():
     """每个测试前重建所有表，测试后删除（自动隔离）"""
+    original_vector_enabled = settings.MEMORY_VECTOR_ENABLED
+    settings.MEMORY_VECTOR_ENABLED = False
     # 导入所有模型确保 Base 知道它们
     from app.models import user, diary, chat, study, social  # noqa
     from app.models import material, anniversary, user_profile, derivative  # noqa
-    from app.models import plaza, avatar  # noqa
+    from app.models import plaza, avatar, memory  # noqa
     Base.metadata.create_all(bind=test_engine)
     yield
     Base.metadata.drop_all(bind=test_engine)
+    settings.MEMORY_VECTOR_ENABLED = original_vector_enabled
 
 
 @pytest.fixture

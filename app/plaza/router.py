@@ -13,6 +13,7 @@ from app.models.user import User
 from app.response import success
 from app.plaza import schemas, service
 from app.plaza.schemas import PlazaPostOut, PlazaCommentOut
+from app.avatar.schemas import AgentActionOut
 
 router = APIRouter(prefix="/plaza", tags=["广场"])
 
@@ -25,6 +26,11 @@ def _serialize_post(d: dict) -> dict:
 def _serialize_comment(d: dict) -> dict:
     """转 camelCase 输出"""
     return PlazaCommentOut(**d).model_dump(by_alias=True)
+
+
+def _serialize_action(d: dict) -> dict:
+    """转 camelCase 输出"""
+    return AgentActionOut(**d).model_dump(by_alias=True)
 
 
 @router.get("/posts", summary="帖子列表（分页 + 频道筛选 + 搜索）")
@@ -100,12 +106,16 @@ def add_comment(
     return success(_serialize_comment(result))
 
 
-@router.post("/posts/{post_id}/agent-comment", summary="AI 分身自动评论")
+@router.post("/posts/{post_id}/agent-comment", summary="AI 分身评论草稿（兼容入口）")
 async def agent_comment(
     post_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """根据用户分身画像 + 帖子内容，AI 自动生成评论并发布"""
+    """兼容旧接口：现在改为生成评论草稿，需用户审批后才会真正发布。"""
     result = await service.agent_comment(db, current_user, post_id)
-    return success({"comment": _serialize_comment(result)})
+    return success({
+        "action": _serialize_action(result["action"]),
+        "requiresApproval": bool(result.get("requires_approval")),
+        "message": result.get("message", ""),
+    })
