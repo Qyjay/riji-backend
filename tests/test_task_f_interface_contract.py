@@ -436,3 +436,27 @@ def test_diary_prompt_contains_task_f_chat_format():
     assert text.startswith("[对话记录] ")
     assert "(" in text and "~" in text and ")" in text
     assert text.endswith("和 AI 聊了今天的学习安排")
+
+
+def test_diary_prompt_chat_summary_normalized_to_first_person():
+    material = RawMaterial(
+        id=str(uuid4()),
+        user_id="u1",
+        type="chat",
+        content="用户和AI讨论了今天的学习进展，并总结了复习计划",
+        media_url="",
+        thumbnail_url="",
+        location="{}",
+        emotion="{}",
+        tags="[]",
+        date="2026-04-15",
+        created_at=1711440180000,
+        start_time=1711440180000,
+        end_time=1711440900000,
+    )
+
+    build_prompt_text = getattr(diary_service, "_build_materials_prompt_text")
+    text = build_prompt_text([material], "2026-04-15")
+
+    assert "用户和AI" not in text
+    assert "我和AI" in text

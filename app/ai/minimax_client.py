@@ -634,6 +634,114 @@ class MiniMaxClient:
             temperature=style_temperature[normalized_style],
         )
 
+    @staticmethod
+    def _normalize_chat_summary_to_first_person(text: str) -> str:
+        """将第三人称 chat 摘要归一成第一人称，便于写入素材/日记。"""
+        normalized = re.sub(r"\s+", " ", str(text or "").strip())
+        if not normalized:
+            return ""
+
+        replacements = [
+            ("用户和AI", "我和AI"),
+            ("用户与AI", "我和AI"),
+            ("用户跟AI", "我和AI"),
+            ("用户同AI", "我和AI"),
+            ("用户和 AI", "我和AI"),
+            ("用户与 AI", "我和AI"),
+            ("用户跟 AI", "我和AI"),
+            ("用户同 AI", "我和AI"),
+            ("用户：", "我："),
+            ("用户:", "我:"),
+        ]
+        for old, new in replacements:
+            normalized = normalized.replace(old, new)
+
+        return normalized
+
+    @classmethod
+    def _extract_material_snippets(cls, materials_text: str, max_items: int = 6) -> list[str]:
+        """从素材提示词中提取可读片段，用于本地降级成文。"""
+        snippets = []
+        for raw_line in str(materials_text or "").splitlines():
+            line = str(raw_line or "").strip()
+            if not line:
+                continue
+
+            # 去掉常见前缀：[09:30] [文字] / [对话记录] / (09:00~09:20)
+            line = re.sub(r"^\[[^\]]+\]\s*", "", line)
+            line = re.sub(r"^\[[^\]]+\]\s*", "", line)
+            line = re.sub(r"^\([^\)]+\)\s*", "", line)
+            line = re.sub(r"\s+", " ", line).strip("；;，,。 ")
+            line = cls._normalize_chat_summary_to_first_person(line)
+            if not line:
+                continue
+
+            if line not in snippets:
+                snippets.append(line)
+            if len(snippets) >= max_items:
+                break
+
+        return snippets
+
+    @classmethod
+    def _build_fallback_diary_content(
+        cls,
+        materials_text: str,
+        weather_hint: str = "",
+        special_hint: str = "",
+        dominant_emotion: str = "",
+    ) -> str:
+        """在模型失败时本地兜底生成连贯日记，避免原样拼接素材。"""
+        snippets = cls._extract_material_snippets(materials_text)
+        if not snippets:
+            snippets = ["今天没有记录太多细节，我给自己留了一点安静整理思绪的时间"]
+
+        intro = "今天我把一天里零散的片段慢慢回想了一遍。"
+        if weather_hint:
+            intro += f"{weather_hint}的天气，也让这一天有了更清晰的底色。"
+        if special_hint:
+            intro += f"对我来说，这一天还有一点特别：{special_hint}。"
+
+        timeline = [f"开始的时候，{snippets[0]}。"]
+        for item in snippets[1:-1]:
+            timeline.append(f"后来，{item}。")
+        if len(snippets) > 1:
+            timeline.append(f"到一天快结束时，{snippets[-1]}。")
+
+        mood = dominant_emotion or "平静"
+        closing = (
+            f"把这些经历串起来看，我的整体感受更偏向{mood}。"
+            "和 AI 聊过、也重新梳理过之后，我更清楚自己今天真正记住了什么。"
+        )
+
+        return "\n\n".join([intro, "".join(timeline), closing])
+
+    @staticmethod
+    def _build_first_person_chat_fallback_summary(messages: list[dict]) -> str:
+        """会话摘要 JSON 解析失败时，生成第一人称摘要兜底。"""
+        user_lines = []
+        ai_lines = []
+        for item in messages or []:
+            role = str((item or {}).get("role") or "")
+            content = re.sub(r"\s+", " ", str((item or {}).get("content") or "").strip())
+            if not content:
+                continue
+            if role == "user":
+                user_lines.append(content)
+            elif role == "assistant":
+                ai_lines.append(content)
+
+        parts = []
+        if user_lines:
+            parts.append(f"我和AI聊到了{user_lines[0][:60]}。")
+        if len(user_lines) > 1:
+            parts.append(f"我还提到了{user_lines[1][:60]}。")
+        if ai_lines:
+            parts.append(f"AI 的回应是{ai_lines[0][:60]}。")
+        parts.append("这段对话让我把想法梳理得更清楚，也更知道接下来该怎么做。")
+
+        return "".join(parts)
+
     async def generate_diary(
         self,
         materials_text: str,
@@ -719,6 +827,8 @@ class MiniMaxClient:
             "3. 不得遗漏核心素材；每条素材都要被合理吸收进叙事。\n"
             "4. 语言要自然，有画面感，但保持事实忠实。\n"
             "5. 正文不少于 300 字。\n\n"
+            "6. 若素材中包含“对话记录”，必须改写成第一人称经历（我和AI聊了什么、我怎么想），"
+            "不得直接复制“用户: / AI:”对话原文。\n\n"
             "【输出格式】\n"
             "仅输出合法 JSON，不要输出 markdown 代码块，不要输出任何解释文字。\n"
             "JSON 结构如下：\n"
@@ -749,9 +859,15 @@ class MiniMaxClient:
                     return json.loads(match.group(0))
                 raise
         except Exception:
+            fallback_content = self._build_fallback_diary_content(
+                materials_text,
+                weather_hint=weather_hint,
+                special_hint=special_hint,
+                dominant_emotion=dominant,
+            )
             return {
                 "title": "今日记录",
-                "content": materials_text,
+                "content": fallback_content,
                 "emotion_summary": {"dominant": dominant or "平静", "distribution": distribution},
                 "ai_tags": ["日常记录", "生活片段", "今日随记"],
             }
@@ -897,7 +1013,7 @@ class MiniMaxClient:
             await asyncio.sleep(0.3)
             return {
                 "title": "和 AI 的一段对话",
-                "summary": "用户和 AI 聊了一段有趣的对话，讨论了日常生活中的各种话题。",
+                "summary": "我和 AI 聊了今天的状态，也把自己在意的事梳理了一遍，这段对话让我更清楚接下来该怎么做。",
                 "mood": "平静",
                 "mood_emoji": "😌",
                 "tags": ["日常", "对话"]
@@ -908,11 +1024,16 @@ class MiniMaxClient:
             for m in messages
         ])
 
-        system_prompt = """你是一个对话分析助手。请分析以下对话内容，提取结构化信息。
+        system_prompt = """你是一个“对话素材整理助手”。请把对话整理为可沉淀到素材库的结构化信息。
+其中 summary 字段必须满足：
+1) 使用第一人称“我”来叙述；
+2) 体现“我和 AI 聊了什么 + 我当时的想法/感受 + 对我产生的帮助或变化”；
+3) 禁止使用“用户”作为主语，禁止写成“AI 总结/系统总结”的口吻。
+
 必须返回严格的 JSON 格式，不要包含任何其他文字：
 {
   "title": "简短标题（10字以内，概括对话主题）",
-  "summary": "2~3句话的摘要，描述对话的主要内容",
+    "summary": "2~4句话，第一人称，描述这段对话对我的意义",
   "mood": "情绪标签（开心/难过/平静/吐槽/焦虑/兴奋/感动/无聊/困惑/释然）",
   "mood_emoji": "对应的emoji（一个）",
   "tags": ["话题标签1", "话题标签2"]
@@ -926,15 +1047,28 @@ class MiniMaxClient:
         )
 
         try:
-            return json.loads(result_text)
+            payload = json.loads(result_text)
         except json.JSONDecodeError:
-            return {
-                "title": "对话记录",
-                "summary": conversation[:200],
-                "mood": "平静",
-                "mood_emoji": "😐",
-                "tags": ["对话"]
-            }
+            match = re.search(r"\{[\s\S]*\}", result_text)
+            if match:
+                try:
+                    payload = json.loads(match.group(0))
+                except Exception:
+                    payload = None
+            else:
+                payload = None
+
+        if isinstance(payload, dict):
+            payload["summary"] = self._normalize_chat_summary_to_first_person(payload.get("summary", ""))
+            return payload
+
+        return {
+            "title": "对话记录",
+            "summary": self._build_first_person_chat_fallback_summary(messages),
+            "mood": "平静",
+            "mood_emoji": "😐",
+            "tags": ["对话"]
+        }
 
     @staticmethod
     def _normalize_text(text: str) -> str:

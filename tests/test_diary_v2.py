@@ -1023,6 +1023,67 @@ class TestDiaryAI:
         rows = db.query(DiaryDerivative).filter(DiaryDerivative.diary_id == diary_id).all()
         assert rows == []
 
+    def test_generate_derivative_route_alias_plural_path(self, client: TestClient, db, monkeypatch):
+        """兼容路径 /diaries/{id}/derivatives 应与 /derivative 行为一致。"""
+        auth, headers = _create_user_with_material(client, "diary_der_alias")
+
+        gen_resp = client.post("/api/diaries/generate", json={"date": "2026-03-25"}, headers=headers)
+        assert gen_resp.status_code == 200
+        diary_id = gen_resp.json()["data"]["id"]
+
+        class FakeMiniMaxClient:
+            async def chat_completion(self, *args, **kwargs):
+                return "别名路由生成成功"
+
+        monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: FakeMiniMaxClient())
+
+        resp = client.post(f"/api/diaries/{diary_id}/derivatives", json={"type": "novel"}, headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["type"] == "novel"
+        assert data["content"] == "别名路由生成成功"
+
+    def test_generate_derivative_novel_timeout_fallback(self, client: TestClient, monkeypatch):
+        """小说生成在 AI 超时/失败时应返回可用兜底文案，而不是直接报错。"""
+        auth, headers = _create_user_with_material(client, "diary_der_to")
+
+        gen_resp = client.post("/api/diaries/generate", json={"date": "2026-03-25"}, headers=headers)
+        assert gen_resp.status_code == 200
+        diary_id = gen_resp.json()["data"]["id"]
+
+        class TimeoutMiniMaxClient:
+            async def chat_completion(self, *args, **kwargs):
+                raise TimeoutError("simulated-timeout")
+
+        monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: TimeoutMiniMaxClient())
+
+        resp = client.post(f"/api/diaries/{diary_id}/derivative", json={"type": "novel"}, headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["type"] == "novel"
+        assert isinstance(data["content"], str) and data["content"]
+
+    def test_generate_derivative_preview_legacy_id_fallback(self, client: TestClient, monkeypatch):
+        """兼容 preview 兜底 id=1：应自动回退到用户最近一篇日记。"""
+        auth, headers = _create_user_with_material(client, "diary_der_legacy")
+
+        gen_resp = client.post("/api/diaries/generate", json={"date": "2026-03-25"}, headers=headers)
+        assert gen_resp.status_code == 200
+        real_diary_id = gen_resp.json()["data"]["id"]
+
+        class FakeMiniMaxClient:
+            async def chat_completion(self, *args, **kwargs):
+                return "兜底ID成功生成小说"
+
+        monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: FakeMiniMaxClient())
+
+        # 前端 diaryId 丢失时会退回 '1'，后端应兼容。
+        resp = client.post("/api/diaries/1/derivative", json={"type": "novel"}, headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["diaryId"] == real_diary_id
+        assert data["content"] == "兜底ID成功生成小说"
+
 
 class TestDiarySearch:
     """日记搜索测试：多维度组合（AND）+ 同维度 OR。"""
