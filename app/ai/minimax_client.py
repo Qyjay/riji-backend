@@ -738,28 +738,30 @@ class MiniMaxClient:
     @staticmethod
     def _build_first_person_chat_fallback_summary(messages: list[dict]) -> str:
         """会话摘要 JSON 解析失败时，生成第一人称摘要兜底。"""
-        user_lines = []
-        ai_lines = []
+        turns = []
         for item in messages or []:
             role = str((item or {}).get("role") or "")
             content = re.sub(r"\s+", " ", str((item or {}).get("content") or "").strip())
             if not content:
                 continue
             if role == "user":
-                user_lines.append(content)
+                turns.append(f"我提到：{content[:50]}")
             elif role == "assistant":
-                ai_lines.append(content)
+                turns.append(f"AI回应：{content[:50]}")
 
-        parts = []
-        if user_lines:
-            parts.append(f"我和AI聊到了{user_lines[0][:60]}。")
-        if len(user_lines) > 1:
-            parts.append(f"我还提到了{user_lines[1][:60]}。")
-        if ai_lines:
-            parts.append(f"AI 的回应是{ai_lines[0][:60]}。")
-        parts.append("这段对话让我把想法梳理得更清楚，也更知道接下来该怎么做。")
+        if not turns:
+            return "我和AI聊了一会儿，也顺手把今天的想法梳理了一遍，这段对话让我更清楚接下来该做什么。"
 
-        return "".join(parts)
+        picked = turns[:8]
+        body = "；".join(picked)
+        suffix = "。"
+        if len(turns) > len(picked):
+            suffix = "；后面我们还继续围绕这些话题展开了更细的讨论。"
+
+        return (
+            f"我和AI进行了一段连续对话，{body}{suffix}"
+            "这段交流帮我把重点想法重新排了序，也让我更清楚下一步该怎么推进。"
+        )
 
     async def generate_diary(
         self,
@@ -1048,6 +1050,7 @@ class MiniMaxClient:
 1) 使用第一人称“我”来叙述；
 2) 体现“我和 AI 聊了什么 + 我当时的想法/感受 + 对我产生的帮助或变化”；
 3) 禁止使用“用户”作为主语，禁止写成“AI 总结/系统总结”的口吻。
+4) 不能只复述第一条用户消息，需覆盖对话中的多个关键来回。
 
 必须返回严格的 JSON 格式，不要包含任何其他文字：
 {

@@ -67,6 +67,7 @@ def derivative_to_dict(deriv: DiaryDerivative) -> dict:
         "diary_id": deriv.diary_id,
         "type": deriv.type,
         "content": deriv.content or "",
+        "media_url": deriv.media_url or "",
         "share_scope": deriv.share_scope or "private",
         "created_at": deriv.created_at,
     }

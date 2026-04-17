@@ -75,6 +75,29 @@ def test_task_f_summarize_chat_session_non_mock_fallback_on_invalid_json(monkeyp
     assert result["tags"] == ["对话"]
 
 
+def test_task_f_summarize_chat_session_fallback_covers_multiple_turns(monkeypatch):
+    client = _build_client(mock=False)
+
+    async def fake_chat_completion(*_args, **_kwargs):
+        return "not-a-json-payload"
+
+    monkeypatch.setattr(client, "chat_completion", fake_chat_completion)
+
+    messages = [
+        {"role": "user", "content": "第一件事是早上去跑步。"},
+        {"role": "assistant", "content": "听起来很棒，后面还做了什么？"},
+        {"role": "user", "content": "第二件事是中午和同学复盘项目。"},
+        {"role": "assistant", "content": "复盘后有什么收获？"},
+        {"role": "user", "content": "第三件事是晚上把关键改动都提交了。"},
+    ]
+
+    result = asyncio.run(client.summarize_chat_session(messages))
+
+    assert "第三件事" in result["summary"]
+    assert "用户:" not in result["summary"]
+    assert "AI:" not in result["summary"]
+
+
 def test_task_f_generate_diary_non_mock_fallback_returns_polished_text(monkeypatch):
     client = _build_client(mock=False)
 

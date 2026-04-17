@@ -5,6 +5,7 @@ TASK-F 3.x 接口契约测试
 import time
 from uuid import uuid4
 
+from app.chat.service import get_or_create_session
 from app.diary import service as diary_service
 from app.models.chat import ChatMessage, ChatSession
 from app.models.material import RawMaterial
@@ -90,6 +91,39 @@ def test_chat_contract_contains_meta_only_when_material_generated(client, db):
     assert "meta" in payload
     assert payload["meta"]["materialGenerated"] is True
     assert isinstance(payload["meta"]["materialId"], str)
+
+
+def test_get_or_create_session_rolls_over_when_day_changes(client, db):
+    user_data = create_test_user(client, username="taskf_rollover_user")
+    user_id = user_data["user"]["id"]
+
+    now = _now_ms()
+    yesterday = time.strftime("%Y-%m-%d", time.localtime((now // 1000) - 86400))
+
+    old_session = ChatSession(
+        id=str(uuid4()),
+        user_id=user_id,
+        status="open",
+        start_time=now - 120000,
+        end_time=now - 60000,
+        message_count=4,
+        date=yesterday,
+        created_at=now - 120000,
+    )
+    db.add(old_session)
+    db.commit()
+
+    current_session, closed_session = get_or_create_session(
+        db,
+        user_id=user_id,
+        now_ms=now,
+        silence_threshold_min=30,
+    )
+
+    assert closed_session is not None
+    assert closed_session.id == old_session.id
+    assert current_session.id != old_session.id
+    assert current_session.date == _today()
 
 
 def test_chat_contract_non_mock_path(client, monkeypatch):

@@ -37,7 +37,7 @@ DIARY_MAX_EDITS = _resolve_max_edits_default()
 
 def _resolve_derivative_ai_timeout_sec() -> int:
     """读取衍生创作 AI 调用超时时间，避免前端请求先超时。"""
-    raw = os.getenv("DERIVATIVE_AI_TIMEOUT_SEC", "8")
+    raw = os.getenv("DERIVATIVE_AI_TIMEOUT_SEC", "60")
     try:
         value = int(raw)
         return value if value > 0 else 8

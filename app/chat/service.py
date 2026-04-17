@@ -164,11 +164,18 @@ async def close_and_materialize(
     messages = list_session_messages(db, session.id)
     session.message_count = len(messages)
 
-    if not getattr(settings, "chat_material_enabled", True):
+    chat_material_enabled = getattr(settings, "chat_material_enabled", True)
+    if chat_material_enabled is False:
         db.commit()
         return None
 
-    min_rounds = getattr(settings, "chat_min_rounds", 3)
+    try:
+        min_rounds = int(getattr(settings, "chat_min_rounds", 3) or 3)
+    except Exception:
+        min_rounds = 3
+    if min_rounds < 1:
+        min_rounds = 1
+
     user_msg_count = sum(1 for message in messages if message.role == "user")
     if user_msg_count < min_rounds:
         db.commit()
@@ -244,6 +251,8 @@ def get_or_create_session(
     获取或创建当前 open 的 session。
     返回 (session, old_session_to_close_or_None)
     """
+    today = datetime.fromtimestamp(now_ms / 1000).strftime("%Y-%m-%d")
+
     open_session = (
         db.query(ChatSession)
         .filter(ChatSession.user_id == user_id, ChatSession.status == "open")
@@ -253,9 +262,9 @@ def get_or_create_session(
     if open_session:
         last_time = open_session.end_time or open_session.start_time
         silence_ms = silence_threshold_min * 60 * 1000
-        if (now_ms - last_time) > silence_ms:
+        is_cross_day = (open_session.date or "") != today
+        if is_cross_day or (now_ms - last_time) > silence_ms:
             old_session = open_session
-            today = datetime.fromtimestamp(now_ms / 1000).strftime("%Y-%m-%d")
             new_session = ChatSession(
                 id=_uuid(),
                 user_id=user_id,
@@ -271,7 +280,6 @@ def get_or_create_session(
             return new_session, old_session
         return open_session, None
 
-    today = datetime.fromtimestamp(now_ms / 1000).strftime("%Y-%m-%d")
     new_session = ChatSession(
         id=_uuid(),
         user_id=user_id,

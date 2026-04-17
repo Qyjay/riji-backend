@@ -26,6 +26,7 @@ from app.chat.schemas import (
     CloseSessionOut,
     CreateSessionOut,
     SessionListOut,
+    SessionMessageOut,
     SessionMessagesOut,
 )
 from app.chat.service import (
@@ -33,7 +34,6 @@ from app.chat.service import (
     create_chat_message,
     create_new_session,
     get_history,
-    get_or_create_session,
     get_session_for_message,
     list_session_messages,
     list_session_messages_for_ai,
@@ -64,7 +64,23 @@ def _uuid() -> str:
 def _get_settings(db: Session, user_id: str) -> UserSettings:
     settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
     if not settings:
-        settings = UserSettings(user_id=user_id)
+        settings = UserSettings(
+            user_id=user_id,
+            chat_material_enabled=True,
+            chat_silence_threshold=30,
+            chat_material_toast=True,
+            chat_min_rounds=3,
+        )
+        return settings
+
+    if settings.chat_material_enabled is None:
+        settings.chat_material_enabled = True
+    if settings.chat_silence_threshold is None:
+        settings.chat_silence_threshold = 30
+    if settings.chat_material_toast is None:
+        settings.chat_material_toast = True
+    if settings.chat_min_rounds is None:
+        settings.chat_min_rounds = 3
     return settings
 
 
