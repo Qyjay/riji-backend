@@ -94,6 +94,16 @@ def list_comments(
     return success([_serialize_comment(item) for item in items])
 
 
+@router.get("/comments/inbox", summary="我的评论与分身评论流")
+def list_my_comment_threads(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """获取用户本人/分身的评论，以及别人对这些评论的回复。"""
+    items = service.list_my_comment_threads(db, current_user)
+    return success([_serialize_comment(item) for item in items])
+
+
 @router.post("/posts/{post_id}/comments", summary="添加评论")
 def add_comment(
     post_id: str,
@@ -109,11 +119,12 @@ def add_comment(
 @router.post("/posts/{post_id}/agent-comment", summary="AI 分身评论草稿（兼容入口）")
 async def agent_comment(
     post_id: str,
+    body: schemas.AgentCommentRequest = schemas.AgentCommentRequest(),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """兼容旧接口：现在改为生成评论草稿，需用户审批后才会真正发布。"""
-    result = await service.agent_comment(db, current_user, post_id)
+    result = await service.agent_comment(db, current_user, post_id, body.parent_comment_id)
     return success({
         "action": _serialize_action(result["action"]),
         "requiresApproval": bool(result.get("requires_approval")),

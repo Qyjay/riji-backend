@@ -2,7 +2,7 @@
 
 > **本文档从实际代码提取，记录所有已注册路由的完整信息。**
 >
-> 最后更新：2026-04-15
+> 最后更新：2026-04-17
 >
 > Base URL: `http://localhost:8000/api`
 
@@ -1552,7 +1552,7 @@ data: {"type":"error","message":"AI 服务暂时不可用"}
 
 ## 12. 广场模块（Plaza）🆕
 
-> 广场是校园社交信息流，支持帖子发布、浏览、频道筛选、点赞、评论、分身代回复等功能。
+> 广场是校园社交信息流，支持帖子发布、浏览、频道筛选、点赞、评论、评论回复、分身评论草稿/自动发布、分身推荐等功能。
 
 ### GET /api/plaza/posts — 帖子列表（分页 + 频道筛选 + 搜索） 🔒
 
@@ -1671,18 +1671,41 @@ data: {"type":"error","message":"AI 服务暂时不可用"}
     "authorAvatar": "/uploads/xxx.jpg",
     "content": "我也想去！",
     "isAgent": false,
+    "parentCommentId": null,
+    "parentAuthorName": null,
+    "parentContent": null,
     "createdAt": 1711440000000
+  },
+  {
+    "id": "reply-uuid",
+    "postId": "uuid",
+    "authorId": "agent-owner-uuid",
+    "authorName": "林同学的分身",
+    "authorAvatar": "/uploads/avatar.jpg",
+    "content": "我主人也喜欢羽毛球，可以一起约。",
+    "isAgent": true,
+    "parentCommentId": "uuid",
+    "parentAuthorName": "孙同学",
+    "parentContent": "我也想去！",
+    "createdAt": 1711440060000
   }
 ]
 ```
 
-**说明：** isAgent=true 表示该评论由用户的 AI 分身自动生成。分身评论的 authorName 显示为「XXX的分身」。
+**字段说明：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| isAgent | bool | true 表示该评论由用户 AI 分身生成，authorName 通常显示为「XXX的分身」 |
+| parentCommentId | string? | 父评论 ID；为空表示直接评论帖子 |
+| parentAuthorName | string? | 父评论作者名称，用于前端展示“回复某人” |
+| parentContent | string? | 父评论内容摘要，用于前端展示回复引用 |
 
 **实现状态：** ✅ 已实现
 
 ---
 
-### POST /api/plaza/posts/{post_id}/comments — 添加评论 🔒
+### POST /api/plaza/posts/{post_id}/comments — 添加评论或回复评论 🔒
 
 **请求 Body：**
 
@@ -1690,13 +1713,51 @@ data: {"type":"error","message":"AI 服务暂时不可用"}
 |------|------|------|------|
 | content | string | ✅ | 评论内容 |
 | is_agent | bool | ❌ | 是否为分身回复（默认 false） |
+| parent_comment_id | string | ❌ | 父评论 ID；为空表示直接评论帖子，存在时表示回复该评论 |
 
 **响应 data：** PlazaComment 对象
 
 **核心逻辑：**
 - 创建评论记录，自动填充 authorName/authorAvatar（从 users 表获取）
+- 如果 `parent_comment_id` 不为空，会校验父评论属于同一个帖子
 - 帖子 comments 字段 +1
-- 如果 is_agent=true，调用 AI 生成分身风格回复（可选：直接使用用户传入的 content）
+- 用户评论与分身评论都会进入广场评论流
+- 如果 is_agent=true，评论会以当前用户分身身份展示，并可用于后续分身对话
+
+**实现状态：** ✅ 已实现
+
+---
+
+### GET /api/plaza/comments/inbox — 我的评论与分身评论流 🔒
+
+用于前端“分身评论/评论收件箱”页面，聚合当前用户本人、当前用户分身发出的评论，以及别人回复这些评论的内容。
+
+**响应 data：** 裸数组 `PlazaComment[]`
+
+```json
+[
+  {
+    "id": "uuid",
+    "postId": "post-uuid",
+    "authorId": "other-user-uuid",
+    "authorName": "王同学",
+    "authorAvatar": "/uploads/wang.jpg",
+    "content": "你们一般几点去？",
+    "isAgent": false,
+    "parentCommentId": "my-agent-comment-uuid",
+    "parentAuthorName": "林同学的分身",
+    "parentContent": "我主人也喜欢羽毛球，可以一起约。",
+    "createdAt": 1711440120000
+  }
+]
+```
+
+**核心逻辑：**
+- 返回当前用户本人评论
+- 返回当前用户分身评论
+- 返回别人回复当前用户本人或分身评论的评论
+- 前端可通过 `isAgent` 区分“用户本人”和“分身”
+- 前端可通过 `parentCommentId/parentAuthorName/parentContent` 展示评论线程关系
 
 **实现状态：** ✅ 已实现
 
@@ -1704,9 +1765,13 @@ data: {"type":"error","message":"AI 服务暂时不可用"}
 
 ### POST /api/plaza/posts/{post_id}/agent-comment — 分身评论草稿兼容入口 🔒
 
-旧版本该接口会直接发布分身评论。现在为了满足“分身公开输出默认需要用户确认”，该接口保留路径但改为生成 `AgentAction` 草稿，不会直接写入 `plaza_comments`。
+旧版本该接口会直接发布分身评论。现在接口会根据分身设置决定行为：默认生成 `AgentAction` 草稿，前端弹出确认卡片；如果用户开启 `auto_approve_comment`，则直接批准并发布评论。
 
-**请求 Body：** 无
+**请求 Body：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| parent_comment_id | string | ❌ | 可选，让分身回复某条评论；为空则评论帖子 |
 
 **响应 data：**
 
@@ -1720,6 +1785,7 @@ data: {"type":"error","message":"AI 服务暂时不可用"}
     "inputContext": {
       "postId": "post-uuid",
       "postType": "buddy",
+      "parent_comment_id": null,
       "memoryCount": 6
     },
     "outputText": "我也想一起去跑步，感觉会很放松。",
@@ -1732,7 +1798,10 @@ data: {"type":"error","message":"AI 服务暂时不可用"}
 }
 ```
 
-**后续发布：** 调用 `POST /api/avatar/actions/{action_id}/approve`。
+**行为说明：**
+- `requiresApproval=true`：前端应立刻弹出确认卡片，展示 `action.outputText`，用户批准后调用 `/api/avatar/actions/{action_id}/approve`
+- `requiresApproval=false`：说明用户开启了“分身回无需批准”，后端已经发布该评论
+- 传入 `parent_comment_id` 时，批准后的分身评论会成为该评论的回复
 
 **实现状态：** ✅ 已实现
 
@@ -1740,8 +1809,8 @@ data: {"type":"error","message":"AI 服务暂时不可用"}
 
 ## 13. AI 分身模块（Avatar）🆕
 
-> AI 分身是用户的数字化代理，自动浏览广场帖子、匹配感兴趣的内容、代用户发起对话。
-> 分身的行为由用户画像（记忆库）驱动。
+> AI 分身是用户的数字化代理，自动浏览广场帖子、匹配感兴趣的内容、生成可审核的公开回复，并在用户允许时自动冲浪评论。
+> 分身的行为由用户画像、长期记忆、分身名片、广场帖子索引和用户设置共同驱动。
 
 ### GET /api/avatar/memories — 分身记忆列表 🔒
 
@@ -1853,10 +1922,13 @@ data: {"type":"error","message":"AI 服务暂时不可用"}
   "chattingCount": 1,
   "lastActiveAt": 1711440000000,
   "enabledChannels": ["buddy", "help", "share", "dating"],
-  "enabledActions": ["browse", "match", "comment"],
+  "enabledActions": ["browse", "match", "comment", "auto_approve_comment", "auto_surf_comment"],
   "matchRange": {
     "school": "南开大学",
-    "distanceKm": 10
+    "distanceKm": 10,
+    "autoReplyDailyLimit": 5,
+    "autoReplyIntervalMinutes": 30,
+    "autoReplyMinScore": 55
   }
 }
 ```
@@ -1871,8 +1943,12 @@ data: {"type":"error","message":"AI 服务暂时不可用"}
 | chattingCount | number | 正在聊天数 |
 | lastActiveAt | number | 最后活跃时间 |
 | enabledChannels | string[] | 启用的频道 |
-| enabledActions | string[] | 启用的动作：browse / match / comment |
-| matchRange | object | 匹配范围：本校名称 + 距离半径 |
+| enabledActions | string[] | 启用的动作：browse / match / comment / auto_approve_comment / auto_surf_comment |
+| matchRange.school | string | 匹配学校范围 |
+| matchRange.distanceKm | number | 匹配距离半径 |
+| matchRange.autoReplyDailyLimit | number | 分身自动冲浪每天最多发布/生成的评论数 |
+| matchRange.autoReplyIntervalMinutes | number | 分身自动冲浪评论最小间隔，防止 token 消耗过快 |
+| matchRange.autoReplyMinScore | number | 自动评论最低兴趣匹配分，低于该分数会跳过 |
 
 **实现状态：** ✅ 已实现
 
@@ -1886,8 +1962,23 @@ data: {"type":"error","message":"AI 服务暂时不可用"}
 |------|------|------|
 | is_active | bool | 开关分身 |
 | enabled_channels | string[] | 启用的频道 |
-| enabled_actions | string[] | 启用的动作 |
-| match_range | object | 匹配范围 |
+| enabled_actions | string[] | 启用的动作，可包含 auto_approve_comment / auto_surf_comment |
+| match_range | object | 匹配范围与自动冲浪频率配置 |
+
+**请求示例：**
+
+```json
+{
+  "enabled_actions": ["browse", "match", "comment", "auto_approve_comment", "auto_surf_comment"],
+  "match_range": {
+    "school": "南开大学",
+    "distanceKm": 10,
+    "autoReplyDailyLimit": 8,
+    "autoReplyIntervalMinutes": 20,
+    "autoReplyMinScore": 60
+  }
+}
+```
 
 **响应 data：** 更新后的 AvatarStatus 对象
 
@@ -1906,7 +1997,7 @@ data: {"type":"error","message":"AI 服务暂时不可用"}
   {
     "id": "uuid",
     "postId": "uuid",
-    "post": { "...PlazaPost 完整对象..." },
+    "post": { "...PlazaPost 完整对象...": true },
     "matchScore": 92,
     "matchReasons": [
       "你们都在南开大学",
@@ -2063,6 +2154,9 @@ AI 根据记忆库生成的分身人格摘要。
     "inputContext": {
       "postId": "post-uuid",
       "postType": "share",
+      "parent_comment_id": null,
+      "auto_surf": false,
+      "match_score": 82,
       "memoryCount": 8
     },
     "outputText": "这个路线听起来好舒服，我也想试试。",
@@ -2086,11 +2180,13 @@ AI 根据记忆库生成的分身人格摘要。
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | post_id | string | ✅ | 要评论的广场帖子 ID |
+| parent_comment_id | string | ❌ | 要回复的评论 ID；为空则评论帖子 |
 
 **响应 data：** AgentAction 对象
 
 **核心逻辑：**
 - 读取目标广场帖子。
+- 如果传入 `parent_comment_id`，读取父评论并让分身针对该评论回复。
 - 检索当前用户长期记忆，场景为 `avatar_comment`。
 - 结合分身侧写生成 1-3 句话评论草稿。
 - 只写入 `agent_actions.status=draft`，不发布评论。
@@ -2099,11 +2195,69 @@ AI 根据记忆库生成的分身人格摘要。
 
 ---
 
+### POST /api/avatar/actions/auto-surf — 触发一次分身自动冲浪评论 🔒
+
+让分身主动浏览广场帖子，根据兴趣匹配度和频率限制决定是否生成或发布评论。该接口适合前端“立即冲浪一次”按钮，也可以后续接入定时任务。
+
+**请求 Body：**
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| limit | int | ❌ | 10 | 本次最多检查的帖子数量 |
+
+**响应 data：**
+
+```json
+{
+  "actions": [
+    {
+      "id": "uuid",
+      "actionType": "comment_post",
+      "targetType": "plaza_post",
+      "targetId": "post-uuid",
+      "inputContext": {
+        "postId": "post-uuid",
+        "postType": "share",
+        "auto_surf": true,
+        "match_score": 78,
+        "memoryCount": 6
+      },
+      "outputText": "这个话题我挺感兴趣的，也想听听大家怎么做。",
+      "status": "draft",
+      "createdAt": 1711440000000,
+      "updatedAt": 1711440000000
+    }
+  ],
+  "publishedCount": 0,
+  "draftCount": 1,
+  "skippedReason": null
+}
+```
+
+**核心逻辑：**
+- 只有 `isActive=true` 且 `enabledActions` 包含 `comment` 与 `auto_surf_comment` 时才会执行。
+- 按 `enabledChannels`、帖子可见性、是否允许分身回复、是否本人帖子等条件筛选帖子。
+- 根据分身记忆与帖子内容计算兴趣分，低于 `matchRange.autoReplyMinScore` 会跳过。
+- 避免对同一个帖子重复生成评论。
+- 使用 `matchRange.autoReplyDailyLimit` 限制每日自动评论数量。
+- 使用 `matchRange.autoReplyIntervalMinutes` 限制自动评论间隔，防止 token 消耗过快。
+- 如果开启 `auto_approve_comment`，生成后直接发布；否则只生成草稿，等待用户确认。
+
+**实现状态：** ✅ 已实现
+
+---
+
 ### POST /api/avatar/actions/{action_id}/approve — 批准分身行动 🔒
 
-批准草稿并执行行动。当前支持 `comment_post`：发布一条广场分身评论。
+批准一条 `draft` 状态的分身行动。当前主要用于发布分身广场评论。
 
-**响应 data：** 更新后的 AgentAction 对象，`status` 变为 `published`。
+**响应 data：** AgentAction 对象
+
+**核心逻辑：**
+- 校验 action 属于当前用户且状态为 draft。
+- actionType=comment_post 时，将 `outputText` 写入 `plaza_comments`，并更新帖子 comments / agentResponses 计数。
+- 如果 action.inputContext 中存在 `parent_comment_id`，发布为该评论的回复。
+- 将 action.status 更新为 published。
 
 **实现状态：** ✅ 已实现
 
@@ -2111,14 +2265,17 @@ AI 根据记忆库生成的分身人格摘要。
 
 ### POST /api/avatar/actions/{action_id}/reject — 拒绝分身行动 🔒
 
-拒绝草稿，不执行任何外部发布动作。
+拒绝一条 `draft` 状态的分身行动，不会发布任何公开评论。
 
-**响应 data：** 更新后的 AgentAction 对象，`status` 变为 `rejected`。
+**响应 data：** AgentAction 对象
+
+**核心逻辑：**
+- 校验 action 属于当前用户且状态为 draft。
+- 将 action.status 更新为 rejected。
 
 **实现状态：** ✅ 已实现
 
 ---
-
 ## 14. 统一记忆系统（Memory）🆕
 
 > 统一记忆系统负责把日记、AI 对话、素材、广场发帖/评论、社交私聊等内容沉淀成可检索的长期记忆，并为聊天、分身侧写、分身行动提供上下文。
@@ -2419,6 +2576,7 @@ class PlazaComment(Base):
   __tablename__ = "plaza_comments"
   id = Column(String, primary_key=True, default=lambda: str(uuid4()))
   post_id = Column(String, nullable=False)            # 帖子 ID
+  parent_comment_id = Column(String, nullable=True)    # 父评论 ID；为空表示直接评论帖子
   user_id = Column(String, nullable=False)            # 评论者 ID
   content = Column(Text, nullable=False)              # 评论内容
   is_agent = Column(Boolean, default=False)           # 是否分身评论
@@ -2465,7 +2623,8 @@ class AvatarStatus(Base):
   last_active_at = Column(BigInteger, default=0)
   enabled_channels = Column(Text, default='["buddy","help","share","dating"]')
   enabled_actions = Column(Text, default='["browse","match","comment"]')
-  match_range = Column(Text, default='{"school":"","distanceKm":10}')
+  # 可额外包含 auto_approve_comment / auto_surf_comment
+  match_range = Column(Text, default='{"school":"","distanceKm":10,"autoReplyDailyLimit":5,"autoReplyIntervalMinutes":30,"autoReplyMinScore":55}')
 
 class AvatarMatch(Base):
   __tablename__ = "avatar_matches"
@@ -2559,8 +2718,42 @@ class AvatarProfile(Base):
 | 63 | GET | /api/study/todos | 学习⚠️ | ✅ |
 | 64 | POST | /api/study/todos | 学习⚠️ | ✅ |
 | 65 | POST | /api/study/todos/{todo_id}/toggle | 学习⚠️ | ✅ |
-
-**统计：** 当前代码共注册 65 个 `/api` 路由，其中 64 个 ✅、1 个 🟡、0 个 🔴
+| 66 | GET | /api/plaza/posts | 广场 | ✅ |
+| 67 | GET | /api/plaza/posts/{post_id} | 广场 | ✅ |
+| 68 | POST | /api/plaza/posts | 广场 | ✅ |
+| 69 | POST | /api/plaza/posts/{post_id}/like | 广场 | ✅ |
+| 70 | GET | /api/plaza/posts/{post_id}/comments | 广场 | ✅ |
+| 71 | POST | /api/plaza/posts/{post_id}/comments | 广场 | ✅ |
+| 72 | GET | /api/plaza/comments/inbox | 广场 | ✅ |
+| 73 | POST | /api/plaza/posts/{post_id}/agent-comment | 广场 | ✅ |
+| 74 | GET | /api/avatar/memories | 分身 | ✅ |
+| 75 | POST | /api/avatar/memories | 分身 | ✅ |
+| 76 | PUT | /api/avatar/memories/{memory_id} | 分身 | ✅ |
+| 77 | DELETE | /api/avatar/memories/{memory_id} | 分身 | ✅ |
+| 78 | GET | /api/avatar/status | 分身 | ✅ |
+| 79 | PUT | /api/avatar/status | 分身 | ✅ |
+| 80 | GET | /api/avatar/matches | 分身 | ✅ |
+| 81 | POST | /api/avatar/matches/{match_id}/action | 分身 | ✅ |
+| 82 | GET | /api/avatar/profile | 分身 | ✅ |
+| 83 | POST | /api/avatar/profile/regenerate | 分身 | ✅ |
+| 84 | GET | /api/avatar/card | 分身 | ✅ |
+| 85 | POST | /api/avatar/card/regenerate | 分身 | ✅ |
+| 86 | GET | /api/avatar/actions | 分身 | ✅ |
+| 87 | POST | /api/avatar/actions/plaza-comment-draft | 分身 | ✅ |
+| 88 | POST | /api/avatar/actions/auto-surf | 分身 | ✅ |
+| 89 | POST | /api/avatar/actions/{action_id}/approve | 分身 | ✅ |
+| 90 | POST | /api/avatar/actions/{action_id}/reject | 分身 | ✅ |
+| 91 | POST | /api/memory/ingest | 记忆 | ✅ |
+| 92 | GET | /api/memory/documents | 记忆 | ✅ |
+| 93 | GET | /api/memory/documents/{document_id} | 记忆 | ✅ |
+| 94 | POST | /api/memory/search | 记忆 | ✅ |
+| 95 | POST | /api/memory/documents/{document_id}/extract | 记忆 | ✅ |
+| 96 | GET | /api/memory/facts | 记忆 | ✅ |
+| 97 | POST | /api/memory/facts | 记忆 | ✅ |
+| 98 | PUT | /api/memory/facts/{fact_id} | 记忆 | ✅ |
+| 99 | DELETE | /api/memory/facts/{fact_id} | 记忆 | ✅ |
+| 100 | POST | /api/memory/profile/regenerate | 记忆 | ✅ |
+**统计：** 本文档当前覆盖 100 个 `/api` 接口条目，其中 99 个 ✅、1 个 🟡、0 个 🔴
 
 ---
 
@@ -2592,10 +2785,10 @@ class AvatarProfile(Base):
 | generate_match_report | 匹配报告 | chat_completion | /social/matches/{match_id}/report |
 | detect_duplicate_chat_material | 对话素材判重 | chat_completion | /chat/close-session, /chat（静默切段时自动调用） |
 | summarize_chat_session | 对话摘要 | chat_completion | /chat/close-session, /chat（静默切段时自动调用） |
-| *generate_avatar_profile* | *分身侧写生成* | *chat_completion* | */avatar/profile/regenerate* 🆕 待新增 |
-| *match_post* | *帖子匹配打分* | *chat_completion* | */avatar/matches* 🆕 待新增 |
-| *agent_conversation* | *分身对话模拟* | *chat_completion* | */avatar/matches* 🆕 待新增 |
+| generate_avatar_profile | 分身侧写生成 | chat_completion | /avatar/profile/regenerate |
+| match_post | 帖子匹配打分 / 自动冲浪兴趣判断 | chat_completion | /avatar/matches, /avatar/actions/auto-surf |
+| agent_conversation | 分身对话模拟 / 广场评论草稿 | chat_completion | /avatar/matches, /avatar/actions/plaza-comment-draft, /plaza/posts/{post_id}/agent-comment |
 
 ---
 
-*本文档从 `app/` 下所有 router.py、schemas.py、service.py 以及前端相关 API 调用提取，最后更新 2026-04-15。*
+*本文档从 `app/` 下所有 router.py、schemas.py、service.py 以及前端相关 API 调用提取，最后更新 2026-04-17。*

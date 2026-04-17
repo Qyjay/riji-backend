@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.models.avatar import AvatarMemory, AvatarMatch, AvatarProfile, AvatarStatus
 from app.models.memory import AgentAction, AvatarCard, MemoryFact
-from app.models.plaza import PlazaPost
+from app.models.plaza import PlazaComment, PlazaPost
 from app.models.user import User
 from app.response import ApiException, NOT_FOUND, PARAM_INVALID
 
@@ -54,6 +54,16 @@ def _memory_to_dict(m: AvatarMemory) -> dict:
     }
 
 
+def _default_match_range() -> dict:
+    return {
+        "school": "",
+        "distanceKm": 10,
+        "autoReplyDailyLimit": 5,
+        "autoReplyIntervalMinutes": 30,
+        "autoReplyMinScore": 55,
+    }
+
+
 def _status_to_dict(s: AvatarStatus) -> dict:
     """AvatarStatus ORM → 响应字典"""
     return {
@@ -64,7 +74,7 @@ def _status_to_dict(s: AvatarStatus) -> dict:
         "last_active_at": s.last_active_at or 0,
         "enabled_channels": _decode(s.enabled_channels, ["buddy", "help", "share", "dating"]),
         "enabled_actions": _decode(s.enabled_actions, ["browse", "match", "comment"]),
-        "match_range": _decode(s.match_range, {"school": "", "distanceKm": 10}),
+        "match_range": {**_default_match_range(), **_decode(s.match_range, {})},
     }
 
 
@@ -156,7 +166,7 @@ def _get_or_create_status(db: Session, user_id: str) -> AvatarStatus:
             last_active_at=0,
             enabled_channels=_encode(["buddy", "help", "share", "dating"]),
             enabled_actions=_encode(["browse", "match", "comment"]),
-            match_range=_encode({"school": "", "distanceKm": 10}),
+            match_range=_encode(_default_match_range()),
         )
         db.add(status)
         db.commit()
@@ -491,7 +501,13 @@ def list_actions(db: Session, user_id: str, status: Optional[str] = None) -> Lis
     return [_action_to_dict(action) for action in actions]
 
 
-async def create_plaza_comment_draft(db: Session, current_user: User, post_id: str) -> dict:
+async def create_plaza_comment_draft(
+    db: Session,
+    current_user: User,
+    post_id: str,
+    parent_comment_id: Optional[str] = None,
+    input_context_extra: Optional[dict] = None,
+) -> dict:
     """生成广场分身评论草稿，不直接发布。"""
     from app.ai.minimax_client import get_minimax_client
     from app.memory.prompts import format_memory_context
@@ -502,6 +518,19 @@ async def create_plaza_comment_draft(db: Session, current_user: User, post_id: s
         raise ApiException(code=NOT_FOUND, message="帖子不存在", status_code=404)
     if not post.allow_agent_reply:
         raise ApiException(code=PARAM_INVALID, message="该帖子不允许分身回复", status_code=400)
+
+    parent_comment = None
+    parent_user = None
+    if parent_comment_id:
+        row = (
+            db.query(PlazaComment, User)
+            .join(User, PlazaComment.user_id == User.id)
+            .filter(PlazaComment.id == parent_comment_id, PlazaComment.post_id == post_id)
+            .first()
+        )
+        if not row:
+            raise ApiException(code=NOT_FOUND, message="要回复的评论不存在", status_code=404)
+        parent_comment, parent_user = row
 
     profile = db.query(AvatarProfile).filter(AvatarProfile.user_id == current_user.id).first()
     if not profile or not (profile.summary or "").strip():
@@ -522,11 +551,19 @@ async def create_plaza_comment_draft(db: Session, current_user: User, post_id: s
         "评论要像用户本人可能会说的话，自然、友善、低压力。"
         "不要暴露自己是 AI，不要泄露日记、私聊、AI 对话等私密原文。"
     )
+    parent_context = ""
+    if parent_comment:
+        parent_author_name = parent_user.name or parent_user.username if parent_user else "对方"
+        if parent_comment.is_agent:
+            parent_author_name = f"{parent_author_name}的分身"
+        parent_context = f"\n【你正在回复的评论】{parent_author_name}：{parent_comment.content}\n"
+
     user_prompt = (
         f"【用户侧写】\n{profile.summary}\n\n"
         f"【相关长期记忆（仅供理解，不可原文外泄）】\n{memory_context}\n\n"
         f"【帖子类型】{post.type}\n"
         f"【帖子内容】{post.content}\n\n"
+        f"{parent_context}"
         "请生成 1-3 句话的评论草稿，只输出评论正文。"
     )
     client = get_minimax_client()
@@ -549,6 +586,8 @@ async def create_plaza_comment_draft(db: Session, current_user: User, post_id: s
                 "post_id": post.id,
                 "post_type": post.type,
                 "memory_count": len(memories),
+                "parent_comment_id": parent_comment_id,
+                **(input_context_extra or {}),
             }
         ),
         output_text=reply,
@@ -564,8 +603,6 @@ async def create_plaza_comment_draft(db: Session, current_user: User, post_id: s
 
 def approve_action(db: Session, user_id: str, action_id: str) -> dict:
     """批准分身行动。当前支持发布广场评论草稿。"""
-    from app.models.plaza import PlazaComment
-
     action = db.query(AgentAction).filter(AgentAction.id == action_id, AgentAction.user_id == user_id).first()
     if not action:
         raise ApiException(code=NOT_FOUND, message="分身行动不存在", status_code=404)
@@ -577,10 +614,20 @@ def approve_action(db: Session, user_id: str, action_id: str) -> dict:
         post = db.query(PlazaPost).filter(PlazaPost.id == action.target_id).first()
         if not post:
             raise ApiException(code=NOT_FOUND, message="帖子不存在", status_code=404)
+        input_context = _decode(action.input_context, {})
+        parent_comment_id = input_context.get("parent_comment_id") or None
+        if parent_comment_id:
+            parent = db.query(PlazaComment).filter(
+                PlazaComment.id == parent_comment_id,
+                PlazaComment.post_id == post.id,
+            ).first()
+            if not parent:
+                raise ApiException(code=NOT_FOUND, message="要回复的评论不存在", status_code=404)
         comment = PlazaComment(
             id=str(uuid4()),
             post_id=post.id,
             user_id=user_id,
+            parent_comment_id=parent_comment_id,
             content=action.output_text,
             is_agent=True,
             created_at=now,
@@ -611,6 +658,97 @@ def reject_action(db: Session, user_id: str, action_id: str) -> dict:
     db.commit()
     db.refresh(action)
     return _action_to_dict(action)
+
+
+async def auto_surf_comments(db: Session, current_user: User, limit: int = 1) -> dict:
+    """触发一次分身冲浪：按匹配度、开关和频率限制自动生成评论草稿或直接发布。"""
+    status_obj = _get_or_create_status(db, current_user.id)
+    status = _status_to_dict(status_obj)
+    enabled_actions = status.get("enabled_actions", [])
+    settings = status.get("match_range", {})
+    if status_obj.is_active is False:
+        return {"actions": [], "published_count": 0, "draft_count": 0, "skipped_reason": "分身当前未开启"}
+    if "comment" not in enabled_actions or "auto_surf_comment" not in enabled_actions:
+        return {"actions": [], "published_count": 0, "draft_count": 0, "skipped_reason": "未开启自动冲浪回复"}
+
+    now = _now_ms()
+    start_of_day = now - (now + 8 * 60 * 60 * 1000) % (24 * 60 * 60 * 1000)
+    daily_limit = int(settings.get("autoReplyDailyLimit") or 5)
+    interval_ms = int(settings.get("autoReplyIntervalMinutes") or 30) * 60 * 1000
+    min_score = int(settings.get("autoReplyMinScore") or 55)
+    safe_limit = max(1, min(int(limit or 1), 5))
+
+    today_count = (
+        db.query(AgentAction)
+        .filter(
+            AgentAction.user_id == current_user.id,
+            AgentAction.action_type == "comment_post",
+            AgentAction.created_at >= start_of_day,
+        )
+        .count()
+    )
+    if today_count >= daily_limit:
+        return {"actions": [], "published_count": 0, "draft_count": 0, "skipped_reason": "已达到今日自动回复上限"}
+
+    latest = (
+        db.query(AgentAction)
+        .filter(AgentAction.user_id == current_user.id, AgentAction.action_type == "comment_post")
+        .order_by(AgentAction.created_at.desc())
+        .first()
+    )
+    if latest and interval_ms > 0 and now - (latest.created_at or 0) < interval_ms:
+        return {"actions": [], "published_count": 0, "draft_count": 0, "skipped_reason": "距离上次回复太近，已按频率限制跳过"}
+
+    matches = list_matches(db, current_user.id)
+    actions: list[dict] = []
+    published_count = 0
+    draft_count = 0
+    for match in matches:
+        if len(actions) >= safe_limit or today_count + len(actions) >= daily_limit:
+            break
+        if int(match.get("match_score") or 0) < min_score:
+            continue
+        post = match.get("post") or {}
+        post_id = post.get("id") or match.get("post_id")
+        if not post_id or not post.get("allow_agent_reply", True):
+            continue
+        existing = (
+            db.query(AgentAction)
+            .filter(
+                AgentAction.user_id == current_user.id,
+                AgentAction.action_type == "comment_post",
+                AgentAction.target_id == post_id,
+                AgentAction.status.in_(["draft", "published"]),
+            )
+            .first()
+        )
+        if existing:
+            continue
+        action = await create_plaza_comment_draft(
+            db,
+            current_user,
+            post_id,
+            input_context_extra={
+                "auto_surf": True,
+                "match_id": match.get("id"),
+                "match_score": match.get("match_score"),
+                "match_reasons": match.get("match_reasons", []),
+            },
+        )
+        if "auto_approve_comment" in enabled_actions:
+            action = approve_action(db, current_user.id, action["id"])
+            published_count += 1
+        else:
+            draft_count += 1
+        actions.append(action)
+
+    skipped = "" if actions else "没有找到达到兴趣阈值且未回复过的帖子"
+    return {
+        "actions": actions,
+        "published_count": published_count,
+        "draft_count": draft_count,
+        "skipped_reason": skipped,
+    }
 
 
 # ==================== 分身侧写 ====================

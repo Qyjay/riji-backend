@@ -14,6 +14,7 @@ from app.response import success
 from app.avatar import schemas, service
 from app.avatar.schemas import (
     AgentActionOut,
+    AutoSurfResultOut,
     AvatarCardOut,
     AvatarMemoryOut,
     AvatarMatchOut,
@@ -56,6 +57,10 @@ def _serialize_card(d: dict) -> dict:
 def _serialize_action(d: dict) -> dict:
     """转 camelCase 输出"""
     return AgentActionOut(**d).model_dump(by_alias=True)
+
+
+def _serialize_auto_surf_result(d: dict) -> dict:
+    return AutoSurfResultOut(**d).model_dump(by_alias=True)
 
 
 # ==================== 记忆 CRUD ====================
@@ -218,8 +223,19 @@ async def create_plaza_comment_draft(
     db: Session = Depends(get_db),
 ):
     """基于帖子、侧写和长期记忆生成评论草稿，不会直接发布。"""
-    result = await service.create_plaza_comment_draft(db, current_user, body.post_id)
+    result = await service.create_plaza_comment_draft(db, current_user, body.post_id, body.parent_comment_id)
     return success(_serialize_action(result))
+
+
+@router.post("/actions/auto-surf", summary="触发一次分身自动冲浪评论")
+async def auto_surf_comments(
+    body: schemas.AutoSurfRequest = schemas.AutoSurfRequest(),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """按用户设置的兴趣阈值、频率和上限，让分身自动挑选帖子生成评论。"""
+    result = await service.auto_surf_comments(db, current_user, body.limit or 1)
+    return success(_serialize_auto_surf_result(result))
 
 
 @router.post("/actions/{action_id}/approve", summary="批准分身行动")

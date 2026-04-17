@@ -43,6 +43,12 @@ class MatchActionRequest(BaseModel):
 class CreateAgentCommentDraftRequest(BaseModel):
     """创建广场分身评论草稿"""
     post_id: str
+    parent_comment_id: Optional[str] = None
+
+
+class AutoSurfRequest(BaseModel):
+    """触发一次分身自动冲浪评论"""
+    limit: Optional[int] = 1
 
 
 # ==================== 响应 Schema ====================
@@ -121,3 +127,11 @@ class AgentActionOut(CamelModel):
     status: str
     created_at: int
     updated_at: int
+
+
+class AutoSurfResultOut(CamelModel):
+    """分身自动冲浪结果"""
+    actions: list[AgentActionOut]
+    published_count: int
+    draft_count: int
+    skipped_reason: str = ""

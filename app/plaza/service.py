@@ -7,6 +7,7 @@ import time
 from typing import List, Optional
 from uuid import uuid4
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.plaza import PlazaPost, PlazaComment, PostLike
@@ -56,21 +57,30 @@ def _post_to_dict(post: PlazaPost, user: User) -> dict:
     }
 
 
-def _comment_to_dict(comment: PlazaComment, user: User) -> dict:
+def _comment_to_dict(comment: PlazaComment, user: User, parent: Optional[PlazaComment] = None, parent_user: Optional[User] = None) -> dict:
     """PlazaComment + User ORM → 响应字典"""
     author_name = user.name or user.username
     if comment.is_agent:
         author_name = f"{author_name}的分身"
 
+    parent_author_name = None
+    if parent_user:
+        parent_author_name = parent_user.name or parent_user.username
+        if parent and parent.is_agent:
+            parent_author_name = f"{parent_author_name}的分身"
+
     return {
         "id": comment.id,
         "post_id": comment.post_id,
+        "parent_comment_id": comment.parent_comment_id or None,
         "author_id": comment.user_id,
         "author_name": author_name,
         "author_avatar": user.avatar or "",
         "content": comment.content or "",
         "is_agent": comment.is_agent or False,
         "created_at": comment.created_at,
+        "parent_author_name": parent_author_name,
+        "parent_content": (parent.content or "")[:80] if parent else None,
     }
 
 
@@ -217,7 +227,65 @@ def list_comments(db: Session, post_id: str) -> List[dict]:
         .all()
     )
 
-    return [_comment_to_dict(comment, user) for comment, user in rows]
+    parent_ids = [comment.parent_comment_id for comment, _ in rows if comment.parent_comment_id]
+    parent_map: dict[str, tuple[PlazaComment, User]] = {}
+    if parent_ids:
+        parent_rows = (
+            db.query(PlazaComment, User)
+            .join(User, PlazaComment.user_id == User.id)
+            .filter(PlazaComment.id.in_(parent_ids))
+            .all()
+        )
+        parent_map = {parent.id: (parent, parent_user) for parent, parent_user in parent_rows}
+
+    result = []
+    for comment, user in rows:
+        parent, parent_user = parent_map.get(comment.parent_comment_id or "", (None, None))
+        result.append(_comment_to_dict(comment, user, parent, parent_user))
+    return result
+
+
+def list_my_comment_threads(db: Session, current_user: User, limit: int = 100) -> List[dict]:
+    """列出与我/我的分身有关的评论流，并带出别人对这些评论的回复。"""
+    own_comments = (
+        db.query(PlazaComment)
+        .filter(PlazaComment.user_id == current_user.id)
+        .order_by(PlazaComment.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    own_ids = [comment.id for comment in own_comments]
+    if own_ids:
+        condition = or_(
+            PlazaComment.user_id == current_user.id,
+            PlazaComment.parent_comment_id.in_(own_ids),
+        )
+    else:
+        condition = PlazaComment.user_id == current_user.id
+    rows = (
+        db.query(PlazaComment, User)
+        .join(User, PlazaComment.user_id == User.id)
+        .filter(condition)
+        .order_by(PlazaComment.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    parent_ids = [comment.parent_comment_id for comment, _ in rows if comment.parent_comment_id]
+    parent_map: dict[str, tuple[PlazaComment, User]] = {}
+    if parent_ids:
+        parent_rows = (
+            db.query(PlazaComment, User)
+            .join(User, PlazaComment.user_id == User.id)
+            .filter(PlazaComment.id.in_(parent_ids))
+            .all()
+        )
+        parent_map = {parent.id: (parent, parent_user) for parent, parent_user in parent_rows}
+
+    result = []
+    for comment, user in rows:
+        parent, parent_user = parent_map.get(comment.parent_comment_id or "", (None, None))
+        result.append(_comment_to_dict(comment, user, parent, parent_user))
+    return result
 
 
 def add_comment(db: Session, current_user: User, post_id: str, data: dict) -> dict:
@@ -225,11 +293,20 @@ def add_comment(db: Session, current_user: User, post_id: str, data: dict) -> di
     post = _get_post_or_404(db, post_id)
 
     is_agent = data.get("is_agent", False)
+    parent_comment_id = data.get("parent_comment_id")
+    if parent_comment_id:
+        parent = db.query(PlazaComment).filter(
+            PlazaComment.id == parent_comment_id,
+            PlazaComment.post_id == post_id,
+        ).first()
+        if not parent:
+            raise ApiException(code=NOT_FOUND, message="要回复的评论不存在", status_code=404)
 
     comment = PlazaComment(
         id=str(uuid4()),
         post_id=post_id,
         user_id=current_user.id,
+        parent_comment_id=parent_comment_id,
         content=data["content"],
         is_agent=is_agent,
         created_at=_now_ms(),
@@ -251,11 +328,20 @@ def add_comment(db: Session, current_user: User, post_id: str, data: dict) -> di
     return _comment_to_dict(comment, current_user)
 
 
-async def agent_comment(db: Session, current_user: User, post_id: str) -> dict:
+async def agent_comment(db: Session, current_user: User, post_id: str, parent_comment_id: Optional[str] = None) -> dict:
     """兼容入口：改为生成待审批草稿，而不是直接发布公开评论。"""
-    from app.avatar.service import create_plaza_comment_draft
+    from app.avatar.service import approve_action, create_plaza_comment_draft, get_status
 
-    action = await create_plaza_comment_draft(db, current_user, post_id)
+    action = await create_plaza_comment_draft(db, current_user, post_id, parent_comment_id=parent_comment_id)
+    status = get_status(db, current_user.id)
+    enabled_actions = status.get("enabled_actions", [])
+    if "auto_approve_comment" in enabled_actions:
+        action = approve_action(db, current_user.id, action["id"])
+        return {
+            "action": action,
+            "requires_approval": False,
+            "message": "分身已按设置自动发布评论。",
+        }
     return {
         "action": action,
         "requires_approval": True,
