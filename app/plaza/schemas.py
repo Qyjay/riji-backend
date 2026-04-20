@@ -26,6 +26,12 @@ class AddCommentRequest(BaseModel):
     """添加评论请求"""
     content: str                        # 评论内容
     is_agent: bool = False              # 是否分身回复
+    parent_comment_id: Optional[str] = None  # 回复某条评论；为空表示回复帖子
+
+
+class AgentCommentRequest(BaseModel):
+    """分身评论请求"""
+    parent_comment_id: Optional[str] = None  # 回复某条评论；为空表示回复帖子
 
 
 # ==================== 响应 Schema ====================
@@ -57,9 +63,12 @@ class PlazaCommentOut(CamelModel):
     """评论响应（camelCase 输出）"""
     id: str
     post_id: str
+    parent_comment_id: Optional[str] = None
     author_id: str
     author_name: str
     author_avatar: str
     content: str
     is_agent: bool
     created_at: int
+    parent_author_name: Optional[str] = None
+    parent_content: Optional[str] = None

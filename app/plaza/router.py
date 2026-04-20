@@ -13,6 +13,7 @@ from app.models.user import User
 from app.response import success
 from app.plaza import schemas, service
 from app.plaza.schemas import PlazaPostOut, PlazaCommentOut
+from app.avatar.schemas import AgentActionOut
 
 router = APIRouter(prefix="/plaza", tags=["广场"])
 
@@ -25,6 +26,11 @@ def _serialize_post(d: dict) -> dict:
 def _serialize_comment(d: dict) -> dict:
     """转 camelCase 输出"""
     return PlazaCommentOut(**d).model_dump(by_alias=True)
+
+
+def _serialize_action(d: dict) -> dict:
+    """转 camelCase 输出"""
+    return AgentActionOut(**d).model_dump(by_alias=True)
 
 
 @router.get("/posts", summary="帖子列表（分页 + 频道筛选 + 搜索）")
@@ -88,6 +94,16 @@ def list_comments(
     return success([_serialize_comment(item) for item in items])
 
 
+@router.get("/comments/inbox", summary="我的评论与分身评论流")
+def list_my_comment_threads(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """获取用户本人/分身的评论，以及别人对这些评论的回复。"""
+    items = service.list_my_comment_threads(db, current_user)
+    return success([_serialize_comment(item) for item in items])
+
+
 @router.post("/posts/{post_id}/comments", summary="添加评论")
 def add_comment(
     post_id: str,
@@ -100,12 +116,17 @@ def add_comment(
     return success(_serialize_comment(result))
 
 
-@router.post("/posts/{post_id}/agent-comment", summary="AI 分身自动评论")
+@router.post("/posts/{post_id}/agent-comment", summary="AI 分身评论草稿（兼容入口）")
 async def agent_comment(
     post_id: str,
+    body: schemas.AgentCommentRequest = schemas.AgentCommentRequest(),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """根据用户分身画像 + 帖子内容，AI 自动生成评论并发布"""
-    result = await service.agent_comment(db, current_user, post_id)
-    return success({"comment": _serialize_comment(result)})
+    """兼容旧接口：现在改为生成评论草稿，需用户审批后才会真正发布。"""
+    result = await service.agent_comment(db, current_user, post_id, body.parent_comment_id)
+    return success({
+        "action": _serialize_action(result["action"]),
+        "requiresApproval": bool(result.get("requires_approval")),
+        "message": result.get("message", ""),
+    })

@@ -54,6 +54,33 @@ class Settings(BaseSettings):
     MINIMAX_MODEL: str = "MiniMax-M2.7-highspeed"
     MINIMAX_MOCK: bool = False  # True=返回模拟数据不调真实API，False=调真实API
 
+    # Exa 联网搜索
+    EXA_API_KEY: str = ""
+    EXA_API_BASE: str = "https://api.exa.ai"
+    EXA_SEARCH_ENABLED: bool = False
+    EXA_SEARCH_TIMEOUT_SEC: int = 30
+    EXA_SEARCH_NUM_RESULTS: int = 5
+    EXA_SEARCH_HIGHLIGHTS_MAX_CHARACTERS: int = 1200
+
+    # 记忆系统
+    MEMORY_ENABLED: bool = True
+    MEMORY_VECTOR_ENABLED: bool = False
+    MEMORY_DIR: str = "./memory_store"
+    MEMORY_EMBEDDING_PROVIDER: str = "hash"  # hash | dashscope
+    MEMORY_EMBEDDING_DIMENSIONS: int = 1024
+    MEMORY_EMBEDDING_BATCH_SIZE: int = 10
+    MEMORY_EMBEDDING_TIMEOUT_SEC: int = 30
+    MEMORY_TOP_K: int = 6
+    MEMORY_MAX_DISTANCE: float = 0.9
+    MEMORY_CHUNK_SIZE: int = 800
+    MEMORY_CHUNK_OVERLAP: int = 100
+    MEMORY_FAIL_OPEN: bool = True
+
+    # 阿里云百炼 / 通义千问 Embedding
+    DASHSCOPE_API_KEY: str = ""
+    DASHSCOPE_EMBEDDING_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    DASHSCOPE_EMBEDDING_MODEL: str = "text-embedding-v4"
+
     # 视觉理解模型（火山引擎 Ark）
     ARK_API_KEY: str = ""
     ARK_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"

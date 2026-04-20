@@ -240,6 +240,79 @@ def test_list_matches_empty(client):
     assert resp.json()["data"] == []
 
 
+def test_list_matches_can_auto_generate_from_avatar_card_and_public_memory(client, db):
+    """没有预制 AvatarMatch 时，列表接口会基于分身名片和共享记忆自动生成推荐。"""
+    from app.models.memory import AvatarCard
+    from app.models.plaza import PlazaPost
+    from app.models.user import User
+    import time
+    from uuid import uuid4
+
+    user_data = create_test_user(client, username="avatar_match_auto", school="南开大学")
+    headers = get_auth_header(user_data["token"])
+    user_id = user_data["user"]["id"]
+    other_data = create_test_user(client, username="avatar_match_other", school="南开大学", major="数学")
+    other_id = other_data["user"]["id"]
+    now = int(time.time() * 1000)
+
+    db.add(
+        AvatarCard(
+            id=str(uuid4()),
+            user_id=user_id,
+            display_name="我的分身",
+            public_summary="喜欢夜跑和摄影，也想认识一起运动的人。",
+            interest_tags=json.dumps(["夜跑", "摄影"], ensure_ascii=False),
+            social_intent=json.dumps(["想找一起运动的搭子"], ensure_ascii=False),
+            conversation_style=json.dumps({"tone": "自然"}, ensure_ascii=False),
+            boundaries=json.dumps([], ensure_ascii=False),
+            visibility="private",
+            updated_at=now,
+        )
+    )
+    db.add(
+        AvatarCard(
+            id=str(uuid4()),
+            user_id=other_id,
+            display_name="对方分身",
+            public_summary="最近常去操场夜跑。",
+            interest_tags=json.dumps(["夜跑", "操场"], ensure_ascii=False),
+            social_intent=json.dumps(["认识新朋友"], ensure_ascii=False),
+            conversation_style=json.dumps({"tone": "友善"}, ensure_ascii=False),
+            boundaries=json.dumps([], ensure_ascii=False),
+            visibility="private",
+            updated_at=now,
+        )
+    )
+    post = PlazaPost(
+        id=str(uuid4()),
+        user_id=other_id,
+        type="buddy",
+        content="今晚想去操场夜跑，想找节奏差不多的人一起。",
+        tags=json.dumps(["夜跑", "操场"], ensure_ascii=False),
+        likes=0,
+        comments=0,
+        agent_responses=0,
+        is_from_agent=False,
+        allow_agent_reply=True,
+        school_only=False,
+        created_at=now,
+    )
+    db.add(post)
+    db.commit()
+
+    from app.memory.ingestion import ingest_plaza_post
+
+    ingest_plaza_post(db, post)
+
+    resp = client.get("/api/avatar/matches", headers=headers)
+    assert resp.status_code == 200
+    items = resp.json()["data"]
+    assert len(items) >= 1
+    assert items[0]["post"]["id"] == post.id
+    assert items[0]["matchScore"] >= 20
+    assert any("夜跑" in reason or "同一所学校" in reason for reason in items[0]["matchReasons"])
+
+
 def test_match_action_not_found(client):
     """操作不存在的匹配返回 404"""
     user_data = create_test_user(client, username="avatar_match_404")

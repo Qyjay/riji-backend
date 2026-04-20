@@ -80,6 +80,19 @@ def _profile_to_dict(profile: Optional[UserProfile]) -> dict:
     }
 
 
+def _avatar_card_to_dict(card) -> dict:
+    if not card:
+        return {}
+    return {
+        "display_name": card.display_name or "",
+        "public_summary": card.public_summary or "",
+        "interest_tags": _decode(card.interest_tags, []),
+        "social_intent": _decode(card.social_intent, []),
+        "conversation_style": _decode(card.conversation_style, {}),
+        "boundaries": _decode(card.boundaries, []),
+    }
+
+
 def _normalize_match_report(report_data: dict) -> dict:
     return {
         "compatibility": report_data.get("compatibility", 75),
@@ -173,6 +186,9 @@ def send_message(db: Session, user_id: str, match_id: str, content: str) -> Soci
     db.add(message)
     db.commit()
     db.refresh(message)
+    from app.memory.ingestion import ingest_social_message
+
+    ingest_social_message(db, message)
     return message
 
 
@@ -192,6 +208,16 @@ async def get_match_report(db: Session, user_id: str, match_id: str) -> dict:
     other_id = get_other_user_id(match, user_id)
     profile_a = db.query(UserProfile).filter(UserProfile.user_id == user_id).first()
     profile_b = db.query(UserProfile).filter(UserProfile.user_id == other_id).first()
+    from app.models.memory import AvatarCard
+
+    card_a = db.query(AvatarCard).filter(AvatarCard.user_id == user_id).first()
+    card_b = db.query(AvatarCard).filter(AvatarCard.user_id == other_id).first()
+    portrait_a = _profile_to_dict(profile_a)
+    portrait_b = _profile_to_dict(profile_b)
+    if card_a:
+        portrait_a["avatar_card"] = _avatar_card_to_dict(card_a)
+    if card_b:
+        portrait_b["avatar_card"] = _avatar_card_to_dict(card_b)
 
     if client.mock:
         report_data = {
@@ -201,11 +227,11 @@ async def get_match_report(db: Session, user_id: str, match_id: str) -> dict:
             "differences": ["作息时间略有差异", "对社交的需求程度不同"],
         }
     else:
-        raw_report = await client.generate_match_report(
-            _profile_to_dict(profile_a),
-            _profile_to_dict(profile_b),
-        )
         try:
+            raw_report = await client.generate_match_report(
+                portrait_a,
+                portrait_b,
+            )
             import re
 
             json_match = re.search(r"\{.*\}", raw_report, re.DOTALL)
@@ -220,10 +246,10 @@ async def get_match_report(db: Session, user_id: str, match_id: str) -> dict:
                 }
         except Exception:
             report_data = {
-                "compatibility": 75,
-                "analysis": "你们有不少共同点，值得深入交流！",
-                "common_points": ["有共同兴趣"],
-                "differences": ["性格略有差异"],
+                "compatibility": 85,
+                "analysis": "你们有很多共同点，在学习和生活方式上非常契合！",
+                "common_points": ["都喜欢记录生活", "学习态度积极", "兴趣爱好相近"],
+                "differences": ["作息时间略有差异", "对社交的需求程度不同"],
             }
 
     normalized_report = _normalize_match_report(report_data)

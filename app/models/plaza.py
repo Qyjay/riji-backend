@@ -50,6 +50,7 @@ class PlazaComment(Base):
     id = Column(String, primary_key=True, default=_uuid)
     post_id = Column(String, ForeignKey("plaza_posts.id"), nullable=False)
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    parent_comment_id = Column(String, ForeignKey("plaza_comments.id"), nullable=True)
     content = Column(Text, nullable=False)              # 评论内容
     is_agent = Column(Boolean, default=False)           # 是否分身评论
     created_at = Column(BigInteger, nullable=False)     # 毫秒时间戳
@@ -57,6 +58,8 @@ class PlazaComment(Base):
     __table_args__ = (
         # 按帖子查询索引
         Index("ix_plaza_comments_post_id", "post_id"),
+        # 按父评论查询索引，用于楼中楼/评论回复
+        Index("ix_plaza_comments_parent_comment_id", "parent_comment_id"),
     )
 
 

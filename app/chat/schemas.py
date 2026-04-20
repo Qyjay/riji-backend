@@ -26,6 +26,10 @@ class ChatAttachmentOut(CamelModel):
     mime_type: Optional[str] = None
     size: Optional[int] = None
     thumbnail_url: Optional[str] = None
+    snippet: Optional[str] = None
+    domain: Optional[str] = None
+    published_at: Optional[str] = None
+    source: Optional[str] = None
 
 
 class ChatRequest(BaseModel):
@@ -33,6 +37,7 @@ class ChatRequest(BaseModel):
 
     message: str = ""
     client_message_id: Optional[str] = Field(default=None, alias="clientMessageId")
+    use_web_search: bool = Field(default=False, alias="useWebSearch")
     attachments: List[ChatAttachmentIn] = Field(default_factory=list)
     session_id: Optional[str] = Field(default=None, alias="sessionId")
 
