@@ -4,10 +4,12 @@
 Embedding provider 可配置：
 - hash：deterministic hash，方便本地开发和回归测试。
 - dashscope：通过阿里云百炼 OpenAI-compatible 接口调用 text-embedding-v4。
+- vivo：通过 VIVO embedding-model-api/predict/batch 接口调用 m3e-base / bge-base-zh-v1.5。
 """
 import hashlib
 import os
 from typing import TypedDict
+from uuid import uuid4
 
 import httpx
 
@@ -43,7 +45,7 @@ def _embedding_dimensions() -> int:
 
 
 def _embedding_batch_size() -> int:
-    # text-embedding-v4 单次最多 10 条文本；hash provider 也沿用这个批量大小以保持行为一致。
+    # 为外部 embedding provider 统一限制批量，避免一次请求过大。
     raw = int(getattr(settings, "MEMORY_EMBEDDING_BATCH_SIZE", 10) or 10)
     return max(1, min(raw, 10))
 
@@ -100,7 +102,71 @@ def _dashscope_embed_batch(texts: list[str]) -> list[list[float]]:
     return embeddings  # type: ignore[return-value]
 
 
-def _embed_texts(texts: list[str]) -> list[list[float]]:
+def _vivo_embedding_base_url() -> str:
+    base_url = str(
+        getattr(settings, "VIVO_EMBEDDING_BASE_URL", "https://api-ai.vivo.com.cn")
+        or "https://api-ai.vivo.com.cn"
+    ).rstrip("/")
+    return base_url
+
+
+def _vivo_embedding_model() -> str:
+    return str(getattr(settings, "VIVO_EMBEDDING_MODEL", "m3e-base") or "m3e-base").strip()
+
+
+def _vivo_query_instruction() -> str:
+    return str(
+        getattr(settings, "VIVO_EMBEDDING_QUERY_INSTRUCTION", "为这个句子生成表示以用于检索相关文章：")
+        or "为这个句子生成表示以用于检索相关文章："
+    )
+
+
+def _vivo_prepare_texts(texts: list[str], mode: str) -> list[str]:
+    model_name = _vivo_embedding_model().lower()
+    if model_name != "bge-base-zh-v1.5" or mode != "query":
+        return texts
+
+    prefix = _vivo_query_instruction()
+    prepared: list[str] = []
+    for text in texts:
+        sentence = str(text or "")
+        if sentence.startswith(prefix):
+            prepared.append(sentence)
+        else:
+            prepared.append(f"{prefix}{sentence}")
+    return prepared
+
+
+def _vivo_embed_batch(texts: list[str], mode: str = "document") -> list[list[float]]:
+    api_key = str(getattr(settings, "VIVO_APP_KEY", "") or "").strip()
+    if not api_key:
+        raise RuntimeError("VIVO_APP_KEY is required when MEMORY_EMBEDDING_PROVIDER=vivo")
+
+    request_id = str(uuid4())
+    payload = {
+        "model_name": _vivo_embedding_model(),
+        "sentences": _vivo_prepare_texts(texts, mode=mode),
+    }
+    timeout = float(getattr(settings, "MEMORY_EMBEDDING_TIMEOUT_SEC", 30) or 30)
+    response = httpx.post(
+        f"{_vivo_embedding_base_url()}/embedding-model-api/predict/batch",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        params={"requestId": request_id},
+        json=payload,
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    data = response.json()
+    embeddings = data.get("data", [])
+    if not isinstance(embeddings, list) or len(embeddings) != len(texts):
+        raise RuntimeError("VIVO embedding response is missing one or more embeddings")
+    return embeddings  # type: ignore[return-value]
+
+
+def _embed_texts(texts: list[str], mode: str = "document") -> list[list[float]]:
     provider = _embedding_provider()
     if provider == "dashscope":
         embeddings: list[list[float]] = []
@@ -109,6 +175,13 @@ def _embed_texts(texts: list[str]) -> list[list[float]]:
             batch = texts[idx: idx + batch_size]
             embeddings.extend(_dashscope_embed_batch(batch))
         return embeddings
+    if provider == "vivo":
+        embeddings = []
+        batch_size = _embedding_batch_size()
+        for idx in range(0, len(texts), batch_size):
+            batch = texts[idx: idx + batch_size]
+            embeddings.extend(_vivo_embed_batch(batch, mode=mode))
+        return embeddings
     return [_hash_embedding(text) for text in texts]
 
 
@@ -116,6 +189,9 @@ def _collection_name() -> str:
     provider = _embedding_provider()
     if provider == "dashscope":
         return f"riji_memory_chunks_dashscope_{_embedding_dimensions()}"
+    if provider == "vivo":
+        model_name = _vivo_embedding_model().lower().replace("-", "_").replace(".", "_")
+        return f"riji_memory_chunks_vivo_{model_name}"
     return "riji_memory_chunks_hash"
 
 
@@ -146,7 +222,7 @@ def index_chunks(user_id: str, chunks: list[MemoryChunk]) -> None:
     collection.upsert(
         ids=[chunk.id for chunk in chunks],
         documents=texts,
-        embeddings=_embed_texts(texts),
+        embeddings=_embed_texts(texts, mode="document"),
         metadatas=[
             {
                 "user_id": user_id,
@@ -175,7 +251,7 @@ def search_index(user_id: str, query: str, top_k: int) -> list[MemoryIndexHit]:
     if not collection:
         return []
     result = collection.query(
-        query_embeddings=_embed_texts([query]),
+        query_embeddings=_embed_texts([query], mode="query"),
         n_results=max(1, top_k),
         where={"user_id": user_id},
     )

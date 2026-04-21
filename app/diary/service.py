@@ -37,7 +37,7 @@ DIARY_MAX_EDITS = _resolve_max_edits_default()
 
 def _resolve_derivative_ai_timeout_sec() -> int:
     """读取衍生创作 AI 调用超时时间，避免前端请求先超时。"""
-    raw = os.getenv("DERIVATIVE_AI_TIMEOUT_SEC", "8")
+    raw = os.getenv("DERIVATIVE_AI_TIMEOUT_SEC", "60")
     try:
         value = int(raw)
         return value if value > 0 else 8
@@ -300,8 +300,16 @@ async def _collect_image_understand_hints(materials: List[RawMaterial]) -> dict:
 
     results = await ai_service.understand_images_batch(
         image_urls=[item[1] for item in image_entries],
-        prompt=settings.ARK_VISION_PROMPT,
-        timeout_sec=int(settings.ARK_VISION_TIMEOUT_SEC),
+        prompt=str(
+            getattr(settings, "VIVO_VISION_PROMPT", "")
+            or getattr(settings, "ARK_VISION_PROMPT", "")
+            or ""
+        ),
+        timeout_sec=int(
+            getattr(settings, "VIVO_VISION_TIMEOUT_SEC", 0)
+            or getattr(settings, "ARK_VISION_TIMEOUT_SEC", 50)
+            or 50
+        ),
         max_images=len(image_entries),
     )
 

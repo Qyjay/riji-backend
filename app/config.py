@@ -49,10 +49,39 @@ class Settings(BaseSettings):
     JWT_EXPIRE_DAYS: int = 7
 
     # MiniMax AI（TokenPlan Plus）
+    LLM_PROVIDER: str = "vivo"  # minimax | vivo
     MINIMAX_API_KEY: str = ""
     MINIMAX_API_BASE: str = "https://api.minimaxi.com"
     MINIMAX_MODEL: str = "MiniMax-M2.7-highspeed"
     MINIMAX_MOCK: bool = False  # True=返回模拟数据不调真实API，False=调真实API
+
+    # VIVO 大模型（OpenAI 兼容 chat/completions）
+    VIVO_APP_ID: str = ""
+    VIVO_APP_KEY: str = ""
+    VIVO_API_BASE: str = "https://api-ai.vivo.com.cn"
+    VIVO_MODEL: str = "Doubao-Seed-2.0-mini"
+    VIVO_REASONING_EFFORT: str = "minimal"  # minimal | low | medium | high
+    VIVO_ENABLE_THINKING: bool = False
+    VIVO_TIMEOUT_SEC: int = 60
+    VIVO_IMAGE_MODEL: str = "Doubao-Seedream-4.5"
+    VIVO_IMAGE_TIMEOUT_SEC: int = 90
+    VIVO_TTS_ENGINE_ID: str = "short_audio_synthesis_jovi"
+    VIVO_TTS_TIMEOUT_SEC: int = 60
+    VIVO_ASR_ENGINE_ID: str = "shortasrinput"
+    VIVO_ASR_TIMEOUT_SEC: int = 70
+    VIVO_ASR_END_VAD_TIME: int = 2000
+    VIVO_ASR_PUNCTUATION: int = 1
+    VIVO_ASR_CHINESE2DIGITAL: int = 1
+    VIVO_ASR_NET_TYPE: int = 1
+    VIVO_EMBEDDING_BASE_URL: str = "https://api-ai.vivo.com.cn"
+    VIVO_EMBEDDING_MODEL: str = "m3e-base"
+    VIVO_EMBEDDING_QUERY_INSTRUCTION: str = "为这个句子生成表示以用于检索相关文章："
+    VIVO_VISION_ENABLED: bool = True
+    VIVO_VISION_MODEL: str = "Doubao-Seed-2.0-mini"
+    VIVO_VISION_PROMPT: str = "请识别并描述这张图片的可见内容，输出一段中文详实介绍。要求包含：主体对象、场景环境、人物动作或状态、关键细节、整体氛围；表述客观连贯，约80-150字，不要编造图片中看不见的信息。"
+    VIVO_VISION_MAX_IMAGES: int = 10
+    VIVO_VISION_TIMEOUT_SEC: int = 50
+    VIVO_VISION_CACHE_TTL_SEC: int = 21600
 
     # Exa 联网搜索
     EXA_API_KEY: str = ""
@@ -64,9 +93,9 @@ class Settings(BaseSettings):
 
     # 记忆系统
     MEMORY_ENABLED: bool = True
-    MEMORY_VECTOR_ENABLED: bool = False
+    MEMORY_VECTOR_ENABLED: bool = True
     MEMORY_DIR: str = "./memory_store"
-    MEMORY_EMBEDDING_PROVIDER: str = "hash"  # hash | dashscope
+    MEMORY_EMBEDDING_PROVIDER: str = "vivo"  # hash | dashscope | vivo
     MEMORY_EMBEDDING_DIMENSIONS: int = 1024
     MEMORY_EMBEDDING_BATCH_SIZE: int = 10
     MEMORY_EMBEDDING_TIMEOUT_SEC: int = 30

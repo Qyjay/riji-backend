@@ -1,5 +1,7 @@
 # app/ai/service.py
 import asyncio
+import base64
+import io
 import os
 import json
 import re
@@ -9,6 +11,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 from uuid import uuid4
+
+from fastapi import UploadFile
+import httpx
+
 from app.config import settings
 from app.ai.minimax_client import get_minimax_client
 from app.response import ApiException, PARAM_ERROR
@@ -20,12 +26,84 @@ logger = logging.getLogger("uvicorn.error")
 _IMAGE_UNDERSTAND_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
+def _vision_enabled() -> bool:
+    return bool(
+        getattr(
+            settings,
+            "VIVO_VISION_ENABLED",
+            getattr(settings, "ARK_VISION_ENABLED", True),
+        )
+    )
+
+
+def _vision_api_key() -> str:
+    return str(
+        getattr(settings, "VIVO_APP_KEY", "")
+        or getattr(settings, "ARK_API_KEY", "")
+        or ""
+    ).strip()
+
+
+def _vision_model() -> str:
+    return str(
+        getattr(settings, "VIVO_VISION_MODEL", "")
+        or getattr(settings, "VIVO_MODEL", "")
+        or getattr(settings, "ARK_VISION_MODEL", "Doubao-Seed-2.0-mini")
+    ).strip()
+
+
+def _vision_prompt(default_prompt: str = "") -> str:
+    return (
+        str(default_prompt or "").strip()
+        or str(
+            getattr(settings, "VIVO_VISION_PROMPT", "")
+            or getattr(settings, "ARK_VISION_PROMPT", "")
+            or ""
+        ).strip()
+    )
+
+
+def _vision_timeout_sec(override_timeout: Optional[int] = None) -> int:
+    if override_timeout is not None:
+        return max(1, int(override_timeout))
+    return max(
+        1,
+        int(
+            getattr(settings, "VIVO_VISION_TIMEOUT_SEC", 0)
+            or getattr(settings, "ARK_VISION_TIMEOUT_SEC", 50)
+            or 50
+        ),
+    )
+
+
+def _vision_cache_ttl_sec() -> int:
+    return max(
+        int(
+            getattr(settings, "VIVO_VISION_CACHE_TTL_SEC", 0)
+            or getattr(settings, "ARK_VISION_CACHE_TTL_SEC", 21600)
+            or 21600
+        ),
+        60,
+    )
+
+
+def _vision_max_images(default_value: int) -> int:
+    return max(
+        1,
+        int(
+            getattr(settings, "VIVO_VISION_MAX_IMAGES", 0)
+            or getattr(settings, "ARK_VISION_MAX_IMAGES", default_value)
+            or default_value
+        ),
+    )
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
 def _cleanup_image_understand_cache(now_ms: int) -> None:
-    ttl_ms = max(int(settings.ARK_VISION_CACHE_TTL_SEC), 60) * 1000
+    ttl_ms = _vision_cache_ttl_sec() * 1000
     expired_urls = [
         url
         for url, meta in _IMAGE_UNDERSTAND_CACHE.items()
@@ -64,12 +142,19 @@ async def text_to_speech_service(user_id: str, text: str, voice: str = "") -> st
     """
     client = get_minimax_client()
     voice_id = voice or "female-shaonv"
-    audio_bytes = await client.text_to_speech(text, voice_id=voice_id)
+    audio_bytes = await client.text_to_speech(text, voice_id=voice_id, user_id=user_id)
 
     # 保存文件
     user_dir = os.path.join(settings.UPLOAD_DIR, user_id, "tts")
     os.makedirs(user_dir, exist_ok=True)
-    filename = f"{uuid4()}.mp3"
+    is_wav = (
+        isinstance(audio_bytes, bytes)
+        and len(audio_bytes) >= 12
+        and audio_bytes[:4] == b"RIFF"
+        and audio_bytes[8:12] == b"WAVE"
+    )
+    ext = "wav" if is_wav else "mp3"
+    filename = f"{uuid4()}.{ext}"
     file_path = os.path.join(user_dir, filename)
 
     if isinstance(audio_bytes, bytes) and audio_bytes:
@@ -80,6 +165,126 @@ async def text_to_speech_service(user_id: str, text: str, voice: str = "") -> st
         # Mock 模式可能返回空或假数据，返回默认音频 URL
         url = "/uploads/mock_audio.mp3"
     return url
+
+
+def _looks_like_mp3(audio_bytes: bytes) -> bool:
+    if audio_bytes.startswith(b"ID3"):
+        return True
+    if len(audio_bytes) >= 2 and audio_bytes[0] == 0xFF and (audio_bytes[1] & 0xE0) == 0xE0:
+        return True
+    return False
+
+
+def _resolve_asr_audio_format(file: UploadFile, audio_bytes: bytes) -> str:
+    filename = str(file.filename or "").lower().strip()
+    content_type = str(file.content_type or "").lower().strip()
+
+    if len(audio_bytes) >= 12 and audio_bytes[:4] == b"RIFF" and audio_bytes[8:12] == b"WAVE":
+        return "wav"
+    if _looks_like_mp3(audio_bytes):
+        return "mp3"
+    if audio_bytes.startswith(b"OggS"):
+        return "ogg"
+    if len(audio_bytes) >= 12 and audio_bytes[4:8] == b"ftyp":
+        return "m4a"
+
+    if filename.endswith(".wav") or content_type in {"audio/wav", "audio/x-wav"}:
+        return "wav"
+    if filename.endswith(".pcm") or content_type in {
+        "audio/pcm",
+        "audio/l16",
+    }:
+        return "pcm"
+
+    if filename.endswith(".mp3") or content_type in {"audio/mpeg", "audio/mp3"}:
+        return "mp3"
+    if filename.endswith(".m4a") or content_type in {"audio/mp4", "audio/x-m4a"}:
+        return "m4a"
+    if filename.endswith(".ogg") or content_type in {"audio/ogg", "application/ogg"}:
+        return "ogg"
+
+    return "unknown"
+
+
+def _convert_audio_to_wav_16k_mono(audio_bytes: bytes, source_format: str) -> bytes:
+    try:
+        from pydub import AudioSegment
+    except ImportError as exc:
+        raise ApiException(
+            code=PARAM_ERROR,
+            message=(
+                "当前服务未安装音频转码依赖，无法自动将压缩音频转换为 wav；"
+                "请前端先转为 16kHz/16bit/单声道 wav 或 pcm。"
+            ),
+            status_code=400,
+        ) from exc
+
+    format_hint = "mp4" if source_format == "m4a" else source_format
+    try:
+        segment = AudioSegment.from_file(io.BytesIO(audio_bytes), format=format_hint)
+        normalized = segment.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+        output = io.BytesIO()
+        normalized.export(output, format="wav")
+        converted = output.getvalue()
+    except (FileNotFoundError, OSError) as exc:
+        raise ApiException(
+            code=PARAM_ERROR,
+            message="后端缺少 ffmpeg，无法自动转换音频；请前端先转为 wav/pcm 后再上传。",
+            status_code=400,
+        ) from exc
+    except Exception as exc:
+        raise ApiException(
+            code=PARAM_ERROR,
+            message="音频自动转换失败，请上传标准 wav/pcm，或使用可识别的 mp3/m4a/ogg 文件。",
+            status_code=400,
+        ) from exc
+
+    if not converted:
+        raise ApiException(
+            code=PARAM_ERROR,
+            message="音频自动转换失败：未生成有效 wav 数据。",
+            status_code=400,
+        )
+
+    return converted
+
+
+async def speech_to_text_short_service(
+    user_id: str,
+    file: UploadFile,
+    punctuation: int = 1,
+    chinese2digital: int = 1,
+    end_vad_time: int = 2000,
+) -> dict:
+    """短语音识别服务：支持 wav/pcm，压缩音频会尝试自动转为 16kHz/16bit/单声道 wav。"""
+    audio_bytes = await file.read()
+    if not audio_bytes:
+        raise ApiException(
+            code=PARAM_ERROR,
+            message="音频文件不能为空",
+            status_code=400,
+        )
+
+    audio_format = _resolve_asr_audio_format(file, audio_bytes)
+    if audio_format in {"mp3", "m4a", "ogg"}:
+        audio_bytes = _convert_audio_to_wav_16k_mono(audio_bytes, source_format=audio_format)
+        audio_format = "wav"
+    elif audio_format == "unknown":
+        raise ApiException(
+            code=PARAM_ERROR,
+            message="ASR 仅支持 wav/pcm，或可自动转换的 mp3/m4a/ogg 音频。",
+            status_code=400,
+        )
+
+    client = get_minimax_client()
+    return await client.speech_to_text_short(
+        audio_bytes=audio_bytes,
+        audio_format=audio_format,
+        user_id=user_id,
+        punctuation=punctuation,
+        chinese2digital=chinese2digital,
+        end_vad_time=end_vad_time,
+    )
 
 
 async def fortune_service() -> dict:
@@ -136,8 +341,26 @@ async def fortune_service() -> dict:
             }
 
 
+def _extract_text_from_message_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+        chunks: List[str] = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text") or item.get("content")
+            if isinstance(text, str) and text.strip():
+                chunks.append(text.strip())
+        if chunks:
+            return "\n".join(chunks).strip()
+
+    return ""
+
+
 def _extract_ark_text(response: Any) -> str:
-    """从 Ark responses.create 结果中尽量提取文本。"""
+    """从 VIVO chat/completions 返回中提取文本，同时兼容历史 Ark 输出格式。"""
     output_text = getattr(response, "output_text", None)
     if isinstance(output_text, str) and output_text.strip():
         return output_text.strip()
@@ -148,6 +371,17 @@ def _extract_ark_text(response: Any) -> str:
         data = response
 
     if isinstance(data, dict):
+        choices = data.get("choices", [])
+        if isinstance(choices, list):
+            for item in choices:
+                if not isinstance(item, dict):
+                    continue
+                message = item.get("message") or {}
+                if isinstance(message, dict):
+                    text = _extract_text_from_message_content(message.get("content"))
+                    if text:
+                        return text
+
         direct = data.get("output_text")
         if isinstance(direct, str) and direct.strip():
             return direct.strip()
@@ -173,118 +407,128 @@ def _extract_ark_text(response: Any) -> str:
     return ""
 
 
-async def _call_ark_vision_async(image_url: str, prompt: str):
-    """异步调用 Ark 视觉模型。"""
-    try:
-        from volcenginesdkarkruntime import AsyncArk
-    except ImportError as exc:
-        raise ApiException(
-            code=PARAM_ERROR,
-            message="未安装 volcengine-python-sdk[ark]，请先安装后再调用视觉理解接口",
-            status_code=500,
-        ) from exc
-
-    client = AsyncArk(
-        base_url=settings.ARK_BASE_URL,
-        api_key=settings.ARK_API_KEY,
-    )
-
-    try:
-        return await client.responses.create(
-            model=settings.ARK_VISION_MODEL,
-            input=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_image",
-                            "image_url": image_url,
-                        },
-                        {
-                            "type": "input_text",
-                            "text": prompt,
-                        },
-                    ],
-                }
-            ],
-        )
-    finally:
-        close_fn = getattr(client, "close", None)
-        if callable(close_fn):
-            maybe_awaitable = close_fn()
-            if asyncio.iscoroutine(maybe_awaitable):
-                await maybe_awaitable
+def _build_vivo_vision_headers(api_key: str) -> dict:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
 
 
-async def _call_ark_vision_multi_async(image_urls: List[str], prompt: str):
-    """异步调用 Ark 视觉模型（单次请求输入多图）。"""
-    try:
-        from volcenginesdkarkruntime import AsyncArk
-    except ImportError as exc:
-        raise ApiException(
-            code=PARAM_ERROR,
-            message="未安装 volcengine-python-sdk[ark]，请先安装后再调用视觉理解接口",
-            status_code=500,
-        ) from exc
+def _build_vivo_vision_endpoint() -> str:
+    base_url = str(getattr(settings, "VIVO_API_BASE", "https://api-ai.vivo.com.cn") or "https://api-ai.vivo.com.cn")
+    return f"{base_url.rstrip('/')}/v1/chat/completions"
 
-    client = AsyncArk(
-        base_url=settings.ARK_BASE_URL,
-        api_key=settings.ARK_API_KEY,
-    )
 
-    content_blocks = [
+def _build_vivo_vision_messages(image_urls: List[str], prompt: str) -> list[dict]:
+    content_blocks: list[dict] = [
         {
-            "type": "input_image",
-            "image_url": image_url,
+            "type": "image_url",
+            "image_url": {
+                "url": image_url,
+            },
         }
         for image_url in image_urls
     ]
     content_blocks.append(
         {
-            "type": "input_text",
+            "type": "text",
             "text": prompt,
         }
     )
+    return [
+        {
+            "role": "user",
+            "content": content_blocks,
+        }
+    ]
 
-    try:
-        return await client.responses.create(
-            model=settings.ARK_VISION_MODEL,
-            input=[
-                {
-                    "role": "user",
-                    "content": content_blocks,
-                }
-            ],
+
+async def _call_ark_vision_async(image_url: str, prompt: str):
+    """异步调用 VIVO 视觉理解（chat/completions）。"""
+    api_key = _vision_api_key()
+    if not api_key:
+        raise ApiException(
+            code=PARAM_ERROR,
+            message="VIVO_APP_KEY 未配置，无法调用图片理解接口",
+            status_code=500,
         )
-    finally:
-        close_fn = getattr(client, "close", None)
-        if callable(close_fn):
-            maybe_awaitable = close_fn()
-            if asyncio.iscoroutine(maybe_awaitable):
-                await maybe_awaitable
+
+    request_id = str(uuid4())
+    payload = {
+        "model": _vision_model(),
+        "messages": _build_vivo_vision_messages([image_url], prompt),
+        "temperature": 0.3,
+        "max_tokens": 2048,
+        "stream": False,
+    }
+
+    async with httpx.AsyncClient(timeout=float(_vision_timeout_sec()), trust_env=False) as client:
+        response = await client.post(
+            _build_vivo_vision_endpoint(),
+            headers=_build_vivo_vision_headers(api_key),
+            params={"requestId": request_id, "request_id": request_id},
+            json=payload,
+        )
+        response.raise_for_status()
+        return response.json()
 
 
-def _to_ark_file_uri(path: Path) -> str:
-    """生成 Ark SDK 在 Windows 下可正确解析的 file URI。"""
+async def _call_ark_vision_multi_async(image_urls: List[str], prompt: str):
+    """异步调用 VIVO 视觉理解（单次请求输入多图）。"""
+    api_key = _vision_api_key()
+    if not api_key:
+        raise ApiException(
+            code=PARAM_ERROR,
+            message="VIVO_APP_KEY 未配置，无法调用图片理解接口",
+            status_code=500,
+        )
+
+    request_id = str(uuid4())
+    payload = {
+        "model": _vision_model(),
+        "messages": _build_vivo_vision_messages(image_urls, prompt),
+        "temperature": 0.3,
+        "max_tokens": 4096,
+        "stream": False,
+    }
+
+    async with httpx.AsyncClient(timeout=float(_vision_timeout_sec()), trust_env=False) as client:
+        response = await client.post(
+            _build_vivo_vision_endpoint(),
+            headers=_build_vivo_vision_headers(api_key),
+            params={"requestId": request_id, "request_id": request_id},
+            json=payload,
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+def _to_image_data_url(path: Path) -> str:
+    """将本地图片文件转换为 data URL，便于 VIVO 接口直接消费。"""
     resolved = path.resolve()
-    posix_path = resolved.as_posix()
-
-    # Ark SDK 现版本在 Windows 下对 file:///C:/... 的解析有问题，
-    # 这里使用 file://C:/... 以确保其内部拼接后得到有效本地路径。
-    if len(posix_path) >= 3 and posix_path[1] == ":" and posix_path[2] == "/":
-        return f"file://{posix_path}"
-
-    return resolved.as_uri()
+    ext = resolved.suffix.lower()
+    mime_map = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+        ".bmp": "image/bmp",
+    }
+    mime_type = mime_map.get(ext, "application/octet-stream")
+    raw_bytes = resolved.read_bytes()
+    encoded = base64.b64encode(raw_bytes).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
 
 
 def _resolve_ark_image_input(image_url: str) -> str:
-    """将图片输入转换为 Ark 可接受的 URL。"""
+    """将图片输入转换为 VIVO 可接受的 URL（远端 URL 或 data URL）。"""
     raw = (image_url or "").strip()
     if not raw:
         return ""
 
     parsed = urlparse(raw)
-    if parsed.scheme in {"http", "https", "file", "data"}:
+    if parsed.scheme in {"http", "https", "data"}:
         return raw
 
     upload_root = Path(settings.UPLOAD_DIR).resolve()
@@ -301,20 +545,28 @@ def _resolve_ark_image_input(image_url: str) -> str:
         try:
             candidate.relative_to(upload_root)
         except ValueError:
-            logger.warning("[ark/vision] skip unsafe upload path image_url=%s", raw)
+            logger.warning("[vivo/vision] skip unsafe upload path image_url=%s", raw)
             return ""
 
         if candidate.exists():
-            return _to_ark_file_uri(candidate)
+            try:
+                return _to_image_data_url(candidate)
+            except Exception as exc:
+                logger.warning("[vivo/vision] read local upload image failed path=%s error=%s", candidate, str(exc))
+                return ""
 
-        logger.warning("[ark/vision] upload file not found image_url=%s path=%s", raw, candidate)
+        logger.warning("[vivo/vision] upload file not found image_url=%s path=%s", raw, candidate)
         return ""
 
     as_path = Path(raw)
     if as_path.is_absolute():
         if as_path.exists():
-            return _to_ark_file_uri(as_path)
-        logger.warning("[ark/vision] local file not found image_url=%s path=%s", raw, as_path)
+            try:
+                return _to_image_data_url(as_path)
+            except Exception as exc:
+                logger.warning("[vivo/vision] read local image failed path=%s error=%s", as_path, str(exc))
+                return ""
+        logger.warning("[vivo/vision] local file not found image_url=%s path=%s", raw, as_path)
         return ""
 
     return raw
@@ -322,7 +574,7 @@ def _resolve_ark_image_input(image_url: str) -> str:
 
 def _build_ark_batch_prompt(prompt: str, image_count: int) -> str:
     """构造多图输入提示词，约束模型返回可解析 JSON。"""
-    base_prompt = (prompt or "").strip() or settings.ARK_VISION_PROMPT
+    base_prompt = _vision_prompt(prompt)
     return (
         f"{base_prompt}\n\n"
         "你将收到多张图片。请严格按图片输入顺序输出 JSON 数组。"
@@ -378,27 +630,27 @@ async def understand_image_text(
     prompt: str = "",
     timeout_sec: Optional[int] = None,
 ) -> str:
-    """调用 Ark 视觉模型，返回识别文本；失败返回空字符串。"""
+    """调用 VIVO 图片理解，返回识别文本；失败返回空字符串。"""
     image_url = (image_url or "").strip()
     if not image_url:
         return ""
 
-    if not settings.ARK_VISION_ENABLED:
+    if not _vision_enabled():
         return ""
 
-    if not settings.ARK_API_KEY:
-        logger.warning("[ark/vision] ARK_API_KEY is empty")
+    if not _vision_api_key():
+        logger.warning("[vivo/vision] VIVO_APP_KEY is empty")
         return ""
 
-    resolved_prompt = (prompt or "").strip() or settings.ARK_VISION_PROMPT
+    resolved_prompt = _vision_prompt(prompt)
     resolved_image_input = _resolve_ark_image_input(image_url)
     if not resolved_image_input:
         return ""
-    req_timeout = float(timeout_sec or settings.ARK_VISION_TIMEOUT_SEC)
+    req_timeout = float(_vision_timeout_sec(timeout_sec))
 
     logger.info(
-        "[ark/vision] request model=%s timeout=%s image_url=%s image_input=%s",
-        settings.ARK_VISION_MODEL,
+        "[vivo/vision] request model=%s timeout=%s image_url=%s image_input=%s",
+        _vision_model(),
         req_timeout,
         image_url,
         resolved_image_input,
@@ -411,15 +663,15 @@ async def understand_image_text(
         )
         description = _extract_ark_text(response)
         if not description:
-            logger.warning("[ark/vision] empty response for image_url=%s", image_url)
+            logger.warning("[vivo/vision] empty response for image_url=%s", image_url)
         return description
     except asyncio.TimeoutError:
-        logger.warning("[ark/vision] timeout for image_url=%s timeout=%s", image_url, req_timeout)
+        logger.warning("[vivo/vision] timeout for image_url=%s timeout=%s", image_url, req_timeout)
         return ""
     except ApiException:
         raise
     except Exception as exc:
-        logger.exception("[ark/vision] request failed: %s", str(exc))
+        logger.exception("[vivo/vision] request failed: %s", str(exc))
         return ""
 
 
@@ -444,11 +696,11 @@ async def understand_images_batch(
     if not normalized_urls:
         return []
 
-    resolved_prompt = (prompt or "").strip() or settings.ARK_VISION_PROMPT
-    resolved_timeout = int(timeout_sec or settings.ARK_VISION_TIMEOUT_SEC)
+    resolved_prompt = _vision_prompt(prompt)
+    resolved_timeout = _vision_timeout_sec(timeout_sec)
 
     if max_images is None:
-        max_images = len(normalized_urls)
+        max_images = _vision_max_images(len(normalized_urls))
     max_images = max(int(max_images), 0)
 
     results: List[dict] = [
@@ -497,7 +749,7 @@ async def understand_images_batch(
             except Exception:
                 descriptions = [""]
         else:
-            can_use_multi = bool(settings.ARK_VISION_ENABLED and settings.ARK_API_KEY)
+            can_use_multi = bool(_vision_enabled() and _vision_api_key())
             parsed_multi: Optional[List[str]] = None
             if can_use_multi:
                 batch_prompt = _build_ark_batch_prompt(resolved_prompt, len(to_infer_inputs))

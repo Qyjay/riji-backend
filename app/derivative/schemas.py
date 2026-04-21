@@ -16,5 +16,6 @@ class DerivativeOut(CamelModel):
     diary_id: str          # 前端收到 diaryId
     type: str
     content: str
+    media_url: str
     share_scope: str       # 前端收到 shareScope
     created_at: int        # 前端收到 createdAt
