@@ -565,7 +565,7 @@
 
 - `POST /api/diaries/generate` 的请求体不直接接收图片字段。
 - 日记生成使用的图片来源于当天素材（`raw_materials.media_url` / `mediaUrl`），即先通过素材接口上传并保存 URL，再在生成流程中读取。
-- 当 `ARK_VISION_ENABLED=true` 时，系统会对当天 image 素材执行视觉理解。
+- 当 `VIVO_VISION_ENABLED=true` 时，系统会对当天 image 素材执行视觉理解。
 - 图片理解结果会注入到日记生成提示词中的 `[图片描述]` 上下文段落，并同时在响应字段 `imageUnderstandings` 中返回（数组类型，按图片顺序逐条返回，不去重）。
 - 该字段会持久化保存到日记记录；后续通过 `GET /api/diaries`、`GET /api/diaries/{diary_id}`、`GET /api/diaries/search` 查询时会返回同一组结果。
 - 图片理解失败会自动降级为“仅使用原素材文本继续生成日记”，不阻断主流程。
@@ -575,7 +575,7 @@
 - 单图调用：`app.ai.service.understand_image_text(image_url, prompt="", timeout_sec=None) -> str`
 - 多图调用：`app.ai.service.understand_images_batch(image_urls, prompt="", timeout_sec=None, max_images=None) -> List[str]`
 - 如需带原始 URL 的详细结构，可传：`include_image_url=True`，返回 `List[dict]`
-- 多图底层调用优先使用 Ark `responses.create` 的单次多图输入格式（`content` 中多个 `input_image` + 一个 `input_text`），与官方示例一致；若返回不可解析，会自动降级为逐图调用，保证可用性。
+- 多图底层调用优先使用 VIVO `chat/completions` 的单次多图输入格式（`content` 中多个 `image_url` + 一个 `text`）；若返回不可解析，会自动降级为逐图调用，保证可用性。
 
 ```python
 from app.ai import service as ai_service
@@ -595,30 +595,31 @@ items = await ai_service.understand_images_batch(
 # ["...", "..."]
 ```
 
-**Ark 视觉理解配置说明（启用方式 + 推荐值）：**
+**VIVO 视觉理解配置说明（启用方式 + 推荐值）：**
 
 | 环境变量 | 默认值 | 作用 | 推荐值 |
 |------|------|------|------|
-| ARK_API_KEY | 空 | Ark API Key | 必填 |
-| ARK_BASE_URL | https://ark.cn-beijing.volces.com/api/v3 | Ark 接口地址 | 默认即可 |
-| ARK_VISION_MODEL | doubao-seed-2-0-mini-260215 | 视觉理解模型 | 默认即可 |
-| ARK_VISION_ENABLED | true | 是否开启视觉理解 | true |
-| ARK_VISION_PROMPT | 见配置文件 | 视觉理解提示词模板 | 保持“客观+细节+禁臆测”风格 |
-| ARK_VISION_MAX_IMAGES | 10 | 单次生成最多识别图片数 | 6~10 |
-| ARK_VISION_TIMEOUT_SEC | 50 | 单张图片识别超时秒数 | 30~50 |
-| ARK_VISION_CACHE_TTL_SEC | 21600 | URL 级缓存有效期（秒） | 21600（6小时） |
+| VIVO_APP_KEY | 空 | VIVO AppKey | 必填 |
+| VIVO_API_BASE | https://api-ai.vivo.com.cn | VIVO 接口地址 | 默认即可 |
+| VIVO_VISION_MODEL | Doubao-Seed-2.0-mini | 图片理解模型（可用豆包） | 默认即可 |
+| VIVO_VISION_ENABLED | true | 是否开启视觉理解 | true |
+| VIVO_VISION_PROMPT | 见配置文件 | 视觉理解提示词模板 | 保持“客观+细节+禁臆测”风格 |
+| VIVO_VISION_MAX_IMAGES | 10 | 单次生成最多识别图片数 | 6~10 |
+| VIVO_VISION_TIMEOUT_SEC | 50 | 单张图片识别超时秒数 | 30~50 |
+| VIVO_VISION_CACHE_TTL_SEC | 21600 | URL 级缓存有效期（秒） | 21600（6小时） |
 
 **启用步骤（环境变量示例）：**
 
 ```env
 MINIMAX_MOCK=false
-ARK_API_KEY=your-ark-api-key
-ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
-ARK_VISION_MODEL=doubao-seed-2-0-mini-260215
-ARK_VISION_ENABLED=true
-ARK_VISION_MAX_IMAGES=10
-ARK_VISION_TIMEOUT_SEC=50
-ARK_VISION_CACHE_TTL_SEC=21600
+LLM_PROVIDER=vivo
+VIVO_APP_KEY=your-vivo-app-key
+VIVO_API_BASE=https://api-ai.vivo.com.cn
+VIVO_VISION_MODEL=Doubao-Seed-2.0-mini
+VIVO_VISION_ENABLED=true
+VIVO_VISION_MAX_IMAGES=10
+VIVO_VISION_TIMEOUT_SEC=50
+VIVO_VISION_CACHE_TTL_SEC=21600
 ```
 
 ---
@@ -2293,7 +2294,7 @@ AI 根据记忆库生成的分身人格摘要。
 
 **响应 data：** 裸数组。每项包含 `documentId`、`chunkId`、`content`、`sourceType`、`sourceId`、`title`、`score`、`occurredAt`、`visibility`、`metadata`。
 
-**实现状态：** ✅ 已实现（默认 SQLite 关键词检索 fallback；开启 `MEMORY_VECTOR_ENABLED=true` 后可使用 ChromaDB 向量索引，embedding provider 支持 `hash` / `dashscope`）
+**实现状态：** ✅ 已实现（默认 SQLite 关键词检索 fallback；开启 `MEMORY_VECTOR_ENABLED=true` 后可使用 ChromaDB 向量索引，embedding provider 支持 `hash` / `dashscope` / `vivo`）
 
 ---
 
@@ -2508,15 +2509,24 @@ python scripts/reindex_memories.py --progress-every 500 --fail-fast
 
 ### 记忆向量模型配置
 
-记忆系统支持可插拔 embedding provider。默认使用 `hash` provider，适合离线开发和自动化测试；需要真实语义向量检索时，可切换为阿里云百炼 / 通义千问 `text-embedding-v4`。
+记忆系统支持可插拔 embedding provider。当前推荐默认使用 `vivo` provider（与 VIVO 统一鉴权）；离线开发和自动化测试可切回 `hash`；也支持阿里云百炼 / 通义千问 `text-embedding-v4`。
 
 ```env
 MEMORY_VECTOR_ENABLED=true
-MEMORY_EMBEDDING_PROVIDER=dashscope
+MEMORY_EMBEDDING_PROVIDER=vivo   # vivo / dashscope / hash
 MEMORY_EMBEDDING_DIMENSIONS=1024
 MEMORY_EMBEDDING_BATCH_SIZE=10
 MEMORY_EMBEDDING_TIMEOUT_SEC=30
 
+# 使用 VIVO 文本向量
+VIVO_APP_KEY=your-vivo-app-key
+VIVO_EMBEDDING_BASE_URL=https://api-ai.vivo.com.cn
+VIVO_EMBEDDING_MODEL=m3e-base
+# 当 VIVO_EMBEDDING_MODEL=bge-base-zh-v1.5 且用于 query 检索时，系统会自动加这段前缀
+VIVO_EMBEDDING_QUERY_INSTRUCTION=为这个句子生成表示以用于检索相关文章：
+
+# 或者切换到 DashScope
+MEMORY_EMBEDDING_PROVIDER=dashscope
 DASHSCOPE_API_KEY=your-dashscope-api-key
 DASHSCOPE_EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 DASHSCOPE_EMBEDDING_MODEL=text-embedding-v4
@@ -2528,6 +2538,7 @@ DASHSCOPE_EMBEDDING_MODEL=text-embedding-v4
 |------|------|------|
 | `hash` | 本地 deterministic hash embedding，不调用外部 API，维度固定 64 | 测试、离线开发、无成本回归 |
 | `dashscope` | 调用百炼 OpenAI-compatible Embedding 接口，默认 `text-embedding-v4` | 中文语义检索、真实记忆召回 |
+| `vivo` | 调用 VIVO `embedding-model-api/predict/batch`，支持 `m3e-base` / `bge-base-zh-v1.5` | 中文语义检索、与 VIVO 能力统一鉴权 |
 
 **通义千问 text-embedding-v4 约束：**
 

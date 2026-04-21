@@ -4,6 +4,8 @@ AI + 聊天模块测试
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import create_test_user, get_auth_header
 from app.ai.minimax_client import MiniMaxClient
 
@@ -179,12 +181,127 @@ def test_tts(client):
     assert isinstance(data["data"], str)
 
 
+def test_asr_short(client, monkeypatch):
+    user_data = create_test_user(client, username="ai_asr_user")
+    headers = get_auth_header(user_data["token"])
+
+    async def fake_asr_service(user_id, file, punctuation, chinese2digital, end_vad_time):
+        assert user_id == user_data["user"]["id"]
+        assert file.filename == "sample.wav"
+        assert punctuation == 1
+        assert chinese2digital == 1
+        assert end_vad_time == 2000
+        return {
+            "text": "这是识别结果",
+            "sid": "sid-123",
+            "requestId": "req-123",
+            "segments": [{"text": "这是识别结果", "isLast": True, "reformation": 0}],
+        }
+
+    monkeypatch.setattr("app.ai.service.speech_to_text_short_service", fake_asr_service)
+
+    resp = client.post(
+        "/api/ai/asr?punctuation=1&chinese2digital=1&end_vad_time=2000",
+        files={"file": ("sample.wav", b"RIFF....WAVE", "audio/wav")},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["code"] == 0
+    assert data["data"]["text"] == "这是识别结果"
+    assert data["data"]["requestId"] == "req-123"
+
+
+def test_resolve_asr_audio_format_detects_mp3_magic_header():
+    from app.ai import service as ai_service
+
+    class FakeUpload:
+        filename = "voice.bin"
+        content_type = "application/octet-stream"
+
+    detected = ai_service._resolve_asr_audio_format(
+        FakeUpload(),
+        b"ID3\x04\x00\x00\x00\x00\x00\x21fake-mp3-payload",
+    )
+
+    assert detected == "mp3"
+
+
+def test_speech_to_text_short_service_auto_converts_mp3(monkeypatch):
+    from app.ai import service as ai_service
+
+    class FakeUpload:
+        filename = "voice.mp3"
+        content_type = "audio/mpeg"
+
+        async def read(self):
+            return b"ID3\x04\x00\x00\x00\x00\x00\x21fake-mp3-payload"
+
+    def fake_convert(audio_bytes: bytes, source_format: str) -> bytes:
+        assert source_format == "mp3"
+        assert audio_bytes.startswith(b"ID3")
+        return b"RIFF1234WAVE5678"
+
+    class FakeClient:
+        async def speech_to_text_short(
+            self,
+            audio_bytes,
+            audio_format,
+            user_id,
+            punctuation,
+            chinese2digital,
+            end_vad_time,
+        ):
+            assert audio_format == "wav"
+            assert audio_bytes[:4] == b"RIFF"
+            assert audio_bytes[8:12] == b"WAVE"
+            assert user_id == "u1"
+            assert punctuation == 1
+            assert chinese2digital == 1
+            assert end_vad_time == 1800
+            return {"text": "转换后识别", "sid": "sid-1", "requestId": "req-1", "segments": []}
+
+    monkeypatch.setattr(ai_service, "_convert_audio_to_wav_16k_mono", fake_convert)
+    monkeypatch.setattr(ai_service, "get_minimax_client", lambda: FakeClient())
+
+    result = asyncio.run(
+        ai_service.speech_to_text_short_service(
+            user_id="u1",
+            file=FakeUpload(),
+            punctuation=1,
+            chinese2digital=1,
+            end_vad_time=1800,
+        )
+    )
+
+    assert result["text"] == "转换后识别"
+
+
+def test_speech_to_text_short_service_rejects_unknown_octet_stream():
+    from app.ai import service as ai_service
+
+    class FakeUpload:
+        filename = "voice.bin"
+        content_type = "application/octet-stream"
+
+        async def read(self):
+            return b"\x00\x11\x22\x33\x44\x55\x66\x77"
+
+    with pytest.raises(Exception, match="仅支持 wav/pcm"):
+        asyncio.run(
+            ai_service.speech_to_text_short_service(
+                user_id="u1",
+                file=FakeUpload(),
+            )
+        )
+
+
 def test_understand_image_text_with_local_upload_url(monkeypatch):
     from app.ai import service as ai_service
 
-    monkeypatch.setattr(ai_service.settings, "ARK_VISION_ENABLED", True)
-    monkeypatch.setattr(ai_service.settings, "ARK_API_KEY", "test-key")
-    monkeypatch.setattr(ai_service.settings, "ARK_VISION_TIMEOUT_SEC", 5)
+    monkeypatch.setattr(ai_service.settings, "VIVO_VISION_ENABLED", True)
+    monkeypatch.setattr(ai_service.settings, "VIVO_APP_KEY", "test-key")
+    monkeypatch.setattr(ai_service.settings, "VIVO_VISION_TIMEOUT_SEC", 5)
 
     upload_root = Path(ai_service.settings.UPLOAD_DIR)
     image_path = upload_root / "test-user" / "diary-image" / "ark-local-path.jpg"
@@ -207,18 +324,17 @@ def test_understand_image_text_with_local_upload_url(monkeypatch):
     )
 
     assert result == "识别结果"
-    expected_posix = image_path.resolve().as_posix()
-    assert captured["image_input"].startswith("file://")
-    assert captured["image_input"].endswith(expected_posix)
+    assert captured["image_input"].startswith("data:image/jpeg;base64,")
+    assert captured["image_input"].endswith("ZmFrZS1pbWFnZS1ieXRlcw==")
 
 
 def test_understand_images_batch_uses_multi_image_input(monkeypatch):
     from app.ai import service as ai_service
 
-    monkeypatch.setattr(ai_service.settings, "ARK_VISION_ENABLED", True)
-    monkeypatch.setattr(ai_service.settings, "ARK_API_KEY", "test-key")
-    monkeypatch.setattr(ai_service.settings, "ARK_VISION_TIMEOUT_SEC", 5)
-    monkeypatch.setattr(ai_service.settings, "ARK_VISION_PROMPT", "请客观描述图片")
+    monkeypatch.setattr(ai_service.settings, "VIVO_VISION_ENABLED", True)
+    monkeypatch.setattr(ai_service.settings, "VIVO_APP_KEY", "test-key")
+    monkeypatch.setattr(ai_service.settings, "VIVO_VISION_TIMEOUT_SEC", 5)
+    monkeypatch.setattr(ai_service.settings, "VIVO_VISION_PROMPT", "请客观描述图片")
 
     ai_service.clear_image_understand_cache()
 

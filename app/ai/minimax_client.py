@@ -15,12 +15,21 @@ MiniMax AI API 封装客户端
 API 文档：https://platform.minimaxi.com/docs/guides/models-intro
 """
 import asyncio
+import base64
+from contextlib import asynccontextmanager
+import hashlib
+import io
+import inspect
 import json
+import math
 import os
 import random
 import re
 import time
+import uuid
+import wave
 from typing import AsyncGenerator, Optional
+from urllib.parse import urlencode, urlparse
 
 import httpx
 
@@ -71,17 +80,865 @@ MOCK_MUSIC_URL = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"
 
 
 class MiniMaxClient:
-    """MiniMax API 客户端（全模态，支持 Mock）"""
+    """LLM 客户端（默认 MiniMax，支持将 chat/stream 切换至 VIVO）"""
 
-    def __init__(self, api_key: str, api_base: str, model: str, mock: bool = False):
+    def __init__(
+        self,
+        api_key: str,
+        api_base: str,
+        model: str,
+        mock: bool = False,
+        provider: str = "minimax",
+        vivo_app_id: str = "",
+        vivo_app_key: str = "",
+        vivo_api_base: str = "https://api-ai.vivo.com.cn",
+        vivo_model: str = "Doubao-Seed-2.0-mini",
+        vivo_reasoning_effort: str = "minimal",
+        vivo_enable_thinking: bool = False,
+        vivo_timeout_sec: int = 60,
+        vivo_image_model: str = "Doubao-Seedream-4.5",
+        vivo_image_timeout_sec: int = 90,
+        vivo_tts_engine_id: str = "short_audio_synthesis_jovi",
+        vivo_tts_timeout_sec: int = 60,
+        vivo_asr_engine_id: str = "shortasrinput",
+        vivo_asr_timeout_sec: int = 70,
+        vivo_asr_end_vad_time: int = 2000,
+        vivo_asr_punctuation: int = 1,
+        vivo_asr_chinese2digital: int = 1,
+        vivo_asr_net_type: int = 1,
+    ):
         self.api_key = api_key
         self.api_base = api_base.rstrip("/")
         self.model = model
         self.mock = mock
+
+        provider_value = str(provider or "minimax").strip().lower()
+        self.provider = provider_value if provider_value in {"minimax", "vivo"} else "minimax"
+
+        self.vivo_app_id = str(vivo_app_id or "").strip()
+        self.vivo_app_key = str(vivo_app_key or "").strip()
+        self.vivo_api_base = str(vivo_api_base or "https://api-ai.vivo.com.cn").rstrip("/")
+        self.vivo_model = str(vivo_model or "Doubao-Seed-2.0-mini").strip()
+        self.vivo_reasoning_effort = str(vivo_reasoning_effort or "minimal").strip().lower()
+        self.vivo_enable_thinking = bool(vivo_enable_thinking)
+        self.vivo_image_model = str(vivo_image_model or "Doubao-Seedream-4.5").strip()
+        self.vivo_tts_engine_id = str(vivo_tts_engine_id or "short_audio_synthesis_jovi").strip()
+        self.vivo_asr_engine_id = str(vivo_asr_engine_id or "shortasrinput").strip()
+        try:
+            self.vivo_timeout_sec = max(int(vivo_timeout_sec), 10)
+        except Exception:
+            self.vivo_timeout_sec = 60
+        try:
+            self.vivo_image_timeout_sec = max(int(vivo_image_timeout_sec), 60)
+        except Exception:
+            self.vivo_image_timeout_sec = 90
+        try:
+            self.vivo_tts_timeout_sec = max(int(vivo_tts_timeout_sec), 20)
+        except Exception:
+            self.vivo_tts_timeout_sec = 60
+        try:
+            self.vivo_asr_timeout_sec = max(int(vivo_asr_timeout_sec), 20)
+        except Exception:
+            self.vivo_asr_timeout_sec = 70
+        try:
+            self.vivo_asr_end_vad_time = max(300, min(int(vivo_asr_end_vad_time), 10000))
+        except Exception:
+            self.vivo_asr_end_vad_time = 2000
+        try:
+            self.vivo_asr_punctuation = 1 if int(vivo_asr_punctuation) else 0
+        except Exception:
+            self.vivo_asr_punctuation = 1
+        try:
+            self.vivo_asr_chinese2digital = 1 if int(vivo_asr_chinese2digital) else 0
+        except Exception:
+            self.vivo_asr_chinese2digital = 1
+        try:
+            self.vivo_asr_net_type = max(0, min(int(vivo_asr_net_type), 4))
+        except Exception:
+            self.vivo_asr_net_type = 1
+
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
+
+    @staticmethod
+    def _content_to_text(content: object) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            chunks: list[str] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                text = item.get("text")
+                if isinstance(text, str) and text:
+                    chunks.append(text)
+                    continue
+                nested_content = item.get("content")
+                if isinstance(nested_content, str) and nested_content:
+                    chunks.append(nested_content)
+            return "".join(chunks).strip()
+        if content is None:
+            return ""
+        return str(content)
+
+    @classmethod
+    def _extract_chat_text_from_response(cls, data: dict) -> str:
+        if not isinstance(data, dict):
+            return ""
+
+        output_text = data.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text.strip()
+
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0] if isinstance(choices[0], dict) else {}
+            message = first.get("message") if isinstance(first, dict) else {}
+            if isinstance(message, dict):
+                content_text = cls._content_to_text(message.get("content"))
+                if content_text.strip():
+                    return content_text.strip()
+
+        return ""
+
+    @classmethod
+    def _extract_stream_delta_text(cls, data: dict) -> str:
+        if not isinstance(data, dict):
+            return ""
+
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        delta = first.get("delta") if isinstance(first, dict) else {}
+        if not isinstance(delta, dict):
+            return ""
+
+        return cls._content_to_text(delta.get("content")).strip()
+
+    def _use_vivo_chat(self) -> bool:
+        return self.provider == "vivo"
+
+    def _build_chat_messages(self, messages: list, system_prompt: str = "") -> list:
+        full_messages = []
+        if system_prompt:
+            full_messages.append({"role": "system", "content": system_prompt})
+        full_messages.extend(messages or [])
+        return full_messages
+
+    def _build_vivo_headers(self) -> dict:
+        return {
+            "Authorization": f"Bearer {self.vivo_app_key}",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+
+    def _build_vivo_chat_payload(
+        self,
+        full_messages: list,
+        temperature: float,
+        max_tokens: int,
+        stream: bool,
+        request_id: str,
+    ) -> dict:
+        payload = {
+            "requestId": request_id,
+            "model": self.vivo_model,
+            "messages": full_messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": stream,
+        }
+
+        if self.vivo_reasoning_effort in {"minimal", "low", "medium", "high"}:
+            payload["reasoning_effort"] = self.vivo_reasoning_effort
+
+        if "qwen3.5-plus" in self.vivo_model.lower():
+            payload["enable_thinking"] = self.vivo_enable_thinking
+        else:
+            payload["thinking"] = {"type": "enable" if self.vivo_enable_thinking else "disabled"}
+
+        return payload
+
+    @staticmethod
+    def _aspect_ratio_to_vivo_size(aspect_ratio: str) -> str:
+        ratio_map = {
+            "1:1": "2048x2048",
+            "16:9": "2048x1152",
+            "4:3": "2048x1536",
+            "3:2": "2048x1365",
+            "2:3": "1365x2048",
+            "3:4": "1536x2048",
+            "9:16": "1152x2048",
+        }
+        return ratio_map.get(str(aspect_ratio or "").strip(), "")
+
+    def _build_vivo_image_payload(
+        self,
+        prompt: str,
+        model: str,
+        aspect_ratio: str,
+        image: Optional[object] = None,
+    ) -> dict:
+        resolved_model = str(model or "").strip()
+        if not resolved_model or resolved_model == "image-01":
+            resolved_model = self.vivo_image_model
+
+        payload = {
+            "model": resolved_model,
+            "prompt": str(prompt or "").strip(),
+        }
+
+        if image not in (None, ""):
+            payload["image"] = image
+
+        size = self._aspect_ratio_to_vivo_size(aspect_ratio)
+        if size:
+            payload["parameters"] = {"size": size}
+
+        return payload
+
+    @staticmethod
+    def _normalize_vivo_tts_user_id(user_id: str) -> str:
+        cleaned = re.sub(r"[^0-9a-z]", "", str(user_id or "").lower())
+        if len(cleaned) >= 32:
+            return cleaned[:32]
+        if cleaned:
+            digest = hashlib.md5(cleaned.encode("utf-8")).hexdigest()
+            return (cleaned + digest)[:32]
+        return uuid.uuid4().hex[:32]
+
+    @staticmethod
+    def _resolve_vivo_tts_voice(voice_id: str) -> str:
+        raw = str(voice_id or "").strip()
+        if not raw:
+            return "xiaofu"
+
+        voice_map = {
+            "male-qn-qingse": "xiaoming",
+            "female-shaonv": "xiaofu",
+        }
+        return voice_map.get(raw, raw)
+
+    def _build_vivo_tts_ws_url(self, user_id: str) -> str:
+        parsed = urlparse(self.vivo_api_base if "://" in self.vivo_api_base else f"https://{self.vivo_api_base}")
+        scheme = "wss" if parsed.scheme in {"https", "wss", ""} else "ws"
+        netloc = parsed.netloc or parsed.path
+
+        params = {
+            "engineid": self.vivo_tts_engine_id,
+            "system_time": str(int(time.time())),
+            "user_id": self._normalize_vivo_tts_user_id(user_id),
+            "model": "unknown",
+            "product": "unknown",
+            "package": "unknown",
+            "client_version": "unknown",
+            "system_version": "unknown",
+            "sdk_version": "unknown",
+            "android_version": "unknown",
+            "requestId": str(uuid.uuid4()),
+        }
+        return f"{scheme}://{netloc}/tts?{urlencode(params)}"
+
+    def _build_vivo_asr_ws_url(self, user_id: str, request_id: str) -> str:
+        parsed = urlparse(self.vivo_api_base if "://" in self.vivo_api_base else f"https://{self.vivo_api_base}")
+        scheme = "wss" if parsed.scheme in {"https", "wss", ""} else "ws"
+        netloc = parsed.netloc or parsed.path
+
+        params = {
+            "client_version": "unknown",
+            "package": "unknown",
+            "sdk_version": "unknown",
+            "user_id": self._normalize_vivo_tts_user_id(user_id),
+            "android_version": "unknown",
+            "system_time": str(int(time.time() * 1000)),
+            "net_type": str(self.vivo_asr_net_type),
+            "engineid": self.vivo_asr_engine_id,
+            "requestId": request_id,
+            "model": self.vivo_model or "unknown",
+            "system_version": "unknown",
+        }
+        return f"{scheme}://{netloc}/asr/v2?{urlencode(params)}"
+
+    def _build_vivo_ws_headers(self) -> dict:
+        headers = {
+            "Authorization": f"Bearer {self.vivo_app_key}",
+        }
+        # 官方示例会附带 vaid 头；这里在配置了 VIVO_APP_ID 时一并附带以提升兼容性。
+        app_id = str(self.vivo_app_id or "").strip()
+        if app_id:
+            headers["vaid"] = app_id
+        return headers
+
+    @staticmethod
+    def _format_ws_exception(exc: Exception) -> str:
+        message = str(exc or "").strip() or exc.__class__.__name__
+        cleaned = "".join(ch if ch.isprintable() else " " for ch in message)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if not cleaned:
+            return exc.__class__.__name__
+        return cleaned[:200]
+
+    @staticmethod
+    def _decode_error_payload(payload: object) -> str:
+        if payload is None:
+            return ""
+        if isinstance(payload, bytes):
+            text = payload.decode("utf-8", errors="ignore")
+        else:
+            text = str(payload)
+        text = "".join(ch if ch.isprintable() else " " for ch in text)
+        return re.sub(r"\s+", " ", text).strip()[:300]
+
+    def _format_vivo_ws_exception(self, exc: Exception) -> str:
+        base = self._format_ws_exception(exc)
+
+        status_code = getattr(exc, "status_code", None)
+        response = getattr(exc, "response", None)
+        if status_code is None and response is not None:
+            status_code = getattr(response, "status_code", None)
+
+        body_text = ""
+        for candidate in (
+            getattr(exc, "body", None),
+            getattr(exc, "response_body", None),
+            getattr(response, "body", None) if response is not None else None,
+        ):
+            body_text = self._decode_error_payload(candidate)
+            if body_text:
+                break
+
+        if body_text:
+            return f"{base}; response={body_text}"
+
+        if int(status_code or 0) == 400:
+            hint = (
+                "HTTP 400（按文档通常是 error_code=10000 参数缺失/鉴权错误，"
+                "或 error_code=10001 WebSocket 升级失败）"
+            )
+            return f"{base}; {hint}"
+
+        return base
+
+    @staticmethod
+    def _is_ws_http_400(exc: Exception) -> bool:
+        status_code = getattr(exc, "status_code", None)
+        if int(status_code or 0) == 400:
+            return True
+        response = getattr(exc, "response", None)
+        return int(getattr(response, "status_code", 0) or 0) == 400
+
+    def _vivo_tts_synthesize_pcm_with_ws_client(
+        self,
+        ws_url: str,
+        headers: dict,
+        payload: dict,
+        timeout_sec: float,
+    ) -> bytes:
+        try:
+            from websocket import ABNF, create_connection
+        except ImportError as exc:
+            raise RuntimeError("websocket-client is not installed") from exc
+
+        header_lines = [f"{key}: {value}" for key, value in headers.items()]
+        ws = create_connection(ws_url, header=header_lines, timeout=timeout_sec)
+        try:
+            try:
+                code, data = ws.recv_data(True)
+                if code == ABNF.OPCODE_TEXT:
+                    handshake_text = data.decode("utf-8", errors="ignore") if isinstance(data, bytes) else str(data)
+                    handshake_obj = json.loads(handshake_text)
+                    first_code = int(handshake_obj.get("error_code", 0) or 0)
+                    if first_code != 0:
+                        msg = str(handshake_obj.get("error_msg") or "")
+                        raise RuntimeError(f"VIVO TTS 握手失败: {first_code} {msg}".strip())
+            except Exception:
+                # 部分网关不会返回首帧握手消息，直接进入 send 阶段。
+                pass
+
+            ws.send(json.dumps(payload, ensure_ascii=False))
+
+            pcm_chunks: list[bytes] = []
+            while True:
+                code, data = ws.recv_data(True)
+                if code == ABNF.OPCODE_CLOSE:
+                    break
+                if code != ABNF.OPCODE_TEXT:
+                    continue
+
+                msg_text = data.decode("utf-8", errors="ignore") if isinstance(data, bytes) else str(data)
+                try:
+                    msg = json.loads(msg_text)
+                except json.JSONDecodeError:
+                    continue
+
+                error_code = int(msg.get("error_code", 0) or 0)
+                if error_code != 0:
+                    raise RuntimeError(
+                        f"VIVO TTS 合成失败: {error_code} {msg.get('error_msg', '')}".strip()
+                    )
+
+                frame_data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+                audio_b64 = str(frame_data.get("audio") or "").strip()
+                if audio_b64:
+                    try:
+                        pcm_chunks.append(base64.b64decode(audio_b64))
+                    except Exception:
+                        continue
+
+                try:
+                    status = int(frame_data.get("status", 1) or 1)
+                except Exception:
+                    status = 1
+                if status == 2:
+                    break
+
+            merged = b"".join(pcm_chunks)
+            if not merged:
+                raise RuntimeError("VIVO TTS 未返回音频数据")
+            return merged
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    @asynccontextmanager
+    async def _websocket_connect(self, websockets_module, ws_url: str, headers: dict, timeout_sec: float):
+        connect_func = websockets_module.connect
+        base_kwargs = {
+            "open_timeout": timeout_sec,
+            "close_timeout": 5,
+        }
+
+        preferred_keys: list[str] = []
+        try:
+            parameters = set(inspect.signature(connect_func).parameters.keys())
+            if "additional_headers" in parameters:
+                preferred_keys.append("additional_headers")
+            if "extra_headers" in parameters:
+                preferred_keys.append("extra_headers")
+        except Exception:
+            preferred_keys = []
+
+        for key in ("additional_headers", "extra_headers"):
+            if key not in preferred_keys:
+                preferred_keys.append(key)
+
+        last_error: Optional[Exception] = None
+        for header_key in preferred_keys:
+            kwargs = dict(base_kwargs)
+            kwargs[header_key] = headers
+            try:
+                async with connect_func(ws_url, **kwargs) as ws:
+                    yield ws
+                    return
+            except TypeError as exc:
+                text = str(exc)
+                if "unexpected keyword argument" in text and header_key in text:
+                    last_error = exc
+                    continue
+                raise
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("websocket connection failed")
+
+    @staticmethod
+    def _extract_pcm16k_from_wav(wav_bytes: bytes) -> bytes:
+        try:
+            with wave.open(io.BytesIO(wav_bytes), "rb") as wav_file:
+                channels = wav_file.getnchannels()
+                sample_width = wav_file.getsampwidth()
+                sample_rate = wav_file.getframerate()
+                frame_count = wav_file.getnframes()
+                pcm_bytes = wav_file.readframes(frame_count)
+        except wave.Error as exc:
+            raise ApiException(
+                code=AI_SERVICE_ERROR,
+                message=f"WAV 解析失败: {str(exc)}",
+                status_code=400,
+            ) from exc
+
+        if not pcm_bytes:
+            raise ApiException(
+                code=AI_SERVICE_ERROR,
+                message="音频内容为空",
+                status_code=400,
+            )
+
+        if channels != 1 or sample_width != 2 or sample_rate != 16000:
+            raise ApiException(
+                code=AI_SERVICE_ERROR,
+                message="ASR 仅支持 16kHz/16bit/单声道 的 wav/pcm 音频",
+                status_code=400,
+            )
+
+        return pcm_bytes
+
+    def _prepare_vivo_asr_pcm(self, audio_bytes: bytes, audio_format: str) -> bytes:
+        normalized = re.sub(r"[^a-z0-9]", "", str(audio_format or "").strip().lower())
+        if normalized in {"wav", "wave", "audiowav", "audioxwav", "xwav"}:
+            pcm = self._extract_pcm16k_from_wav(audio_bytes)
+        elif normalized in {"pcm", "audiol16", "audiopcm", "applicationoctetstream"}:
+            pcm = audio_bytes
+        elif normalized in {"mp3", "m4a", "ogg", "audiompeg", "audiomp3", "audiom4a", "audioogg"}:
+            raise ApiException(
+                code=AI_SERVICE_ERROR,
+                message="ASR 仅支持 wav/pcm；请先将 mp3/m4a/ogg 转为 16kHz/16bit/单声道 wav",
+                status_code=400,
+            )
+        else:
+            raise ApiException(
+                code=AI_SERVICE_ERROR,
+                message="不支持的音频格式，ASR 仅支持 wav/pcm",
+                status_code=400,
+            )
+
+        if not pcm:
+            raise ApiException(
+                code=AI_SERVICE_ERROR,
+                message="音频内容为空",
+                status_code=400,
+            )
+
+        if len(pcm) % 2 != 0:
+            raise ApiException(
+                code=AI_SERVICE_ERROR,
+                message="PCM 数据长度非法，请检查是否为 16bit 音频",
+                status_code=400,
+            )
+
+        return pcm
+
+    @staticmethod
+    def _pcm_to_wav_bytes(pcm_data: bytes, sample_rate: int = 24000) -> bytes:
+        io_fd = io.BytesIO()
+        with wave.open(io_fd, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(pcm_data)
+        return io_fd.getvalue()
+
+    async def _vivo_tts_synthesize_pcm(
+        self,
+        text: str,
+        voice_id: str,
+        user_id: str,
+        speed: int = 50,
+        volume: int = 50,
+    ) -> bytes:
+        try:
+            import websockets
+        except ImportError as exc:
+            raise ApiException(
+                code=AI_SERVICE_ERROR,
+                message="未安装 websockets 依赖，无法调用 VIVO TTS",
+                status_code=500,
+            ) from exc
+
+        ws_url = self._build_vivo_tts_ws_url(user_id=user_id)
+        headers = self._build_vivo_ws_headers()
+
+        payload = {
+            "aue": 0,
+            "auf": "audio/L16;rate=24000",
+            "vcn": self._resolve_vivo_tts_voice(voice_id),
+            "speed": max(0, min(100, int(speed))),
+            "volume": max(1, min(100, int(volume))),
+            "text": base64.b64encode(str(text or "").encode("utf-8")).decode("utf-8"),
+            "encoding": "utf8",
+            "reqId": int(time.time() * 1000),
+        }
+
+        timeout_sec = float(self.vivo_tts_timeout_sec)
+        pcm_chunks: list[bytes] = []
+
+        try:
+            async with self._websocket_connect(websockets, ws_url, headers, timeout_sec) as ws:
+                try:
+                    first = await asyncio.wait_for(ws.recv(), timeout=8.0)
+                    if isinstance(first, (bytes, str)):
+                        first_text = first.decode("utf-8") if isinstance(first, bytes) else first
+                        first_obj = json.loads(first_text)
+                        first_code = int(first_obj.get("error_code", 0) or 0)
+                        if first_code != 0:
+                            raise ApiException(
+                                code=AI_SERVICE_ERROR,
+                                message=f"VIVO TTS 握手失败: {first_code} {first_obj.get('error_msg', '')}",
+                                status_code=502,
+                            )
+                except asyncio.TimeoutError:
+                    pass
+                except json.JSONDecodeError:
+                    pass
+
+                await ws.send(json.dumps(payload, ensure_ascii=False))
+
+                while True:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=timeout_sec)
+                    raw_text = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+
+                    try:
+                        msg = json.loads(raw_text)
+                    except json.JSONDecodeError:
+                        continue
+
+                    error_code = int(msg.get("error_code", 0) or 0)
+                    if error_code != 0:
+                        raise ApiException(
+                            code=AI_SERVICE_ERROR,
+                            message=f"VIVO TTS 合成失败: {error_code} {msg.get('error_msg', '')}",
+                            status_code=502,
+                        )
+
+                    data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+                    audio_b64 = str(data.get("audio") or "").strip()
+                    if audio_b64:
+                        try:
+                            pcm_chunks.append(base64.b64decode(audio_b64))
+                        except Exception:
+                            continue
+
+                    try:
+                        status = int(data.get("status", 1))
+                    except Exception:
+                        status = 1
+
+                    if status == 2:
+                        break
+        except ApiException:
+            raise
+        except Exception as exc:
+            # 与官方示例保持一致：若 async websockets 握手被 400 拒绝，回退 websocket-client 再尝试一次。
+            if self._is_ws_http_400(exc):
+                try:
+                    return await asyncio.to_thread(
+                        self._vivo_tts_synthesize_pcm_with_ws_client,
+                        ws_url,
+                        headers,
+                        payload,
+                        timeout_sec,
+                    )
+                except Exception as fallback_exc:
+                    merged = (
+                        f"primary={self._format_vivo_ws_exception(exc)}; "
+                        f"fallback={self._format_ws_exception(fallback_exc)}"
+                    )
+                    raise ApiException(
+                        code=AI_SERVICE_ERROR,
+                        message=f"VIVO TTS 连接异常: {merged}",
+                        status_code=502,
+                    ) from fallback_exc
+
+            raise ApiException(
+                code=AI_SERVICE_ERROR,
+                message=f"VIVO TTS 连接异常: {self._format_vivo_ws_exception(exc)}",
+                status_code=502,
+            ) from exc
+
+        pcm_data = b"".join(pcm_chunks)
+        if not pcm_data:
+            raise ApiException(
+                code=AI_SERVICE_ERROR,
+                message="VIVO TTS 失败：未返回音频数据",
+                status_code=502,
+            )
+        return pcm_data
+
+    async def _vivo_asr_recognize_pcm(
+        self,
+        pcm_data: bytes,
+        user_id: str,
+        punctuation: int,
+        chinese2digital: int,
+        end_vad_time: int,
+    ) -> dict:
+        try:
+            import websockets
+        except ImportError as exc:
+            raise ApiException(
+                code=AI_SERVICE_ERROR,
+                message="未安装 websockets 依赖，无法调用 VIVO ASR",
+                status_code=500,
+            ) from exc
+
+        request_id = uuid.uuid4().hex
+        ws_url = self._build_vivo_asr_ws_url(user_id=user_id, request_id=request_id)
+        headers = {
+            "Authorization": f"Bearer {self.vivo_app_key}",
+        }
+
+        timeout_sec = float(self.vivo_asr_timeout_sec)
+        chunk_size = 1280  # 16kHz/16bit/单声道下 40ms PCM 帧长度
+        text_parts: list[str] = []
+        segments: list[dict] = []
+        sid = ""
+
+        start_payload = {
+            "type": "started",
+            "request_id": request_id,
+            "asr_info": {
+                "end_vad_time": max(300, min(int(end_vad_time), 10000)),
+                "audio_type": "pcm",
+                "chinese2digital": 1 if int(chinese2digital) else 0,
+                "punctuation": 1 if int(punctuation) else 0,
+            },
+        }
+
+        try:
+            async with self._websocket_connect(websockets, ws_url, headers, timeout_sec) as ws:
+                try:
+                    first = await asyncio.wait_for(ws.recv(), timeout=8.0)
+                    if isinstance(first, (bytes, str)):
+                        first_text = first.decode("utf-8") if isinstance(first, bytes) else first
+                        first_obj = json.loads(first_text)
+                        if str(first_obj.get("action") or "").lower() == "error":
+                            err_code = first_obj.get("code") or first_obj.get("error_code") or "unknown"
+                            err_desc = first_obj.get("desc") or first_obj.get("error_msg") or "unknown"
+                            raise ApiException(
+                                code=AI_SERVICE_ERROR,
+                                message=f"VIVO ASR 握手失败: {err_code} {err_desc}",
+                                status_code=502,
+                            )
+                except asyncio.TimeoutError:
+                    pass
+                except json.JSONDecodeError:
+                    pass
+
+                await ws.send(json.dumps(start_payload, ensure_ascii=False))
+
+                for offset in range(0, len(pcm_data), chunk_size):
+                    await ws.send(pcm_data[offset:offset + chunk_size])
+                    await asyncio.sleep(0.04)
+
+                await ws.send(b"--end--")
+
+                while True:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=timeout_sec)
+                    if isinstance(raw, bytes):
+                        try:
+                            raw_text = raw.decode("utf-8")
+                        except Exception:
+                            continue
+                    else:
+                        raw_text = str(raw)
+
+                    try:
+                        msg = json.loads(raw_text)
+                    except json.JSONDecodeError:
+                        continue
+
+                    action = str(msg.get("action") or "").lower()
+                    if action == "error":
+                        err_code = msg.get("code") or msg.get("error_code") or "unknown"
+                        err_desc = msg.get("desc") or msg.get("error_msg") or "unknown"
+                        raise ApiException(
+                            code=AI_SERVICE_ERROR,
+                            message=f"VIVO ASR 识别失败: {err_code} {err_desc}",
+                            status_code=502,
+                        )
+
+                    if action != "result":
+                        continue
+
+                    data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+                    sid = sid or str(data.get("sid") or "")
+                    text = str(data.get("text") or "")
+
+                    if text:
+                        try:
+                            reformation = int(data.get("reformation", 0) or 0)
+                        except Exception:
+                            reformation = 0
+
+                        if reformation == 1 and text_parts:
+                            text_parts[-1] = text
+                        else:
+                            text_parts.append(text)
+
+                        segments.append(
+                            {
+                                "text": text,
+                                "isLast": bool(data.get("is_last", False)),
+                                "reformation": reformation,
+                            }
+                        )
+
+                    if bool(msg.get("is_finish", False)) or bool(data.get("is_last", False)):
+                        break
+
+                try:
+                    await ws.send(b"--close--")
+                except Exception:
+                    pass
+        except asyncio.TimeoutError as exc:
+            raise ApiException(
+                code=AI_SERVICE_ERROR,
+                message="VIVO ASR 调用超时",
+                status_code=504,
+            ) from exc
+        except ApiException:
+            raise
+        except Exception as exc:
+            raise ApiException(
+                code=AI_SERVICE_ERROR,
+                message=f"VIVO ASR 连接异常: {self._format_ws_exception(exc)}",
+                status_code=502,
+            ) from exc
+
+        text = "".join(text_parts).strip()
+        if not text and segments:
+            text = str(segments[-1].get("text") or "").strip()
+
+        return {
+            "text": text,
+            "sid": sid,
+            "requestId": request_id,
+            "segments": segments,
+        }
+
+    async def speech_to_text_short(
+        self,
+        audio_bytes: bytes,
+        audio_format: str = "wav",
+        user_id: str = "",
+        punctuation: Optional[int] = None,
+        chinese2digital: Optional[int] = None,
+        end_vad_time: Optional[int] = None,
+    ) -> dict:
+        """实时短语音识别（VIVO ASR WebSocket）。"""
+        if self.mock:
+            await asyncio.sleep(0.2)
+            return {
+                "text": "这是 ASR 模拟结果",
+                "sid": "mock-sid",
+                "requestId": uuid.uuid4().hex,
+                "segments": [{"text": "这是 ASR 模拟结果", "isLast": True, "reformation": 0}],
+            }
+
+        if not self.vivo_app_key:
+            raise ApiException(
+                code=AI_SERVICE_ERROR,
+                message="VIVO_APP_KEY 未配置，无法调用 VIVO ASR",
+                status_code=500,
+            )
+
+        pcm_data = self._prepare_vivo_asr_pcm(audio_bytes=audio_bytes, audio_format=audio_format)
+        resolved_punctuation = self.vivo_asr_punctuation if punctuation is None else punctuation
+        resolved_chinese2digital = self.vivo_asr_chinese2digital if chinese2digital is None else chinese2digital
+        resolved_end_vad_time = self.vivo_asr_end_vad_time if end_vad_time is None else end_vad_time
+
+        return await self._vivo_asr_recognize_pcm(
+            pcm_data=pcm_data,
+            user_id=user_id,
+            punctuation=resolved_punctuation,
+            chinese2digital=resolved_chinese2digital,
+            end_vad_time=resolved_end_vad_time,
+        )
 
     # ==================== 文本对话 ====================
 
@@ -101,17 +958,66 @@ class MiniMaxClient:
         if self.mock:
             await asyncio.sleep(0.3)  # 模拟网络延迟
             # 根据消息内容返回不同的 mock 数据
-            last_msg = messages[-1]["content"] if messages else ""
+            last_item = messages[-1] if messages else {}
+            last_msg = self._content_to_text((last_item or {}).get("content", ""))
             if "运势" in last_msg or "fortune" in last_msg.lower():
                 return MOCK_FORTUNE
             if "日记" in last_msg or "扩写" in last_msg:
                 return MOCK_DIARY_EXPANSION
             return random.choice(MOCK_CHAT_RESPONSES)
 
-        full_messages = []
-        if system_prompt:
-            full_messages.append({"role": "system", "content": system_prompt})
-        full_messages.extend(messages)
+        if self._use_vivo_chat():
+            if not self.vivo_app_key:
+                raise ApiException(
+                    code=AI_SERVICE_ERROR,
+                    message="VIVO_APP_KEY 未配置，无法调用 VIVO 大模型",
+                    status_code=500,
+                )
+
+            full_messages = self._build_chat_messages(messages, system_prompt)
+            request_id = str(uuid.uuid4())
+            payload = self._build_vivo_chat_payload(
+                full_messages=full_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=False,
+                request_id=request_id,
+            )
+
+            try:
+                async with httpx.AsyncClient(timeout=float(self.vivo_timeout_sec), trust_env=False) as client:
+                    resp = await client.post(
+                        f"{self.vivo_api_base}/v1/chat/completions",
+                        headers=self._build_vivo_headers(),
+                        params={"requestId": request_id, "request_id": request_id},
+                        json=payload,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    text = self._extract_chat_text_from_response(data)
+                    if text:
+                        return text
+                    raise ApiException(
+                        code=AI_SERVICE_ERROR,
+                        message="VIVO 返回内容为空",
+                        status_code=502,
+                    )
+            except httpx.HTTPStatusError as e:
+                raise ApiException(
+                    code=AI_SERVICE_ERROR,
+                    message=f"VIVO 请求失败: {e.response.status_code} {e.response.text[:200]}",
+                    status_code=502,
+                )
+            except ApiException:
+                raise
+            except Exception as e:
+                raise ApiException(
+                    code=AI_SERVICE_ERROR,
+                    message=f"VIVO 服务异常: {str(e)}",
+                    status_code=502,
+                )
+
+        full_messages = self._build_chat_messages(messages, system_prompt)
 
         payload = {
             "model": self.model,
@@ -129,7 +1035,14 @@ class MiniMaxClient:
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                return data["choices"][0]["message"]["content"]
+                text = self._extract_chat_text_from_response(data)
+                if text:
+                    return text
+                raise ApiException(
+                    code=AI_SERVICE_ERROR,
+                    message="MiniMax 返回内容为空",
+                    status_code=502,
+                )
         except httpx.HTTPStatusError as e:
             raise ApiException(
                 code=AI_SERVICE_ERROR,
@@ -175,25 +1088,52 @@ class MiniMaxClient:
         except Exception:
             char_delay = 0.008
 
-        full_messages = []
-        if system_prompt:
-            full_messages.append({"role": "system", "content": system_prompt})
-        full_messages.extend(messages)
+        full_messages = self._build_chat_messages(messages, system_prompt)
 
-        payload = {
-            "model": self.model,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "messages": full_messages,
-            "stream": True,
-        }
+        use_vivo = self._use_vivo_chat()
+        request_params = None
+        provider_name = "MiniMax"
+
+        if use_vivo:
+            if not self.vivo_app_key:
+                raise ApiException(
+                    code=AI_SERVICE_ERROR,
+                    message="VIVO_APP_KEY 未配置，无法调用 VIVO 大模型",
+                    status_code=500,
+                )
+
+            request_id = str(uuid.uuid4())
+            payload = self._build_vivo_chat_payload(
+                full_messages=full_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+                request_id=request_id,
+            )
+            endpoint = f"{self.vivo_api_base}/v1/chat/completions"
+            headers = self._build_vivo_headers()
+            request_params = {"requestId": request_id, "request_id": request_id}
+            timeout_sec = float(max(self.vivo_timeout_sec * 2, 30))
+            provider_name = "VIVO"
+        else:
+            payload = {
+                "model": self.model,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "messages": full_messages,
+                "stream": True,
+            }
+            endpoint = f"{self.api_base}/v1/chat/completions"
+            headers = self.headers
+            timeout_sec = 120.0
 
         try:
-            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=timeout_sec, trust_env=False) as client:
                 async with client.stream(
                     "POST",
-                    f"{self.api_base}/v1/chat/completions",
-                    headers=self.headers,
+                    endpoint,
+                    headers=headers,
+                    params=request_params,
                     json=payload,
                 ) as resp:
                     resp.raise_for_status()
@@ -205,8 +1145,7 @@ class MiniMaxClient:
                             break
                         try:
                             data = json.loads(data_str)
-                            delta = data.get("choices", [{}])[0].get("delta", {})
-                            text = delta.get("content", "")
+                            text = self._extract_stream_delta_text(data)
                             if text:
                                 if char_mode and len(text) > 1:
                                     for char in text:
@@ -220,7 +1159,15 @@ class MiniMaxClient:
         except httpx.HTTPStatusError as e:
             raise ApiException(
                 code=AI_SERVICE_ERROR,
-                message=f"MiniMax 流式请求失败: {e.response.status_code}",
+                message=f"{provider_name} 流式请求失败: {e.response.status_code} {e.response.text[:200]}",
+                status_code=502,
+            )
+        except ApiException:
+            raise
+        except Exception as e:
+            raise ApiException(
+                code=AI_SERVICE_ERROR,
+                message=f"{provider_name} 流式请求异常: {str(e)}",
                 status_code=502,
             )
 
@@ -232,6 +1179,7 @@ class MiniMaxClient:
         model: str = "image-01",
         aspect_ratio: str = "1:1",
         n: int = 1,
+        image: Optional[object] = None,
     ) -> str:
         """
         文生图，返回图片 URL
@@ -252,6 +1200,87 @@ class MiniMaxClient:
             }
             size = sizes.get(aspect_ratio, "1024x1024")
             return f"https://placehold.co/{size}/E8D5F5/6B21A8?text=Mock+AI+Image&font=roboto"
+
+        if self.provider == "vivo":
+            if not self.vivo_app_key:
+                raise ApiException(
+                    code=AI_SERVICE_ERROR,
+                    message="VIVO_APP_KEY 未配置，无法调用 VIVO 图片生成",
+                    status_code=500,
+                )
+
+            request_id = str(uuid.uuid4())
+            query_params = {
+                "module": "aigc",
+                "request_id": request_id,
+                "system_time": str(int(time.time())),
+            }
+            payload = self._build_vivo_image_payload(
+                prompt=prompt,
+                model=model,
+                aspect_ratio=aspect_ratio,
+                image=image,
+            )
+
+            try:
+                async with httpx.AsyncClient(timeout=float(self.vivo_image_timeout_sec), trust_env=False) as client:
+                    resp = await client.post(
+                        f"{self.vivo_api_base}/api/v1/image_generation",
+                        headers=self._build_vivo_headers(),
+                        params=query_params,
+                        json=payload,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+            except httpx.HTTPStatusError as e:
+                raise ApiException(
+                    code=AI_SERVICE_ERROR,
+                    message=f"VIVO 图片生成请求失败: {e.response.status_code} {e.response.text[:200]}",
+                    status_code=502,
+                )
+            except Exception as e:
+                raise ApiException(
+                    code=AI_SERVICE_ERROR,
+                    message=f"VIVO 图片生成异常: {str(e)}",
+                    status_code=502,
+                )
+
+            if not isinstance(data, dict):
+                raise ApiException(
+                    code=AI_SERVICE_ERROR,
+                    message="VIVO 图片生成失败：响应格式异常",
+                    status_code=502,
+                )
+
+            resp_code = data.get("code", 5001)
+            if resp_code != 0:
+                message = str(data.get("message") or "unknown error")
+                trace_id = str(data.get("trace_id") or "")
+                trace_part = f" trace_id={trace_id}" if trace_id else ""
+                raise ApiException(
+                    code=AI_SERVICE_ERROR,
+                    message=f"VIVO 图片生成失败 code={resp_code}:{trace_part} {message}".strip(),
+                    status_code=502,
+                )
+
+            data_obj = data.get("data") if isinstance(data.get("data"), dict) else {}
+            images = data_obj.get("images") if isinstance(data_obj.get("images"), list) else []
+            for item in images:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url") or "").strip()
+                if url:
+                    return url
+
+            legacy_image = str(data_obj.get("image") or "").strip()
+            if legacy_image:
+                return legacy_image
+
+            raise ApiException(
+                code=AI_SERVICE_ERROR,
+                message="VIVO 图片生成失败：未返回图片链接",
+                status_code=502,
+            )
 
         payload = {
             "model": model,
@@ -303,6 +1332,7 @@ class MiniMaxClient:
         model: str = "speech-2.8-hd",
         emotion: str = "neutral",
         speed: float = 1.0,
+        user_id: str = "",
     ) -> bytes:
         """
         文字转语音，返回音频 bytes
@@ -318,6 +1348,29 @@ class MiniMaxClient:
                 "000000000000000000000000000000"
                 "00" * 100
             )
+
+        force_vivo_tts = self.provider == "vivo"
+        use_vivo_tts = force_vivo_tts or bool(self.vivo_app_key)
+        if use_vivo_tts:
+            if not self.vivo_app_key:
+                raise ApiException(
+                    code=AI_SERVICE_ERROR,
+                    message="VIVO_APP_KEY 未配置，无法调用 VIVO TTS",
+                    status_code=500,
+                )
+
+            try:
+                pcm_data = await self._vivo_tts_synthesize_pcm(
+                    text=text,
+                    voice_id=voice_id,
+                    user_id=user_id,
+                    speed=int(max(0, min(100, speed * 50))),
+                    volume=50,
+                )
+                return self._pcm_to_wav_bytes(pcm_data, sample_rate=24000)
+            except ApiException:
+                if force_vivo_tts:
+                    raise
 
         payload = {
             "model": model,
@@ -1116,6 +2169,106 @@ class MiniMaxClient:
             return 0.0
         return len(a & b) / len(union)
 
+    @staticmethod
+    def _is_placeholder_key(raw_key: str) -> bool:
+        key = str(raw_key or "").strip().lower()
+        if not key:
+            return True
+        if key.startswith("your-") or key.startswith("your_"):
+            return True
+        return key in {"your-app-key", "your_app_key", "test-key", "change-me"}
+
+    def _can_use_vivo_text_similarity(self) -> bool:
+        key = str(self.vivo_app_key or getattr(settings, "VIVO_APP_KEY", "") or "").strip()
+        return not self._is_placeholder_key(key)
+
+    @staticmethod
+    def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
+        if not vec_a or not vec_b:
+            return 0.0
+
+        size = min(len(vec_a), len(vec_b))
+        if size <= 0:
+            return 0.0
+
+        dot = 0.0
+        norm_a = 0.0
+        norm_b = 0.0
+        for idx in range(size):
+            try:
+                va = float(vec_a[idx])
+                vb = float(vec_b[idx])
+            except (TypeError, ValueError):
+                va = 0.0
+                vb = 0.0
+            dot += va * vb
+            norm_a += va * va
+            norm_b += vb * vb
+
+        if norm_a <= 0.0 or norm_b <= 0.0:
+            return 0.0
+
+        raw = dot / (math.sqrt(norm_a) * math.sqrt(norm_b))
+        normalized = (raw + 1.0) / 2.0
+        return max(0.0, min(1.0, normalized))
+
+    async def _vivo_embed_texts(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+
+        if not self._can_use_vivo_text_similarity():
+            raise RuntimeError("VIVO_APP_KEY is not configured for text similarity")
+
+        base_url = str(
+            getattr(settings, "VIVO_EMBEDDING_BASE_URL", self.vivo_api_base or "https://api-ai.vivo.com.cn")
+            or self.vivo_api_base
+            or "https://api-ai.vivo.com.cn"
+        ).rstrip("/")
+        model_name = str(getattr(settings, "VIVO_EMBEDDING_MODEL", "m3e-base") or "m3e-base").strip()
+        timeout = float(getattr(settings, "MEMORY_EMBEDDING_TIMEOUT_SEC", self.vivo_timeout_sec) or self.vivo_timeout_sec)
+        endpoint = f"{base_url}/embedding-model-api/predict/batch"
+
+        embeddings: list[list[float]] = []
+        batch_size = 10
+        for idx in range(0, len(texts), batch_size):
+            batch = texts[idx: idx + batch_size]
+            payload = {
+                "model_name": model_name,
+                "sentences": batch,
+            }
+            params = {"requestId": str(uuid.uuid4())}
+            headers = {
+                "Authorization": f"Bearer {self.vivo_app_key}",
+                "Content-Type": "application/json",
+            }
+
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+                resp = await client.post(
+                    endpoint,
+                    headers=headers,
+                    params=params,
+                    json=payload,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+            vectors = data.get("data", []) if isinstance(data, dict) else []
+            if not isinstance(vectors, list) or len(vectors) != len(batch):
+                raise RuntimeError("VIVO embedding response is missing one or more vectors")
+            embeddings.extend(vectors)
+
+        return embeddings
+
+    async def _vivo_batch_text_similarity(self, target: str, candidates: list[str]) -> list[float]:
+        if not candidates:
+            return []
+
+        target_embeddings = await self._vivo_embed_texts([target])
+        target_vec = target_embeddings[0] if target_embeddings else []
+        candidate_vecs = await self._vivo_embed_texts(candidates)
+
+        return [round(self._cosine_similarity(target_vec, vec), 4) for vec in candidate_vecs]
+
     async def detect_duplicate_chat_material(
         self,
         candidate_summary: str,
@@ -1152,10 +2305,12 @@ class MiniMaxClient:
 
         if self.mock:
             target = self._normalize_text(candidate_summary)
-            target_tokens = self._tokenize_for_similarity(candidate_summary)
 
             best_item = None
             best_score = 0.0
+            similarity_mode = "mock-heuristic"
+
+            comparison_pool: list[dict] = []
 
             for item in candidates:
                 content = item["content"]
@@ -1180,23 +2335,50 @@ class MiniMaxClient:
                         "confidence": 0.92,
                     }
 
-                score = self._jaccard(target_tokens, self._tokenize_for_similarity(content))
+                comparison_pool.append(item)
+
+            similarity_scores: list[float] = []
+            if comparison_pool:
+                candidate_texts = [item["content"] for item in comparison_pool]
+                try:
+                    similarity_scores = await self._vivo_batch_text_similarity(candidate_summary, candidate_texts)
+                    similarity_mode = "vivo-embedding"
+                except Exception:
+                    target_tokens = self._tokenize_for_similarity(candidate_summary)
+                    similarity_scores = [
+                        self._jaccard(target_tokens, self._tokenize_for_similarity(content))
+                        for content in candidate_texts
+                    ]
+
+            for item, score in zip(comparison_pool, similarity_scores):
                 if score > best_score:
                     best_score = score
                     best_item = item
 
-            if best_item and best_score >= 0.72:
+            threshold = 0.78 if similarity_mode == "vivo-embedding" else 0.72
+            duplicate_reason = (
+                "high-semantic-overlap-in-vivo-similarity"
+                if similarity_mode == "vivo-embedding"
+                else "high-semantic-overlap-in-mock-heuristic"
+            )
+            not_duplicate_reason = (
+                "vivo-similarity-not-duplicate"
+                if similarity_mode == "vivo-embedding"
+                else "mock-heuristic-not-duplicate"
+            )
+
+            if best_item and best_score >= threshold:
                 return {
                     "is_duplicate": True,
                     "duplicate_material_id": best_item["id"] or None,
-                    "reason": "high-semantic-overlap-in-mock-heuristic",
+                    "reason": duplicate_reason,
                     "confidence": round(best_score, 3),
                 }
 
             return {
                 "is_duplicate": False,
                 "duplicate_material_id": None,
-                "reason": "mock-heuristic-not-duplicate",
+                "reason": not_duplicate_reason,
                 "confidence": round(best_score, 3),
             }
 
@@ -1280,13 +2462,54 @@ _minimax_client: Optional[MiniMaxClient] = None
 
 
 def get_minimax_client() -> MiniMaxClient:
-    """获取 MiniMax 客户端单例（mock 模式切换时自动重建）"""
+    """获取 AI 客户端单例（关键配置变更时自动重建）"""
     global _minimax_client
-    if _minimax_client is None or _minimax_client.mock != settings.MINIMAX_MOCK:
+    if (
+        _minimax_client is None
+        or _minimax_client.mock != settings.MINIMAX_MOCK
+        or _minimax_client.provider != str(settings.LLM_PROVIDER or "minimax").strip().lower()
+        or _minimax_client.api_key != settings.MINIMAX_API_KEY
+        or _minimax_client.api_base != settings.MINIMAX_API_BASE.rstrip("/")
+        or _minimax_client.model != settings.MINIMAX_MODEL
+        or _minimax_client.vivo_app_id != str(settings.VIVO_APP_ID or "").strip()
+        or _minimax_client.vivo_app_key != str(settings.VIVO_APP_KEY or "").strip()
+        or _minimax_client.vivo_api_base != str(settings.VIVO_API_BASE or "https://api-ai.vivo.com.cn").rstrip("/")
+        or _minimax_client.vivo_model != str(settings.VIVO_MODEL or "Doubao-Seed-2.0-mini").strip()
+        or _minimax_client.vivo_reasoning_effort != str(settings.VIVO_REASONING_EFFORT or "minimal").strip().lower()
+        or _minimax_client.vivo_enable_thinking != bool(settings.VIVO_ENABLE_THINKING)
+        or _minimax_client.vivo_image_model != str(settings.VIVO_IMAGE_MODEL or "Doubao-Seedream-4.5").strip()
+        or _minimax_client.vivo_image_timeout_sec != int(settings.VIVO_IMAGE_TIMEOUT_SEC)
+        or _minimax_client.vivo_tts_engine_id != str(settings.VIVO_TTS_ENGINE_ID or "short_audio_synthesis_jovi").strip()
+        or _minimax_client.vivo_tts_timeout_sec != int(settings.VIVO_TTS_TIMEOUT_SEC)
+        or _minimax_client.vivo_asr_engine_id != str(settings.VIVO_ASR_ENGINE_ID or "shortasrinput").strip()
+        or _minimax_client.vivo_asr_timeout_sec != int(settings.VIVO_ASR_TIMEOUT_SEC)
+        or _minimax_client.vivo_asr_end_vad_time != int(settings.VIVO_ASR_END_VAD_TIME)
+        or _minimax_client.vivo_asr_punctuation != int(settings.VIVO_ASR_PUNCTUATION)
+        or _minimax_client.vivo_asr_chinese2digital != int(settings.VIVO_ASR_CHINESE2DIGITAL)
+        or _minimax_client.vivo_asr_net_type != int(settings.VIVO_ASR_NET_TYPE)
+    ):
         _minimax_client = MiniMaxClient(
             api_key=settings.MINIMAX_API_KEY,
             api_base=settings.MINIMAX_API_BASE,
             model=settings.MINIMAX_MODEL,
             mock=settings.MINIMAX_MOCK,
+            provider=settings.LLM_PROVIDER,
+            vivo_app_id=settings.VIVO_APP_ID,
+            vivo_app_key=settings.VIVO_APP_KEY,
+            vivo_api_base=settings.VIVO_API_BASE,
+            vivo_model=settings.VIVO_MODEL,
+            vivo_reasoning_effort=settings.VIVO_REASONING_EFFORT,
+            vivo_enable_thinking=settings.VIVO_ENABLE_THINKING,
+            vivo_timeout_sec=settings.VIVO_TIMEOUT_SEC,
+            vivo_image_model=settings.VIVO_IMAGE_MODEL,
+            vivo_image_timeout_sec=settings.VIVO_IMAGE_TIMEOUT_SEC,
+            vivo_tts_engine_id=settings.VIVO_TTS_ENGINE_ID,
+            vivo_tts_timeout_sec=settings.VIVO_TTS_TIMEOUT_SEC,
+            vivo_asr_engine_id=settings.VIVO_ASR_ENGINE_ID,
+            vivo_asr_timeout_sec=settings.VIVO_ASR_TIMEOUT_SEC,
+            vivo_asr_end_vad_time=settings.VIVO_ASR_END_VAD_TIME,
+            vivo_asr_punctuation=settings.VIVO_ASR_PUNCTUATION,
+            vivo_asr_chinese2digital=settings.VIVO_ASR_CHINESE2DIGITAL,
+            vivo_asr_net_type=settings.VIVO_ASR_NET_TYPE,
         )
     return _minimax_client
