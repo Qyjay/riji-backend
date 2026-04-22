@@ -693,6 +693,7 @@ def test_build_vivo_ws_headers_contains_vaid_when_app_id_exists():
     client = _build_vivo_client(mock=False)
     headers = client._build_vivo_ws_headers()  # type: ignore[attr-defined]
     assert headers["Authorization"].startswith("Bearer ")
+    assert headers["X-AI-GATEWAY-SIGNATURE"] == "developers-aigc"
     assert headers["vaid"] == "test-app-id"
 
 
