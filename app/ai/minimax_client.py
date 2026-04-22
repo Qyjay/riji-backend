@@ -365,6 +365,7 @@ class MiniMaxClient:
     def _build_vivo_ws_headers(self) -> dict:
         headers = {
             "Authorization": f"Bearer {self.vivo_app_key}",
+            "X-AI-GATEWAY-SIGNATURE": "developers-aigc",
         }
         # 官方示例会附带 vaid 头；这里在配置了 VIVO_APP_ID 时一并附带以提升兼容性。
         app_id = str(self.vivo_app_id or "").strip()
