@@ -35,6 +35,7 @@ from app.chat.service import (
     create_new_session,
     get_history,
     get_session_for_message,
+    ingest_session_memory_snapshot,
     list_session_messages,
     list_session_messages_for_ai,
     list_sessions,
@@ -53,6 +54,15 @@ logger = logging.getLogger("uvicorn.error")
 router = APIRouter(prefix="/chat", tags=["AI 对话"])
 
 SYSTEM_PROMPT = "你是日迹 App 的 AI 伙伴，帮助用户记录生活、整理情绪、分析成长。请用温暖、友善的语气回复。"
+
+CHAT_RAG_SOURCE_TYPES = [
+    "diary",
+    "material",
+    "plaza_post",
+    "plaza_comment",
+    "social_message",
+    "chat_session",
+]
 
 
 def _now_ms() -> int:
@@ -108,9 +118,19 @@ def _build_prompt_with_memory(
             query=query,
             scenario=scenario,
             top_k=getattr(settings, "MEMORY_TOP_K", 6),
+            source_types=CHAT_RAG_SOURCE_TYPES if scenario == "chat" else None,
         )
         memory_context = format_memory_context(memories, scenario=scenario)
-        logger.info("[chat] memory retrieved=%s scenario=%s", len(memories), scenario)
+        source_stats = {}
+        for item in memories:
+            source = str(item.get("source_type") or "unknown")
+            source_stats[source] = source_stats.get(source, 0) + 1
+        logger.info(
+            "[chat] memory retrieved=%s scenario=%s sources=%s",
+            len(memories),
+            scenario,
+            source_stats,
+        )
         return append_memory_to_system_prompt(base_prompt, memory_context, scenario=scenario)
     except Exception as exc:
         logger.warning("[chat] memory retrieval skipped: %s", str(exc))
@@ -261,6 +281,7 @@ async def ai_chat(
         current_session.end_time = ai_now
         db.commit()
         db.refresh(assistant_message)
+        ingest_session_memory_snapshot(db, current_session.id)
 
         result = success(reply)
         if material_generated:
@@ -353,6 +374,7 @@ async def stream_response_generator(
             session.end_time = ai_now
         db.commit()
         db.refresh(assistant_message)
+        ingest_session_memory_snapshot(db, session_id)
         yield f"data: {json.dumps({'type': 'done', 'message': serialize_message(assistant_message)}, ensure_ascii=False)}\n\n"
     except Exception as exc:
         logger.error("[chat/stream] generator error: %s\n%s", str(exc), traceback.format_exc())
@@ -422,9 +444,14 @@ async def ai_chat_stream(
                 query=body.message,
                 scenario="chat",
                 top_k=getattr(settings, "MEMORY_TOP_K", 6),
+                source_types=CHAT_RAG_SOURCE_TYPES,
             )
             memory_context = format_memory_context(memories, scenario="chat")
-            logger.info("[chat/stream] memory retrieved=%s", len(memories))
+            source_stats = {}
+            for item in memories:
+                source = str(item.get("source_type") or "unknown")
+                source_stats[source] = source_stats.get(source, 0) + 1
+            logger.info("[chat/stream] memory retrieved=%s sources=%s", len(memories), source_stats)
         except Exception as exc:
             logger.warning("[chat/stream] memory retrieval skipped: %s", str(exc))
 

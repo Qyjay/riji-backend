@@ -5,6 +5,7 @@ AI 分身模块测试
 import json
 import pytest
 from tests.conftest import create_test_user, get_auth_header
+from app.memory.service import create_memory_document
 
 
 # ==================== 记忆 CRUD ====================
@@ -451,6 +452,52 @@ def test_regenerate_profile_with_memories(client, monkeypatch):
     # 确认 AI 收到了记忆内容
     assert len(received_prompts) == 1
     assert "喜欢打羽毛球" in received_prompts[0]
+
+
+def test_regenerate_profile_uses_rag_memory_retrieval(client, db, monkeypatch):
+    """分身侧写生成会把统一记忆检索结果注入到提示词中。"""
+    from app.ai import minimax_client
+
+    captured = {"prompt": ""}
+
+    class FakeMiniMaxClient:
+        async def chat_completion(self, messages, system_prompt="", temperature=0.8, max_tokens=2048):
+            captured["prompt"] = messages[0]["content"]
+            return "这是结合长期记忆生成的分身侧写。"
+
+    monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: FakeMiniMaxClient())
+
+    user_data = create_test_user(client, username="avt_prof_rag_u")
+    headers = get_auth_header(user_data["token"])
+    user_id = user_data["user"]["id"]
+
+    create_memory_document(
+        db,
+        user_id=user_id,
+        source_type="material",
+        source_id="material-rag-1",
+        title="游泳素材",
+        content="我的兴趣是游泳，生活习惯是每周运动两次，近期状态是恢复训练。",
+        visibility="private",
+    )
+    create_memory_document(
+        db,
+        user_id=user_id,
+        source_type="diary",
+        source_id="diary-rag-1",
+        title="训练日记",
+        content="我的社交偏好是小范围交流，写作风格偏温和。",
+        visibility="private",
+    )
+    db.commit()
+
+    resp = client.post("/api/avatar/profile/regenerate", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["data"]["summary"] == "这是结合长期记忆生成的分身侧写。"
+
+    prompt = captured["prompt"]
+    assert "统一长期记忆检索结果" in prompt
+    assert ("来源：material" in prompt) or ("来源：diary" in prompt)
 
 
 # ==================== 鉴权 ====================

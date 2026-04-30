@@ -38,19 +38,31 @@ def _run_safely(label: str, fn) -> None:
 def ingest_chat_session(db: Session, session) -> None:
     """将一段 AI 对话会话沉淀为私有记忆。"""
     def _do() -> None:
-        from app.chat.service import list_session_messages
+        from app.chat.service import list_session_messages, message_to_ai_payload
+        from app.models.memory import MemoryChunk
 
         messages = list_session_messages(db, session.id)
         if not messages:
+            logger.info("[memory] ingest_chat_session skipped: session_id=%s reason=no-messages", session.id)
             return
         lines = [f"对话时间：{session.date or ''}".strip()]
+        turn_count = 0
         for message in messages:
             role = "用户" if message.role == "user" else "AI"
-            content = (message.content or "").strip()
-            if content:
+            payload = message_to_ai_payload(message)
+            content = str(payload.get("content") or "").strip()
+            if content and content != "[空消息]":
                 lines.append(f"{role}：{content}")
+                turn_count += 1
+        if turn_count == 0:
+            logger.info(
+                "[memory] ingest_chat_session skipped: session_id=%s reason=empty-content message_count=%s",
+                session.id,
+                len(messages),
+            )
+            return
         content = "\n".join(lines)
-        create_memory_document(
+        document = create_memory_document(
             db,
             user_id=session.user_id,
             source_type="chat_session",
@@ -66,6 +78,18 @@ def ingest_chat_session(db: Session, session) -> None:
             occurred_at=session.start_time,
         )
         _safe_commit(db)
+        chunk_count = (
+            db.query(MemoryChunk).filter(MemoryChunk.document_id == document.id).count()
+            if document
+            else 0
+        )
+        logger.info(
+            "[memory] ingest_chat_session upserted: session_id=%s turns=%s chunks=%s source_id=%s",
+            session.id,
+            turn_count,
+            chunk_count,
+            session.id,
+        )
 
     _run_safely("ingest_chat_session", _do)
 

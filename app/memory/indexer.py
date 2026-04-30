@@ -8,6 +8,7 @@ Embedding provider 可配置：
 """
 import hashlib
 import os
+import re
 from typing import TypedDict
 from uuid import uuid4
 
@@ -28,6 +29,7 @@ class MemoryIndexHit(TypedDict):
 _COLLECTION = None
 _COLLECTION_KEY = ""
 _VECTOR_DIM = 64
+_TOKEN_RE = re.compile(r"[\w\u4e00-\u9fff]{2,}")
 
 
 def _vector_enabled() -> bool:
@@ -52,7 +54,8 @@ def _embedding_batch_size() -> int:
 
 def _hash_embedding(text: str) -> list[float]:
     values = [0.0] * _VECTOR_DIM
-    tokens = str(text or "").lower().split() or [str(text or "")]
+    raw_text = str(text or "").lower()
+    tokens = _TOKEN_RE.findall(raw_text) or raw_text.split() or [raw_text]
     for token in tokens:
         digest = hashlib.sha256(token.encode("utf-8")).digest()
         for idx, byte in enumerate(digest):
@@ -195,10 +198,16 @@ def _collection_name() -> str:
     return "riji_memory_chunks_hash"
 
 
+def _collection_cache_key() -> str:
+    memory_dir = os.path.abspath(str(getattr(settings, "MEMORY_DIR", ".memory") or ".memory"))
+    return f"{memory_dir}::{_collection_name()}"
+
+
 def _get_collection():
     global _COLLECTION, _COLLECTION_KEY
     collection_name = _collection_name()
-    if _COLLECTION is not None and _COLLECTION_KEY == collection_name:
+    cache_key = _collection_cache_key()
+    if _COLLECTION is not None and _COLLECTION_KEY == cache_key:
         return _COLLECTION
     if not _vector_enabled():
         return None
@@ -210,7 +219,7 @@ def _get_collection():
     os.makedirs(base_dir, exist_ok=True)
     client = chromadb.PersistentClient(path=os.path.join(base_dir, "chroma"))
     _COLLECTION = client.get_or_create_collection(name=collection_name)
-    _COLLECTION_KEY = collection_name
+    _COLLECTION_KEY = cache_key
     return _COLLECTION
 
 
@@ -273,3 +282,66 @@ def search_index(user_id: str, query: str, top_k: int) -> list[MemoryIndexHit]:
             }
         )
     return hits
+
+
+def get_vector_backend_status() -> dict:
+    """检查向量索引后端是否可用（不触发真实 embedding 请求）。"""
+    vector_enabled = _vector_enabled()
+    chromadb_importable = False
+    chromadb_error = ""
+    collection_ready = False
+    indexed_count = 0
+    if vector_enabled:
+        try:
+            import chromadb  # noqa: F401
+
+            chromadb_importable = True
+        except Exception as exc:
+            chromadb_error = str(exc)
+    if vector_enabled and chromadb_importable:
+        collection = _get_collection()
+        collection_ready = collection is not None
+        if collection_ready:
+            try:
+                indexed_count = int(collection.count() or 0)
+            except Exception:
+                indexed_count = 0
+
+    memory_dir = os.path.abspath(getattr(settings, "MEMORY_DIR", ".memory"))
+    return {
+        "vectorEnabled": vector_enabled,
+        "chromadbImportable": chromadb_importable,
+        "chromadbError": chromadb_error,
+        "collectionReady": collection_ready,
+        "collectionName": _collection_name(),
+        "memoryDir": memory_dir,
+        "indexedCount": indexed_count,
+    }
+
+
+def get_embedding_status() -> dict:
+    """检查 embedding provider 配置是否满足最低可用条件。"""
+    provider = _embedding_provider()
+    available = True
+    reason = ""
+    if provider == "dashscope":
+        api_key = str(getattr(settings, "DASHSCOPE_API_KEY", "") or "").strip()
+        available = bool(api_key)
+        reason = "DASHSCOPE_API_KEY is missing" if not available else ""
+    elif provider == "vivo":
+        api_key = str(getattr(settings, "VIVO_APP_KEY", "") or "").strip()
+        available = bool(api_key)
+        reason = "VIVO_APP_KEY is missing" if not available else ""
+    elif provider == "hash":
+        available = True
+    else:
+        available = False
+        reason = f"Unsupported embedding provider: {provider}"
+
+    return {
+        "provider": provider,
+        "available": available,
+        "reason": reason,
+        "dimensions": _embedding_dimensions(),
+        "batchSize": _embedding_batch_size(),
+    }

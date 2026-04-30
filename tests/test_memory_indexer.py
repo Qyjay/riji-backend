@@ -1,7 +1,14 @@
 """记忆向量索引 provider 测试。"""
+from pathlib import Path
 
 from app.config import settings
 from app.memory import indexer
+from app.memory.service import create_memory_document
+
+
+def _reset_indexer_cache():
+    indexer._COLLECTION = None
+    indexer._COLLECTION_KEY = ""
 
 
 def test_dashscope_embedding_uses_openai_compatible_endpoint(monkeypatch):
@@ -135,3 +142,33 @@ def test_vivo_embedding_bge_query_auto_adds_instruction(monkeypatch):
         "model_name": "bge-base-zh-v1.5",
         "sentences": ["为这个句子生成表示以用于检索相关文章：地铁交通"],
     }
+
+
+def test_real_vector_index_roundtrip_with_hash_provider(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "MEMORY_VECTOR_ENABLED", True)
+    monkeypatch.setattr(settings, "MEMORY_EMBEDDING_PROVIDER", "hash")
+    monkeypatch.setattr(settings, "MEMORY_DIR", str(Path(tmp_path) / "memory_store"))
+    _reset_indexer_cache()
+
+    try:
+        create_memory_document(
+            db,
+            user_id="user-1",
+            source_type="diary",
+            source_id="diary-vector-1",
+            title="夜跑日记",
+            content="我最近喜欢晚上夜跑，跑完会去操场散步。",
+            visibility="private",
+        )
+        db.commit()
+
+        hits = indexer.search_index("user-1", "夜跑 散步", top_k=3)
+        status = indexer.get_vector_backend_status()
+
+        assert hits, "真实向量索引写入后应能检索到结果"
+        assert hits[0]["metadata"]["source_type"] == "diary"
+        assert "夜跑" in hits[0]["content"]
+        assert status["collectionReady"] is True
+        assert status["indexedCount"] >= 1
+    finally:
+        _reset_indexer_cache()

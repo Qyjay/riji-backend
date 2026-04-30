@@ -4,6 +4,7 @@
 - get_or_create_session: 获取或创建当前 open 的 session
 """
 import json
+import logging
 import time
 from datetime import datetime
 from typing import List, Optional
@@ -14,6 +15,9 @@ from sqlalchemy.orm import Session
 from app.models.chat import ChatMessage, ChatSession
 from app.models.material import RawMaterial
 from app.models.user import UserSettings
+
+
+logger = logging.getLogger("uvicorn.error")
 
 
 def _now_ms() -> int:
@@ -161,6 +165,18 @@ def _ingest_closed_session_memory(db: Session, session: ChatSession) -> None:
     except Exception:
         # ingest_chat_session 自身会记录 warning，这里兜底避免影响聊天。
         pass
+
+
+def ingest_session_memory_snapshot(db: Session, session_id: str) -> None:
+    """在会话进行中同步更新一份记忆快照，避免在线聊天阶段记忆写入为 0。"""
+    session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+    if not session:
+        logger.info(
+            "[memory] ingest_session_memory_snapshot skipped: session not found session_id=%s",
+            session_id,
+        )
+        return
+    _ingest_closed_session_memory(db, session)
 
 
 async def close_and_materialize(

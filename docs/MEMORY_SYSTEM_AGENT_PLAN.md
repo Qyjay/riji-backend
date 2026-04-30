@@ -49,20 +49,21 @@ riji-backend/alembic/env.py
 
 当前已有能力：
 
-- `chat` 保存对话并在会话关闭时生成 `RawMaterial(type='chat')`。
-- `diary` 保存用户日记、情绪、标签、素材关联。
-- `plaza` 支持帖子、评论、分身评论。
-- `avatar` 已有 `AvatarMemory / AvatarProfile / AvatarStatus / AvatarMatch`。
-- `social` 已有匹配和私聊。
+- `chat` 已支持会话段、自动转素材、聊天记忆快照写入、RAG 注入与 SSE。
+- `diary` 已支持日记写入统一记忆、搜索、多模态素材融合与信息抽取。
+- `material` 已支持素材写入统一记忆，并可在更新/情绪提取后同步刷新记忆。
+- `plaza` 已支持帖子、评论、共享记忆索引、分身评论草稿链路。
+- `avatar` 已有 `AvatarMemory / AvatarProfile / AvatarStatus / AvatarMatch`，并额外接入 `AvatarCard / AgentAction / MemoryProfile`。
+- `social` 已有匹配、私聊，并会把私聊消息沉淀为统一记忆。
+- `memory` 模块已落地：文档、切块、检索、抽取、画像、导出、清空、冲突检测、隐私边界都已具备。
 
 当前缺口：
 
-- 没有统一 `memory_documents`。
-- 没有 `memory_chunks`。
-- 没有统一检索服务。
-- 没有结构化 `memory_facts`。
-- 分身评论只读固定 profile 和最近 AvatarMemory，不够像用户。
-- Agent-to-agent 缺少 avatar_card 和隐私边界。
+- 需要继续确保所有来源在真实环境里稳定进入向量库，而不仅是进入 SQLite 记忆底账。
+- 需要继续验证聊天与分身场景的召回质量，而不仅是“代码路径已接上”。
+- `AvatarProfile` 与统一 `MemoryProfile` 仍有进一步收敛空间。
+- 仍需继续评估 ChromaDB 到 `pgvector` 的迁移路线。
+- 全量测试仍存在耗时偏长的问题，需要继续拆分和收敛。
 
 ### 可以参考的源码
 - github网址：https://github.com/MemPalace/mempalace

@@ -1,13 +1,18 @@
 """记忆 service 测试。"""
 import logging
+import time
+from uuid import uuid4
 
+from app.memory.ingestion import ingest_chat_session
 from app.memory.service import (
     create_memory_document,
     get_memory_document,
     list_memory_documents,
     soft_delete_memory_document,
 )
+from app.models.chat import ChatMessage, ChatSession
 from app.models.memory import MemoryChunk, MemoryDocument
+from tests.conftest import create_test_user
 
 
 def test_create_memory_document_creates_document_and_chunks(db):
@@ -120,3 +125,61 @@ def test_create_memory_document_logs_vector_index_failure(db, monkeypatch, caplo
     assert "vector indexing failed" in caplog.text
     assert "source_type=material" in caplog.text
     assert "embedding api failed" in caplog.text
+
+
+def test_ingest_chat_session_supports_attachment_only_messages(client, db):
+    user_data = create_test_user(client, username="attach_user")
+    user_id = user_data["user"]["id"]
+    now = int(time.time() * 1000)
+    today = time.strftime("%Y-%m-%d", time.localtime())
+
+    session = ChatSession(
+        id=str(uuid4()),
+        user_id=user_id,
+        status="open",
+        start_time=now,
+        end_time=now,
+        message_count=2,
+        date=today,
+        created_at=now,
+    )
+    db.add(session)
+    db.flush()
+
+    db.add(
+        ChatMessage(
+            id=str(uuid4()),
+            user_id=user_id,
+            role="user",
+            content="",
+            timestamp=now + 1,
+            session_id=session.id,
+            attachments='[{"type":"image","name":"campus.jpg","url":"/uploads/demo/campus.jpg"}]',
+        )
+    )
+    db.add(
+        ChatMessage(
+            id=str(uuid4()),
+            user_id=user_id,
+            role="assistant",
+            content="我看到了这张图片，可以继续告诉我你的感受。",
+            timestamp=now + 2,
+            session_id=session.id,
+        )
+    )
+    db.commit()
+
+    ingest_chat_session(db, session)
+
+    saved = (
+        db.query(MemoryDocument)
+        .filter(
+            MemoryDocument.user_id == user_id,
+            MemoryDocument.source_type == "chat_session",
+            MemoryDocument.source_id == session.id,
+        )
+        .first()
+    )
+    assert saved is not None
+    assert "用户上传了图片" in (saved.content or "")
+    assert db.query(MemoryChunk).filter(MemoryChunk.document_id == saved.id).count() >= 1

@@ -1,0 +1,20 @@
+(node:26204) Warning: Accessing non-existent property 'finally' of module exports inside circular dependency
+(Use `node --trace-warnings ...` to show where the warning was created)
+[31mfailed to load config from c:\Users\suri\Desktop\riji\riji-frontend\vite.config.ts[39m
+error when starting dev server:
+Error: spawn EPERM
+    at ChildProcess.spawn (node:internal/child_process:420:11)
+    at Object.spawn (node:child_process:754:9)
+    at ensureServiceIsRunning (c:\Users\suri\Desktop\riji\riji-frontend\node_modules\esbuild\lib\main.js:2164:29)
+    at build (c:\Users\suri\Desktop\riji\riji-frontend\node_modules\esbuild\lib\main.js:2047:26)
+    at bundleConfigFile (file:///c:/Users/suri/Desktop/riji/riji-frontend/node_modules/vite/dist/node/chunks/dep-whKeNLxG.js:68553:26)
+    at loadConfigFromFile (file:///c:/Users/suri/Desktop/riji/riji-frontend/node_modules/vite/dist/node/chunks/dep-whKeNLxG.js:68527:31)
+    at resolveConfig (file:///c:/Users/suri/Desktop/riji/riji-frontend/node_modules/vite/dist/node/chunks/dep-whKeNLxG.js:68138:34)
+    at _createServer (file:///c:/Users/suri/Desktop/riji/riji-frontend/node_modules/vite/dist/node/chunks/dep-whKeNLxG.js:64655:26)
+    at Module.createServer (file:///c:/Users/suri/Desktop/riji/riji-frontend/node_modules/vite/dist/node/chunks/dep-whKeNLxG.js:64652:12)
+    at c:\Users\suri\Desktop\riji\riji-frontend\node_modules\vite\index.cjs:25:55
+npm notice
+npm notice New major version of npm available! 10.9.2 -> 11.13.0
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v11.13.0
+npm notice To update run: npm install -g npm@11.13.0
+npm notice

@@ -1,0 +1,11 @@
+INFO:     Started server process [5620]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     [chat] web_search requested=False results=0 context_len=0
+INFO:     [chat] memory retrieved=0 scenario=chat sources={}
+INFO:     [memory] ingest_chat_session upserted: session_id=dd8dcaf4-92b6-4319-b4e2-df86462ba7c7 turns=2 chunks=1 source_id=dd8dcaf4-92b6-4319-b4e2-df86462ba7c7
+INFO:     [memory] ingest_chat_session upserted: session_id=dd8dcaf4-92b6-4319-b4e2-df86462ba7c7 turns=2 chunks=1 source_id=dd8dcaf4-92b6-4319-b4e2-df86462ba7c7
+INFO:     [chat] web_search requested=False results=0 context_len=0
+INFO:     [chat] memory retrieved=1 scenario=chat sources={'chat_session': 1}
+INFO:     [memory] ingest_chat_session upserted: session_id=6acc34ba-853f-409e-aeaf-f8aabd0596c6 turns=2 chunks=1 source_id=6acc34ba-853f-409e-aeaf-f8aabd0596c6
