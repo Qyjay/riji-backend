@@ -6,7 +6,9 @@ from uuid import uuid4
 
 from app.dependencies import get_current_user, get_db
 from app.memory import schemas
+from app.config import settings
 from app.memory.extractor import extract_facts_from_document
+from app.memory.indexer import get_embedding_status, get_vector_backend_status
 from app.memory.maintenance import decay_memory_facts, detect_memory_conflicts
 from app.memory.privacy import build_agent_context
 from app.memory.profiler import memory_profile_to_dict, regenerate_memory_profile
@@ -17,6 +19,17 @@ from app.models.user import User
 from app.response import ApiException, NOT_FOUND, PARAM_INVALID, success
 
 router = APIRouter(prefix="/memory", tags=["记忆系统"])
+
+
+@router.get("/health", summary="记忆向量健康检查")
+def memory_health():
+    vector_status = get_vector_backend_status()
+    embedding_status = get_embedding_status()
+    return success({
+        "memoryEnabled": bool(getattr(settings, "MEMORY_ENABLED", True)),
+        "vector": vector_status,
+        "embedding": embedding_status,
+    })
 
 
 def _document_to_out(document) -> dict:

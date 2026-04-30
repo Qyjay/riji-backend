@@ -11,6 +11,15 @@ from app.models.memory import MemoryChunk, MemoryDocument
 
 _TOKEN_RE = re.compile(r"[\w\u4e00-\u9fff]{2,}")
 
+_CHAT_SOURCE_BOOST = {
+    "diary": 0.24,
+    "material": 0.2,
+    "plaza_post": 0.16,
+    "plaza_comment": 0.12,
+    "social_message": 0.1,
+    "chat_session": 0.03,
+}
+
 
 def _tokens(text: str) -> list[str]:
     return list(dict.fromkeys(_TOKEN_RE.findall(str(text or "").lower())))[:12]
@@ -22,6 +31,12 @@ def _score_chunk(chunk: MemoryChunk, query_tokens: list[str]) -> float:
         return 0.1
     hits = sum(1 for token in query_tokens if token in content)
     return hits / max(len(query_tokens), 1)
+
+
+def _source_boost(source_type: str, scenario: str) -> float:
+    if scenario != "chat":
+        return 0.0
+    return _CHAT_SOURCE_BOOST.get(str(source_type or ""), 0.0)
 
 
 def retrieve_memories(
@@ -46,11 +61,32 @@ def retrieve_memories(
             from app.memory.indexer import search_index
 
             vector_hits = search_index(user_id, query, max(limit * 4, limit))
+            document_ids = list(
+                dict.fromkeys(
+                    str(hit.get("document_id") or "").strip()
+                    for hit in vector_hits
+                    if str(hit.get("document_id") or "").strip()
+                )
+            )
+            document_map = {}
+            if document_ids:
+                documents = (
+                    db.query(MemoryDocument)
+                    .filter(
+                        MemoryDocument.id.in_(document_ids),
+                        MemoryDocument.user_id == user_id,
+                        MemoryDocument.is_deleted == False,  # noqa: E712
+                    )
+                    .all()
+                )
+                document_map = {document.id: document for document in documents}
             filtered_hits = []
             for hit in vector_hits:
                 metadata = hit.get("metadata", {})
                 visibility = metadata.get("visibility") or "private"
                 source_type = metadata.get("source_type") or ""
+                document_id = str(hit.get("document_id") or "").strip()
+                document = document_map.get(document_id)
                 if visibility not in visibilities:
                     continue
                 if source_types and source_type not in source_types:
@@ -58,18 +94,19 @@ def retrieve_memories(
                 filtered_hits.append(
                     {
                         "chunk_id": hit["chunk_id"],
-                        "document_id": hit["document_id"],
+                        "document_id": document_id,
                         "source_type": source_type,
                         "source_id": metadata.get("source_id") or "",
-                        "title": "",
+                        "title": document.title if document else "",
                         "content": hit["content"],
-                        "summary": "",
+                        "summary": document.summary if document else "",
                         "visibility": visibility,
-                        "score": hit["score"],
-                        "occurred_at": 0,
+                        "score": round(float(hit["score"]) + _source_boost(source_type, scenario), 4),
+                        "occurred_at": document.occurred_at if document else 0,
                     }
                 )
             if filtered_hits:
+                filtered_hits.sort(key=lambda item: item["score"], reverse=True)
                 return filtered_hits[:limit]
         except Exception:
             pass
@@ -96,7 +133,11 @@ def retrieve_memories(
     for chunk, document in rows:
         score = _score_chunk(chunk, query_tokens)
         recency_boost = 0.05 if document.occurred_at else 0.0
-        scored.append((score + recency_boost, chunk, document))
+        scored.append((
+            score + recency_boost + _source_boost(document.source_type, scenario),
+            chunk,
+            document,
+        ))
 
     scored.sort(key=lambda item: (item[0], item[2].occurred_at), reverse=True)
     hits = []
@@ -159,7 +200,11 @@ def retrieve_shared_memories(
     scored = []
     for chunk, document in rows:
         score = _score_chunk(chunk, query_tokens)
-        scored.append((score + (0.05 if document.occurred_at else 0.0), chunk, document))
+        scored.append((
+            score + (0.05 if document.occurred_at else 0.0) + _source_boost(document.source_type, scenario),
+            chunk,
+            document,
+        ))
 
     scored.sort(key=lambda item: (item[0], item[2].occurred_at), reverse=True)
     return [

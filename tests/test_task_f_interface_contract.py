@@ -9,6 +9,7 @@ from app.chat.service import get_or_create_session
 from app.diary import service as diary_service
 from app.models.chat import ChatMessage, ChatSession
 from app.models.material import RawMaterial
+from app.models.memory import MemoryChunk, MemoryDocument
 from app.models.user import UserSettings
 from tests.conftest import create_test_user, get_auth_header
 
@@ -162,6 +163,126 @@ def test_chat_contract_non_mock_path(client, monkeypatch):
     assert payload["code"] == 0
     assert payload["data"] == "这是非 mock 路径回复"
     assert payload["message"] == "ok"
+
+
+def test_chat_turn_upserts_memory_without_closing_session(client, db, monkeypatch):
+    user_data = create_test_user(client, username="taskf_memory_user")
+    headers = get_auth_header(user_data["token"])
+    user_id = user_data["user"]["id"]
+
+    class FakeClient:
+        async def chat_completion(self, *_args, **_kwargs):
+            return "已记录这次对话。"
+
+    monkeypatch.setattr("app.ai.minimax_client.get_minimax_client", lambda: FakeClient())
+
+    resp = client.post(
+        "/api/chat",
+        json={"message": "今天在图书馆复习离散数学"},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["code"] == 0
+
+    memory_doc = (
+        db.query(MemoryDocument)
+        .filter(
+            MemoryDocument.user_id == user_id,
+            MemoryDocument.source_type == "chat_session",
+            MemoryDocument.is_deleted.is_(False),
+        )
+        .first()
+    )
+    assert memory_doc is not None
+    assert "今天在图书馆复习离散数学" in (memory_doc.content or "")
+    assert db.query(MemoryChunk).filter(MemoryChunk.document_id == memory_doc.id).count() >= 1
+
+
+def test_chat_rag_retrieves_non_chat_session_sources_after_material_diary_post(client, monkeypatch):
+    user_data = create_test_user(client, username="taskf_rag_e2e_u")
+    headers = get_auth_header(user_data["token"])
+
+    from app.memory import retriever as memory_retriever
+
+    captured = {"items": [], "called": False}
+    original_retrieve_memories = memory_retriever.retrieve_memories
+
+    def spy_retrieve_memories(db, **kwargs):
+        items = original_retrieve_memories(db, **kwargs)
+        if kwargs.get("scenario") == "chat":
+            captured["called"] = True
+            captured["items"] = items
+        return items
+
+    monkeypatch.setattr(memory_retriever, "retrieve_memories", spy_retrieve_memories)
+
+    class FakeClient:
+        async def generate_diary(self, *_args, **_kwargs):
+            return {
+                "title": "游泳训练日",
+                "content": "今天去游泳馆训练了自由泳，状态比上周更稳定。",
+            }
+
+        async def chat_completion(self, *_args, **_kwargs):
+            return "你可以先从每周两次、每次 40 分钟的游泳训练开始。"
+
+    def fake_get_minimax_client():
+        return FakeClient()
+
+    monkeypatch.setattr("app.ai.minimax_client.get_minimax_client", fake_get_minimax_client)
+
+    today = _today()
+
+    material_resp = client.post(
+        "/api/materials",
+        json={
+            "type": "text",
+            "content": "今天在游泳馆练习了自由泳，感觉耐力在恢复。",
+            "emotion": {"label": "积极", "score": 0.9, "emoji": "😄"},
+            "tags": ["游泳", "训练"],
+            "date": today,
+        },
+        headers=headers,
+    )
+    assert material_resp.status_code == 200
+    assert material_resp.json()["code"] == 0
+
+    diary_resp = client.post(
+        "/api/diaries/generate",
+        json={"date": today, "weather": "晴"},
+        headers=headers,
+    )
+    assert diary_resp.status_code == 200
+    assert diary_resp.json()["code"] == 0
+
+    plaza_resp = client.post(
+        "/api/plaza/posts",
+        json={
+            "type": "share",
+            "content": "周末想找同学一起去游泳馆训练，有人一起吗？",
+            "images": [],
+            "location": "南开游泳馆",
+            "tags": ["游泳", "运动"],
+            "allow_agent_reply": True,
+            "school_only": False,
+        },
+        headers=headers,
+    )
+    assert plaza_resp.status_code == 200
+    assert plaza_resp.json()["code"] == 0
+
+    chat_resp = client.post(
+        "/api/chat",
+        json={"message": "游泳 训练 计划，帮我安排一个入门方案"},
+        headers=headers,
+    )
+    assert chat_resp.status_code == 200
+    assert chat_resp.json()["code"] == 0
+
+    assert captured["called"] is True
+    assert captured["items"]
+    assert any(item.get("source_type") != "chat_session" for item in captured["items"])
+    assert any(item.get("source_type") in {"material", "diary", "plaza_post"} for item in captured["items"])
 
 
 def test_chat_skip_material_when_duplicate_detected(client, db, monkeypatch):

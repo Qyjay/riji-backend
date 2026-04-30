@@ -1,0 +1,8 @@
+
+> uni-preset-vue@0.0.0 dev:h5
+> uni
+
+Please note that in running mode, due to log output, sourcemap, and uncompressed source code, the performance and package size are not as good as release mode.
+Vite is compiled on demand, and clicking on an uncompiled page at runtime will compile first and then load, resulting in a slower display, and there is no such problem after release.
+Compiler version: 4.84（vue3）
+Compiling...

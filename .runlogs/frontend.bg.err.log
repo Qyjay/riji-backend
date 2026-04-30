@@ -1,0 +1,57 @@
+(node:29440) Warning: Accessing non-existent property 'finally' of module exports inside circular dependency
+(Use `node --trace-warnings ...` to show where the warning was created)
+DEPRECATION WARNING [legacy-js-api]: The legacy JS API is deprecated and will be removed in Dart Sass 2.0.0.
+
+More info: https://sass-lang.com/d/legacy-js-api
+
+DEPRECATION WARNING [import]: Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.
+
+More info and automated migrator: https://sass-lang.com/d/import
+
+   ╷
+88 │ @import './common/styles/handdrawn.scss';
+   │         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   ╵
+    src\App.vue 88:9  root stylesheet
+
+DEPRECATION WARNING [import]: Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.
+
+More info and automated migrator: https://sass-lang.com/d/import
+
+   ╷
+90 │ @import './common/design-tokens.scss';
+   │         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   ╵
+    src\App.vue 90:9  root stylesheet
+
+DEPRECATION WARNING [import]: Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.
+
+More info and automated migrator: https://sass-lang.com/d/import
+
+   ╷
+91 │ @import './common/animations.scss';
+   │         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   ╵
+    src\App.vue 91:9  root stylesheet
+
+DEPRECATION WARNING [import]: Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.
+
+More info and automated migrator: https://sass-lang.com/d/import
+
+   ╷
+92 │ @import './common/doodle.scss';
+   │         ^^^^^^^^^^^^^^^^^^^^^^
+   ╵
+    src\App.vue 92:9  root stylesheet
+
+DEPRECATION WARNING [import]: Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.
+
+More info and automated migrator: https://sass-lang.com/d/import
+
+  ╷
+5 │ @import './design-tokens.scss';
+  │         ^^^^^^^^^^^^^^^^^^^^^^
+  ╵
+    src\common\doodle.scss 5:9  @import
+    src\App.vue 92:9            root stylesheet
+

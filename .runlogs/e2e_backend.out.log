@@ -1,0 +1,10 @@
+INFO:     127.0.0.1:2098 - "GET /api/auth/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2123 - "GET /api/auth/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2123 - "GET /api/memory/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2123 - "POST /api/auth/register HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2123 - "POST /api/chat HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2123 - "POST /api/chat/close-session HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2123 - "GET /api/memory/documents?sourceType=chat_session&limit=5 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2123 - "POST /api/avatar/profile/regenerate HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2123 - "GET /api/avatar/profile HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2123 - "POST /api/chat HTTP/1.1" 200 OK
