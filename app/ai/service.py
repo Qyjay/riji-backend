@@ -7,6 +7,9 @@ import json
 import re
 import logging
 import time
+import sys
+import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -185,6 +188,8 @@ def _resolve_asr_audio_format(file: UploadFile, audio_bytes: bytes) -> str:
         return "mp3"
     if audio_bytes.startswith(b"OggS"):
         return "ogg"
+    if audio_bytes.startswith(b"\x1a\x45\xdf\xa3"):
+        return "webm"
     if len(audio_bytes) >= 12 and audio_bytes[4:8] == b"ftyp":
         return "m4a"
 
@@ -202,11 +207,20 @@ def _resolve_asr_audio_format(file: UploadFile, audio_bytes: bytes) -> str:
         return "m4a"
     if filename.endswith(".ogg") or content_type in {"audio/ogg", "application/ogg"}:
         return "ogg"
+    if filename.endswith(".webm") or content_type in {"audio/webm", "video/webm"}:
+        return "webm"
 
     return "unknown"
 
 
 def _convert_audio_to_wav_16k_mono(audio_bytes: bytes, source_format: str) -> bytes:
+    conda_bin = Path(sys.prefix) / "Library" / "bin"
+    if conda_bin.exists():
+        current_path = os.environ.get("PATH", "")
+        conda_bin_text = str(conda_bin)
+        if conda_bin_text.lower() not in current_path.lower():
+            os.environ["PATH"] = f"{conda_bin_text}{os.pathsep}{current_path}"
+
     try:
         from pydub import AudioSegment
     except ImportError as exc:
@@ -219,9 +233,31 @@ def _convert_audio_to_wav_16k_mono(audio_bytes: bytes, source_format: str) -> by
             status_code=400,
         ) from exc
 
+    ffmpeg_exe = os.getenv("IMAGEIO_FFMPEG_EXE", "").strip()
+    conda_ffmpeg = conda_bin / "ffmpeg.exe"
+    if conda_ffmpeg.exists():
+        ffmpeg_exe = str(conda_ffmpeg)
+    if not ffmpeg_exe:
+        try:
+            import imageio_ffmpeg
+
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            ffmpeg_exe = ""
+    if ffmpeg_exe:
+        AudioSegment.converter = ffmpeg_exe
+
     format_hint = "mp4" if source_format == "m4a" else source_format
+    temp_path = ""
     try:
-        segment = AudioSegment.from_file(io.BytesIO(audio_bytes), format=format_hint)
+        suffix = f".{source_format}" if source_format in {"mp3", "m4a", "ogg", "webm"} else ""
+        if suffix:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+                temp_file.write(audio_bytes)
+                temp_path = temp_file.name
+            segment = AudioSegment.from_file(temp_path, format=format_hint)
+        else:
+            segment = AudioSegment.from_file(io.BytesIO(audio_bytes), format=format_hint)
         normalized = segment.set_frame_rate(16000).set_channels(1).set_sample_width(2)
         output = io.BytesIO()
         normalized.export(output, format="wav")
@@ -238,6 +274,10 @@ def _convert_audio_to_wav_16k_mono(audio_bytes: bytes, source_format: str) -> by
             message="音频自动转换失败，请上传标准 wav/pcm，或使用可识别的 mp3/m4a/ogg 文件。",
             status_code=400,
         ) from exc
+    finally:
+        if temp_path:
+            with suppress(Exception):
+                os.remove(temp_path)
 
     if not converted:
         raise ApiException(
@@ -266,13 +306,13 @@ async def speech_to_text_short_service(
         )
 
     audio_format = _resolve_asr_audio_format(file, audio_bytes)
-    if audio_format in {"mp3", "m4a", "ogg"}:
+    if audio_format in {"mp3", "m4a", "ogg", "webm"}:
         audio_bytes = _convert_audio_to_wav_16k_mono(audio_bytes, source_format=audio_format)
         audio_format = "wav"
     elif audio_format == "unknown":
         raise ApiException(
             code=PARAM_ERROR,
-            message="ASR 仅支持 wav/pcm，或可自动转换的 mp3/m4a/ogg 音频。",
+            message="ASR 仅支持 wav/pcm，或可自动转换的 mp3/m4a/ogg/webm 音频。",
             status_code=400,
         )
 
