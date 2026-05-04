@@ -5,6 +5,7 @@ sqlalchemy==2.0.35
 alembic==1.13.0
 pydantic>=2.9.2,<3.0.0
 pydantic-settings==2.5.0
+tzdata==2026.2
 
 # Auth & security
 python-jose[cryptography]==3.3.0

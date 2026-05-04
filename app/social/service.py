@@ -47,6 +47,8 @@ def match_to_out(match: Match, current_user_id: str, db: Session) -> dict:
         "school": other_user.school or "" if other_user else "",
         "common_tags": _decode(match.common_tags, []),
         "matched_at": match.created_at,
+        "status": match.status or "pending",
+        "match_type": match.match_type or "long_term",
     }
 
 
@@ -102,17 +104,16 @@ def _normalize_match_report(report_data: dict) -> dict:
     }
 
 
-def list_matches(db: Session, user_id: str) -> list[dict]:
-    """查询已接受的匹配列表"""
-    matches = (
-        db.query(Match)
-        .filter(
-            ((Match.user_id == user_id) | (Match.target_id == user_id)),
-            Match.status == "accepted",
-        )
-        .order_by(Match.created_at.desc())
-        .all()
+def list_matches(db: Session, user_id: str, include_pending: bool = False) -> list[dict]:
+    """查询匹配列表；默认仅已接受（与历史行为一致）。include_pending=True 时包含 pending，便于核对搭子申请。"""
+    q = db.query(Match).filter(
+        (Match.user_id == user_id) | (Match.target_id == user_id),
     )
+    if include_pending:
+        q = q.filter(Match.status.in_(["accepted", "pending"]))
+    else:
+        q = q.filter(Match.status == "accepted")
+    matches = q.order_by(Match.created_at.desc()).all()
     return [match_to_out(match, user_id, db) for match in matches]
 
 
@@ -291,14 +292,32 @@ def apply_buddy(db: Session, user_id: str, target_user_id: str, reason: str = ""
 
 
 def respond_buddy(db: Session, user_id: str, request_id: str, accept: bool) -> None:
-    """同意或拒绝搭子申请"""
+    """同意或拒绝搭子申请（仅接收方 target_id 可操作，与 POST /social/buddy 发起方向一致）"""
     match = db.query(Match).filter(
         Match.id == request_id,
-        Match.target_id == user_id,
         Match.match_type == "buddy",
     ).first()
     if not match:
-        raise ApiException(code=NOT_FOUND, message="搭子申请不存在", status_code=404)
+        raise ApiException(
+            code=NOT_FOUND,
+            message="搭子申请不存在：请确认路径里的 id 是「分身 start-chat」或「申请搭子」接口返回的 social 匹配 id，而不是分身推荐 AvatarMatch 的 id",
+            status_code=404,
+        )
+    if match.target_id != user_id:
+        if match.user_id == user_id:
+            raise ApiException(
+                code=PARAM_INVALID,
+                message="你是该搭子申请的发起方，不能给自己执行同意/拒绝；请让对方（接收方）登录后调用本接口",
+                status_code=400,
+            )
+        raise ApiException(
+            code=NOT_FOUND,
+            message="搭子申请不存在或当前登录用户不是该申请的接收方；请用接收方账号（密码见种子数据说明）登录后再试",
+            status_code=404,
+        )
+
+    if match.status != "pending":
+        raise ApiException(code=PARAM_INVALID, message="该搭子申请已处理，无需再次响应", status_code=400)
 
     match.status = "accepted" if accept else "rejected"
     db.commit()

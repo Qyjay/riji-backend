@@ -11,7 +11,14 @@ from app.models.anniversary import Anniversary
 from app.models.user_profile import UserProfile
 from app.models.derivative import DiaryDerivative
 from app.models.plaza import PlazaPost, PlazaComment, PostLike
-from app.models.avatar import AvatarMemory, AvatarStatus, AvatarMatch, AvatarProfile
+from app.models.avatar import (
+    AvatarMemory,
+    AvatarMatch,
+    AvatarProfile,
+    AvatarStatus,
+    AvatarSurfLog,
+    AvatarUsageStat,
+)
 from app.models.memory import (
     AgentAction,
     AvatarCard,
@@ -43,6 +50,8 @@ __all__ = [
     "AvatarStatus",
     "AvatarMatch",
     "AvatarProfile",
+    "AvatarUsageStat",
+    "AvatarSurfLog",
     "MemoryDocument",
     "MemoryChunk",
     "MemoryFact",

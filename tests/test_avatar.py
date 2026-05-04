@@ -171,6 +171,11 @@ def test_get_status_auto_create(client):
     assert isinstance(status["enabledChannels"], list)
     assert isinstance(status["enabledActions"], list)
     assert isinstance(status["matchRange"], dict)
+    assert status["surfFrequency"] == "adaptive"
+    assert isinstance(status["personalizedSurfPlan"], dict)
+    assert status["autoMatchEnabled"] is False
+    assert status["autoCommentEnabled"] is False
+    assert status["autoPublishEnabled"] is False
 
 
 def test_update_status(client):
@@ -195,6 +200,73 @@ def test_update_status(client):
     assert status["enabledActions"] == ["browse"]
     assert status["matchRange"]["school"] == "北京大学"
     assert status["matchRange"]["distanceKm"] == 5
+
+
+def test_update_status_personalized_surf_config(client):
+    """PUT /avatar/status 更新个性化冲浪配置"""
+    user_data = create_test_user(client, username="avatar_status_surf")
+    headers = get_auth_header(user_data["token"])
+
+    resp = client.put("/api/avatar/status", json={
+        "surf_frequency": "adaptive",
+        "surf_window": {"start": "08:00", "end": "22:30"},
+        "quiet_mode": True,
+        "auto_match_enabled": True,
+        "auto_comment_enabled": True,
+    }, headers=headers)
+
+    assert resp.status_code == 200
+    status = resp.json()["data"]
+    assert status["surfFrequency"] == "adaptive"
+    assert status["surfWindow"]["start"] == "08:00"
+    assert status["quietMode"] is True
+    assert status["autoMatchEnabled"] is True
+    assert status["autoCommentEnabled"] is True
+    assert status["autoPublishEnabled"] is False
+
+
+def test_record_usage_event_updates_personalized_plan(client):
+    """POST /avatar/usage-events 根据使用事件更新私人化冲浪计划"""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    user_data = create_test_user(client, username="avatar_usage_plan")
+    headers = get_auth_header(user_data["token"])
+    client.put("/api/avatar/status", json={"auto_match_enabled": True}, headers=headers)
+
+    ts = int(datetime(2026, 5, 3, 21, 10, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp() * 1000)
+    for _ in range(3):
+        resp = client.post("/api/avatar/usage-events", json={
+            "event_type": "app_open",
+            "timestamp": ts,
+            "page": "plaza",
+        }, headers=headers)
+        assert resp.status_code == 200
+    resp = client.post("/api/avatar/usage-events", json={
+        "event_type": "active_ping",
+        "timestamp": ts,
+        "active_ms": 15 * 60 * 1000,
+        "page": "plaza",
+    }, headers=headers)
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["recorded"] is True
+    assert data["personalizedSurfPlan"]["mode"] == "personalized"
+    assert 21 in data["personalizedSurfPlan"]["preferredHours"]
+    assert data["nextSurfAt"] > 0
+
+
+def test_list_surf_logs_empty(client):
+    """GET /avatar/surf-logs 默认返回空日志列表"""
+    user_data = create_test_user(client, username="avatar_surf_logs")
+    headers = get_auth_header(user_data["token"])
+
+    resp = client.get("/api/avatar/surf-logs", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["items"] == []
+    assert data["total"] == 0
 
 
 def test_update_status_partial(client):

@@ -33,6 +33,12 @@ class UpdateStatusRequest(BaseModel):
     enabled_channels: Optional[list[str]] = None
     enabled_actions: Optional[list[str]] = None
     match_range: Optional[dict] = None
+    surf_frequency: Optional[str] = None
+    surf_window: Optional[dict] = None
+    quiet_mode: Optional[bool] = None
+    auto_match_enabled: Optional[bool] = None
+    auto_comment_enabled: Optional[bool] = None
+    auto_publish_enabled: Optional[bool] = None
 
 
 class MatchActionRequest(BaseModel):
@@ -49,6 +55,14 @@ class CreateAgentCommentDraftRequest(BaseModel):
 class AutoSurfRequest(BaseModel):
     """触发一次分身自动冲浪评论"""
     limit: Optional[int] = 1
+
+
+class RecordUsageEventRequest(BaseModel):
+    """记录 App 使用事件，用于学习用户个性化冲浪时间"""
+    event_type: str                      # app_open/app_resume/app_close/active_ping/page_view
+    timestamp: Optional[int] = None       # 毫秒时间戳，不传用服务端时间
+    active_ms: Optional[int] = 0          # 本次活跃时长，用于 active_ping/app_close
+    page: Optional[str] = ""              # 当前页面，如 plaza/diary/chat/avatar
 
 
 # ==================== 响应 Schema ====================
@@ -82,18 +96,67 @@ class AvatarStatusOut(CamelModel):
     enabled_channels: list[str]
     enabled_actions: list[str]
     match_range: dict
+    surf_frequency: str
+    surf_window: dict
+    personalized_surf_plan: dict
+    next_surf_at: int
+    last_surf_at: int
+    daily_surf_count: int
+    daily_action_count: int
+    quiet_mode: bool
+    auto_match_enabled: bool
+    auto_comment_enabled: bool
+    auto_publish_enabled: bool
+
+
+class TargetUserBriefOut(CamelModel):
+    """用户型匹配的目标用户摘要（不含私密信息）"""
+    id: str
+    name: str
+    avatar: str
+    school: str
+    major: str
+    grade: str
 
 
 class AvatarMatchOut(CamelModel):
     """分身推荐匹配响应（camelCase 输出）"""
     id: str
     post_id: str
-    post: PlazaPostOut                  # 嵌套完整帖子
+    post: PlazaPostOut                          # 锚定帖子（帖子型=匹配帖子，用户型=对方最近帖）
     match_score: int
     match_reasons: list[str]
     agent_conversation: list[dict]
     status: str
     created_at: int
+    # Phase 5 用户型/帖子型匹配扩展字段
+    match_type: str = "post"                    # post | user
+    intent_type: str = "buddy"                  # buddy/help/share/dating
+    target_user: Optional[TargetUserBriefOut] = None  # 用户型匹配时非空
+    # Phase 6 AI 精排字段
+    suggested_opening: str = ""                 # AI 生成的开场白
+    ai_refined: bool = False                    # 是否已 AI 精排
+    risk_flags: list[str] = []                  # 风险标注
+
+
+class StartChatRequest(BaseModel):
+    """从分身推荐一键发起搭子申请（Phase 7）"""
+    opening_message: Optional[str] = None   # 用户可选编辑的开场白；不传则使用 AI 建议开场白
+
+
+class StartChatResultOut(CamelModel):
+    """发起搭子申请的结果"""
+    social_match_id: str        # 创建/已有的 social.Match ID，前端跳转至搭子详情
+    suggested_opening: str      # 本次推荐的 AI 开场白（供前端展示或预填）
+    is_duplicate: bool          # True = 双方已有 pending/accepted 申请，复用已有记录
+
+
+class RebuildMatchesResultOut(CamelModel):
+    """触发分身推荐重建（规则 + AI 精排）的结果"""
+    total_matches: int
+    newly_ai_refined: int
+    ai_refined_total: int
+    refreshed_at: int
 
 
 class AvatarProfileOut(CamelModel):
@@ -135,3 +198,32 @@ class AutoSurfResultOut(CamelModel):
     published_count: int
     draft_count: int
     skipped_reason: str = ""
+
+
+class UsageEventOut(CamelModel):
+    """使用事件记录结果"""
+    recorded: bool
+    personalized_surf_plan: dict
+    next_surf_at: int
+    recorded_at: int
+
+
+class AvatarSurfLogOut(CamelModel):
+    """分身冲浪日志响应"""
+    id: str
+    trigger: str
+    status: str
+    scanned_posts: int
+    scanned_users: int
+    generated_matches: int
+    generated_actions: int
+    skipped_reason: str
+    error_message: str
+    started_at: int
+    finished_at: Optional[int] = None
+
+
+class SurfLogsOut(CamelModel):
+    """分身冲浪日志列表"""
+    items: list[AvatarSurfLogOut]
+    total: int
