@@ -23,11 +23,15 @@ router = APIRouter(prefix="/social", tags=["社交"])
 
 @router.get("/matches", summary="已匹配列表（裸数组）")
 def list_matches(
+    include_pending: bool = Query(
+        False,
+        description="为 true 时返回 accepted 与 pending（含分身 start-chat 未通过的搭子申请）；默认仅 accepted",
+    ),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """获取已接受的匹配列表，返回裸数组"""
-    matches = service.list_matches(db, current_user.id)
+    """获取匹配列表：默认仅已接受；可带 include_pending 查看待处理搭子/匹配"""
+    matches = service.list_matches(db, current_user.id, include_pending=include_pending)
     result = [MatchOut(**match).model_dump(by_alias=True) for match in matches]
     return success(result)
 

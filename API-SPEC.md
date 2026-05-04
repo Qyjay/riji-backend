@@ -1289,6 +1289,8 @@ interface Match {
   school: string                // 对方学校
   commonTags: string[]          // 共同标签
   matchedAt: number             // Unix 毫秒时间戳
+  status: 'pending' | 'accepted' | 'rejected'   // 本条匹配当前状态（默认列表多为 accepted；见 §6.2 Query）
+  matchType: 'long_term' | 'buddy'              // 长期匹配或短期搭子
 }
 ```
 
@@ -1360,17 +1362,24 @@ interface UserPortrait {
 ### 6.2 获取已匹配列表
 
 ```
-GET /social/matches
+GET /social/matches?include_pending=
 ```
 
 **需要认证：** ✅
 
-**响应 `data`：** `Match[]`
+**Query 参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `include_pending` | boolean | `false` | 为 `true` 时返回 `status` 为 `accepted` 与 `pending` 的匹配（便于核对「分身 start-chat」§11.7.4 或 `POST /social/buddy` 产生的待处理搭子）；为 `false` 时行为与历史一致，仅 `accepted` |
+
+**响应 `data`：** `Match[]`（每项含 `status`、`matchType`，见 §6.1 `Match`）
 
 **实现说明：**
-- 返回 `status="accepted"` 的所有匹配（含长期匹配和搭子）
+- 默认（`include_pending` 缺省或 `false`）：仅返回 `status="accepted"` 的匹配（含长期匹配与搭子），用于「已通过、可发消息」列表。
+- `include_pending=true`：额外包含 `pending`，用于接收方查看待响应的搭子申请或联调核对；不含 `rejected`。
 - 包含对方用户的昵称、头像、学校信息（后端 JOIN 查询）
-- 按 `matchedAt` 降序排列
+- 按 `matchedAt`（即 `created_at`）降序排列
 
 ### 6.3 发送匹配请求
 
@@ -1537,7 +1546,7 @@ POST /social/buddy/{requestId}/respond
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `requestId` | string | 搭子申请 ID |
+| `requestId` | string | **`social.Match` 表主键**，即搭子记录在库里的 `id`。来源示例：`POST /social/buddy` 响应中的 `id`，或 **`POST /avatar/matches/{matchId}/start-chat`**（§11.7.4）响应中的 **`socialMatchId`**。**不得**使用分身推荐 `GET /avatar/matches` 返回的 **`AvatarMatch.id`**（与 `targetUser.id`、帖子 `post.id` 均不同）。 |
 
 **请求体：**
 
@@ -1549,8 +1558,13 @@ POST /social/buddy/{requestId}/respond
 
 **响应 `data`：** `null`
 
-**错误码：**
-- 申请不存在或不是发给当前用户的搭子类型 → 404 + `message: "搭子申请不存在"`
+**实现说明：** 仅 **`Match.target_id` 等于当前用户** 的待处理搭子可申请可响应（接收方操作）。发起方（`user_id`）调用本接口会返回业务错误提示，不应由发起方「自批」申请。
+
+**错误码与典型 `message`（`ApiException`）：**
+- 记录不存在或 `id` 误用为分身推荐 id 等 → **404**，`message` 含引导：须使用 `start-chat` / 申请搭子返回的 **社交匹配 id**，而非 `AvatarMatch.id`
+- 当前用户为该搭子记录的 **发起方**（`user_id`）→ **400**，`message` 含「请让对方（接收方）登录后调用」
+- 当前用户非该记录的参与方 → **404**，`message` 含「不是该申请的接收方」
+- 该搭子 **`status` 已不是 `pending`**（已处理）→ **400**，`message`：`该搭子申请已处理，无需再次响应`
 
 ### 6.10 获取用户画像
 
@@ -2014,6 +2028,16 @@ GET /avatar/matches
 - 排除 `status="dismissed"` 的记录
 - 按 `matchScore` 降序
 
+### 9.9.1 重新生成分身推荐（规则 + AI 精排）
+
+```
+POST /avatar/matches/rebuild
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** 见 **§11.7.2**（`totalMatches` / `newlyAiRefined` / `aiRefinedTotal` / `refreshedAt`）。
+
 ### 9.10 处理分身推荐（接受/忽略）
 
 ```
@@ -2201,9 +2225,351 @@ python scripts/reindex_memories.py --progress-every 500 --fail-fast
 
 ---
 
-## 11. AI 分身扩展模块（Avatar Memory / Actions）
+## 11. AI 分身模块（Avatar）
 
-### 11.1 获取分身名片
+> 分身（Avatar）是用户在日迹里的 AI 代理。它记录用户兴趣和需求（记忆库），  
+> 在广场自动为用户寻找搭子（推荐匹配），并按个性化计划定时冲浪广场内容。
+
+### 11.1 分身记忆库
+
+#### 11.1.1 获取记忆列表
+
+```
+GET /avatar/memories?category=
+```
+
+**需要认证：** ✅
+
+**查询参数：**
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `category` | string | 否 | 筛选类别：`fact`/`interest`/`personality`/`need`/`habit`/`relation` |
+
+**响应 `data`：** `AvatarMemory[]`
+
+```typescript
+interface AvatarMemory {
+  id: string
+  category: string
+  content: string
+  source: string              // "manual" | "diary" | "chat" | "behavior"
+  sourceRef?: string
+  confidence: number          // 0.0–1.0
+  isActive: boolean
+  isPinned: boolean
+  needType?: string           // need 类型专属：buddy/dating/help/activity
+  urgency?: string            // need 专属：active/passive
+  expiry?: number             // 毫秒时间戳
+  matchStatus?: string        // need 专属：searching/matched/expired
+  tags: string[]
+  createdAt: number
+  updatedAt: number
+}
+```
+
+#### 11.1.2 添加记忆
+
+```
+POST /avatar/memories
+```
+
+**需要认证：** ✅
+
+**请求体：**
+
+```typescript
+{
+  category: string    // fact/interest/personality/need/habit/relation
+  content: string
+}
+```
+
+**响应 `data`：** `AvatarMemory`
+
+#### 11.1.3 更新记忆
+
+```
+PUT /avatar/memories/{memoryId}
+```
+
+**需要认证：** ✅
+
+**请求体（所有字段可选）：**
+
+```typescript
+{
+  content?: string
+  isActive?: boolean
+  isPinned?: boolean
+  category?: string
+  tags?: string[]
+}
+```
+
+**响应 `data`：** `AvatarMemory`
+
+#### 11.1.4 删除记忆
+
+```
+DELETE /avatar/memories/{memoryId}
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** `null`
+
+---
+
+### 11.2 分身状态与个性化冲浪配置
+
+#### 11.2.1 获取分身状态
+
+```
+GET /avatar/status
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** `AvatarStatus`
+
+```typescript
+interface AvatarStatus {
+  isActive: boolean               // 分身是否在线冲浪
+  browsedCount: number            // 累计浏览帖子数
+  matchedCount: number            // 累计推荐匹配数
+  chattingCount: number           // 当前正在聊天数
+  lastActiveAt: number            // 上次活跃时间戳（毫秒）
+  enabledChannels: string[]       // 开启的频道：buddy/help/share/dating
+  enabledActions: string[]        // 开启的动作：browse/match/comment
+  matchRange: {
+    school: string
+    distanceKm: number
+    autoReplyDailyLimit: number
+    autoReplyIntervalMinutes: number
+    autoReplyMinScore: number
+  }
+
+  // ── 个性化冲浪配置（Phase 1 新增）──────────────────────────
+  surfFrequency: string           // "adaptive"|"low"|"medium"|"high"|"custom"
+  surfWindow: {                   // 允许冲浪的时间段
+    start: string                 // "09:00"
+    end: string                   // "23:00"
+    timezone: string              // "Asia/Shanghai"
+  }
+  quietMode: boolean              // 暂停分身（用户可随时开启）
+  autoMatchEnabled: boolean       // 是否自动生成推荐匹配
+  autoCommentEnabled: boolean     // 是否自动生成评论草稿
+  autoPublishEnabled: boolean     // 是否自动发布（默认 false，高风险）
+  nextSurfAt: number              // 下次冲浪时间戳（毫秒）
+  lastSurfAt: number              // 上次冲浪时间戳（毫秒）
+  dailySurfCount: number          // 今日已冲浪次数
+  dailyActionCount: number        // 今日已执行行动数
+
+  personalizedSurfPlan: {
+    mode: "cold_start" | "personalized"
+    confidence: number            // 0.0–0.95，数据越多越高
+    preferredHours: number[]      // 你最活跃的小时（0-23）
+    surfSlots: Array<{
+      hour: number
+      minute: number
+      reason: string              // 人类可读的原因说明
+    }>
+    quietHours: number[]          // 安静时段（不冲浪）
+    dailyLimit: number            // 每日冲浪上限
+    minIntervalMinutes: number    // 两次冲浪最短间隔
+    sampleSize: number            // 用于生成计划的数据点数
+    feedbackHours: Record<string, number>   // 各时段的反馈得分（Phase 2）
+    banditArms: Record<string, {            // UCB Bandit 臂状态（Phase 3）
+      pulls: number
+      totalReward: number
+      meanReward: number
+    }>
+    totalPulls: number            // 历史总冲浪次数
+    updatedAt: number
+  }
+}
+```
+
+#### 11.2.2 更新分身状态
+
+```
+PUT /avatar/status
+```
+
+**需要认证：** ✅
+
+**请求体（所有字段可选）：**
+
+```typescript
+{
+  isActive?: boolean
+  enabledChannels?: string[]
+  enabledActions?: string[]
+  matchRange?: object
+  surfFrequency?: "adaptive" | "low" | "medium" | "high" | "custom"
+  surfWindow?: { start: string, end: string, timezone: string }
+  quietMode?: boolean
+  autoMatchEnabled?: boolean
+  autoCommentEnabled?: boolean
+  autoPublishEnabled?: boolean    // 开启前需先开启 autoCommentEnabled
+}
+```
+
+**响应 `data`：** `AvatarStatus`
+
+**实现说明：**
+- `surfFrequency = "adaptive"` 时，后端立即重新计算 `personalizedSurfPlan` 和 `nextSurfAt`
+- 开启 `autoPublishEnabled` 之前必须先开启 `autoCommentEnabled`，否则返回参数错误
+
+---
+
+### 11.3 使用习惯采集（个性化冲浪 Phase 1）
+
+```
+POST /avatar/usage-events
+```
+
+**需要认证：** ✅
+
+**说明：** 前端在 App 生命周期关键节点调用，后端按 `weekday × hour` 聚合存储，用于生成个性化冲浪计划。不存储原始事件序列，只累加统计量（保护隐私）。
+
+**请求体：**
+
+```typescript
+{
+  event_type: "app_open" | "app_resume" | "app_close" | "active_ping" | "page_view"
+  timestamp?: number    // 毫秒时间戳，不传则用服务端当前时间
+  active_ms?: number    // 本次活跃时长（毫秒），用于 active_ping / app_close
+  page?: string         // 当前页面：plaza / diary / chat / avatar / study
+}
+```
+
+**事件发送时机：**
+
+| 事件 | 何时发送 |
+|------|---------|
+| `app_open` | 用户从桌面冷启动 App |
+| `app_resume` | App 从后台切回前台 |
+| `app_close` | App 切到后台或关闭（附带本次活跃时长） |
+| `active_ping` | 用户持续活跃时每 60 秒发一次心跳 |
+| `page_view` | 切换到主要页面时 |
+
+**响应 `data`：**
+
+```typescript
+{
+  recorded: true
+  personalizedSurfPlan: PersonalizedSurfPlan   // 更新后的最新计划
+  nextSurfAt: number                            // 下次冲浪时间
+  recordedAt: number                            // 服务端处理时间
+}
+```
+
+**响应示例：**
+
+```json
+{
+  "code": 0,
+  "data": {
+    "recorded": true,
+    "nextSurfAt": 1746273045000,
+    "recordedAt": 1746269410000,
+    "personalizedSurfPlan": {
+      "mode": "personalized",
+      "confidence": 0.82,
+      "preferredHours": [15, 20, 21, 22],
+      "surfSlots": [
+        { "hour": 14, "minute": 45, "reason": "你通常在 15:00 后使用 App，提前为你预热推荐" },
+        { "hour": 19, "minute": 45, "reason": "你通常在 20:00 后使用 App，且历史上这个时段你更愿意接受推荐" }
+      ],
+      "dailyLimit": 5,
+      "minIntervalMinutes": 120,
+      "sampleSize": 42
+    }
+  }
+}
+```
+
+---
+
+### 11.4 冲浪执行日志
+
+```
+GET /avatar/surf-logs?limit=20
+```
+
+**需要认证：** ✅
+
+**查询参数：**
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `limit` | number | 20 | 最多返回条数，上限 100 |
+
+**响应 `data`：**
+
+```typescript
+{
+  items: AvatarSurfLog[]
+  total: number
+}
+
+interface AvatarSurfLog {
+  id: string
+  trigger: "scheduler" | "manual" | "post_publish" | "profile_update"
+  status: "success" | "skipped" | "failed" | "running"
+  scannedPosts: number
+  scannedUsers: number
+  generatedMatches: number
+  generatedActions: number
+  skippedReason: string     // 跳过时的原因，如"安静模式"/"已达今日上限"
+  errorMessage: string
+  startedAt: number
+  finishedAt?: number
+}
+```
+
+---
+
+### 11.5 分身侧写
+
+#### 11.5.1 获取侧写
+
+```
+GET /avatar/profile
+```
+
+**需要认证：** ✅
+
+**响应 `data`：**
+
+```typescript
+{
+  summary: string       // AI 生成的人格摘要（150-300字）
+  diaryCount: number    // 基于多少篇日记生成
+  chatCount: number     // 基于多少条对话生成
+  generatedAt: number   // 生成时间戳
+}
+```
+
+#### 11.5.2 重新生成侧写
+
+```
+POST /avatar/profile/regenerate
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** 同 11.5.1
+
+**说明：** 调用 AI，读取记忆库 + 日记 + 聊天历史重新生成摘要。支持 Mock 模式（`MINIMAX_MOCK=true`）。
+
+---
+
+### 11.6 分身名片
+
+#### 11.6.1 获取名片
 
 ```
 GET /avatar/card
@@ -2211,9 +2577,24 @@ GET /avatar/card
 
 **需要认证：** ✅
 
-**响应 `data`：** `AvatarCard`
+**响应 `data`：**
 
-### 11.2 重新生成分身名片
+```typescript
+{
+  displayName: string       // 展示名称
+  publicSummary: string     // 可公开的简介摘要
+  interestTags: string[]    // 兴趣标签
+  socialIntent: string[]    // 社交意图
+  conversationStyle: {
+    tone: string
+  }
+  boundaries: string[]      // 社交边界
+  visibility: "private" | "school" | "match_card" | "public"
+  updatedAt: number
+}
+```
+
+#### 11.6.2 重新生成名片
 
 ```
 POST /avatar/card/regenerate
@@ -2221,9 +2602,171 @@ POST /avatar/card/regenerate
 
 **需要认证：** ✅
 
-**响应 `data`：** `AvatarCard`
+**响应 `data`：** 同 11.6.1
 
-### 11.3 分身行动列表
+---
+
+### 11.7 分身推荐匹配（Phase 5–7）
+
+> Phase 5：`GET /avatar/matches` 同时返回**帖子型匹配**与**用户型匹配**（三路行为/关系/画像信号宽召回 + 规则打分）。
+> Phase 6：`POST /avatar/matches/rebuild` 触发完整推荐重建流水线，顶部若干条经当前配置的**大模型**（`LLM_PROVIDER`，如 VIVO）精排，生成开场白与 `riskFlags`。
+> Phase 7：`POST /avatar/matches/{matchId}/start-chat` 将推荐转为真实**搭子申请**（`social.Match`，`matchType=buddy`），见 **§11.7.4**。
+
+#### 11.7.1 获取推荐列表
+
+```
+GET /avatar/matches
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** `AvatarMatch[]`
+
+```typescript
+interface TargetUserBrief {
+  id: string
+  name: string
+  avatar: string
+  school: string
+  major: string
+  grade: string
+}
+
+interface AvatarMatch {
+  id: string
+  postId: string
+  post: PlazaPost             // 锚定帖子（帖子型=匹配帖子，用户型=对方最近帖子）
+  matchScore: number          // 0–99（规则分，AI精排后会更新）
+  matchReasons: string[]      // 可读原因列表（AI精排后更口语化）
+  agentConversation: Array<{
+    from: "my_agent" | "their_agent"
+    content: string
+    timestamp: number
+  }>
+  status: "new" | "viewed" | "chatting" | "dismissed"
+  createdAt: number
+  // Phase 5 用户型/帖子型匹配扩展字段
+  matchType: "post" | "user"          // post=帖子型召回，user=用户型召回
+  intentType: "buddy" | "help" | "share" | "dating"  // 推断的社交意图类型
+  targetUser: TargetUserBrief | null  // 用户型匹配时非空，帖子型为 null
+  // Phase 6 AI 精排新增字段
+  suggestedOpening: string            // AI 生成的开场白建议（空串表示未精排）
+  aiRefined: boolean                  // 是否已经过 AI 精排
+  riskFlags: string[]                 // 风险标注，如 ['意图不匹配']，无风险为 []
+}
+```
+
+**实现说明：**
+- 每次请求时触发规则宽召回（帖子 + 用户双通道），自动刷新未精排记录
+- `matchType="user"` 的记录：`targetUser` 非空，`post` 为对方最近的广场帖子（作为入口锚点）
+- `school_only=true` 的帖子只对同校用户参与推荐
+- 排除 `status="dismissed"` 的记录，按 `matchScore` 降序
+
+#### 11.7.2 重新生成分身推荐（Phase 5+6）
+
+```
+POST /avatar/matches/rebuild
+```
+
+**需要认证：** ✅
+
+**请求体：** 无
+
+**响应 `data`：**
+
+```typescript
+{
+  totalMatches: number      // 当前非dismissed匹配总数
+  newlyAiRefined: number   // 本次新精排的数量（已精排过的不重复处理）
+  aiRefinedTotal: number   // 全库已精排匹配数
+  refreshedAt: number      // 本次刷新时间戳（毫秒）
+}
+```
+
+**实现说明：**
+- **Phase 5**：同时执行帖子通道和用户通道双路规则召回
+  - 帖子通道：扫最新 60 条广场帖子，兴趣词 / 频道 / 学校多维打分
+  - 用户通道：三路信号（已有搭子关系 +25、互动行为 +8~14、画像相似 +10~25）召回用户，取其最近帖子作为锚点
+- **Phase 6**：取未精排的 top-10 调用大模型，输出精排分 / 自然理由 / 开场白 / 风险标注（`MINIMAX_MOCK=true` 时为 Mock，不调真实 API）
+- AI 精排失败时静默降级，规则分结果仍然有效
+- `aiRefined=true` 的记录不会被重复精排（幂等）
+
+#### 11.7.3 处理推荐（接受/忽略）
+
+```
+POST /avatar/matches/{matchId}/action
+```
+
+**需要认证：** ✅
+
+**请求体：**
+
+```typescript
+{
+  action: "chat" | "dismiss"
+}
+```
+
+**响应 `data`：** `null`
+
+**实现说明：**
+- `chat`：标记为 `chatting`，同时触发 UCB Bandit 正向反馈（+5）
+- `dismiss`：标记为 `dismissed`，触发 Bandit 负向反馈（-2）
+
+#### 11.7.4 一键发起搭子申请（Phase 7，社交闭环）
+
+```
+POST /avatar/matches/{matchId}/start-chat
+```
+
+**需要认证：** ✅
+
+**路径参数：** `matchId` — 当前登录用户名下的一条 `AvatarMatch.id`。
+
+**请求体：**
+
+```typescript
+{
+  openingMessage?: string    // 用户自定义开场白；不传则使用本条的 suggestedOpening（Phase 6），再兜底空串（服务端截断至 200 字）
+}
+```
+
+**响应 `data`：**
+
+```typescript
+{
+  socialMatchId: string      // 新建或复用的 social.Match.id；前端可跳转搭子/匹配详情
+  suggestedOpening: string   // 本条匹配上的 AI 建议开场白（与请求体无关，供展示/预填）
+  isDuplicate: boolean       // true：双方已存在 pending/accepted 的 buddy 申请，本次未建新行，仅复用 ID
+}
+```
+
+**前置与状态变更：**
+- 仅允许 `AvatarMatch.status !== "dismissed"`；成功后（含复用已有申请）将本条 `AvatarMatch.status` 置为 `"chatting"`。
+- **目标用户解析**：`matchType="user"` 且存在 `targetUser.id` 时以该用户为目标；否则以锚定帖子 `post.userId` 为目标（帖子型）。
+- **搭子记录**：新建时写入 `social.Match`：`matchType="buddy"`，`status="pending"`，`matchReport` = 用户传入的 `openingMessage` 或 AI `suggestedOpening`（截断后），`commonTags` 含推断的 `intentType`。
+- **Bandit**：成功路径在服务端触发 UCB 反馈，奖励 **+10**（高于 `POST .../action` 中 `chat` 的 +5），用于强化「从推荐真正发起申请」的信号。
+- **防重复**：若双方已有 `buddy` 且 `status` 为 `pending` 或 `accepted`，不插入新 `social.Match`，返回已有 `socialMatchId` 且 `isDuplicate=true`，仍将本条 `AvatarMatch` 标为 `chatting`。
+
+**业务错误（`ApiException`，统一外层 `code`/`message`）：**
+
+| 场景 | HTTP | 说明 |
+|------|------|------|
+| 匹配不存在或非本人 | 404 | `匹配记录不存在` |
+| `status === "dismissed"` | 400 | `已忽略的推荐不能发起申请` |
+| 锚定帖子已删（帖子型无法解析作者） | 404 | `帖子已删除，无法定位目标用户` |
+| 目标为本人 | 400 | `不能向自己发起搭子申请` |
+
+**产品约定（与 TASK-G Phase 7 一致）：**
+- 分身不默认代发私聊；本接口只创建搭子申请并落库开场白，实际首条消息可由前端在对方同意后发送。
+- 前端建议：弹窗编辑 `openingMessage` → 调本接口 → 用 `socialMatchId` 跳转搭子详情；高风险 `riskFlags` 建议二次确认（产品层）。
+- **接收方同意/拒绝**：使用 **§6.9** `POST /social/buddy/{requestId}/respond`，路径中的 `requestId` **必须**为响应里的 **`socialMatchId`**；勿将 **`matchId`（`AvatarMatch.id`）**、**`targetUser.id`** 或 **帖子 `post.id`** 当作 `requestId`。待处理列表可用 **§6.2** `GET /social/matches?include_pending=true` 核对。
+
+---
+
+### 11.8 分身行动草稿与审批
+
+#### 11.8.1 分身行动列表
 
 ```
 GET /avatar/actions?status=draft
@@ -2231,9 +2774,29 @@ GET /avatar/actions?status=draft
 
 **需要认证：** ✅
 
+**查询参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `status` | string | 筛选：`draft` / `published` / `rejected` |
+
 **响应 `data`：** `AgentAction[]`
 
-### 11.4 生成广场评论草稿
+```typescript
+interface AgentAction {
+  id: string
+  actionType: string      // "comment_post"
+  targetType: string      // "plaza_post"
+  targetId: string
+  inputContext: object
+  outputText: string      // 草稿内容
+  status: "draft" | "published" | "rejected"
+  createdAt: number
+  updatedAt: number
+}
+```
+
+#### 11.8.2 生成广场评论草稿
 
 ```
 POST /avatar/actions/plaza-comment-draft
@@ -2246,14 +2809,42 @@ POST /avatar/actions/plaza-comment-draft
 ```typescript
 {
   post_id: string
+  parent_comment_id?: string   // 回复某条评论时传入
 }
 ```
 
 **响应 `data`：** `AgentAction`
 
-**说明：** 只生成草稿，不直接发布。草稿会读取分身侧写与长期记忆，但提示词要求不得泄露私密原文。
+**说明：** 只生成草稿，不直接发布。草稿读取分身侧写与长期记忆，提示词要求不得泄露私密原文。
 
-### 11.5 批准分身行动
+#### 11.8.3 触发一次分身自动冲浪
+
+```
+POST /avatar/actions/auto-surf
+```
+
+**需要认证：** ✅
+
+**请求体：**
+
+```typescript
+{
+  limit?: number    // 本次最多生成几条草稿，默认 1，最大 5
+}
+```
+
+**响应 `data`：**
+
+```typescript
+{
+  actions: AgentAction[]
+  publishedCount: number
+  draftCount: number
+  skippedReason: string    // 跳过时的原因
+}
+```
+
+#### 11.8.4 批准分身行动
 
 ```
 POST /avatar/actions/{actionId}/approve
@@ -2263,9 +2854,9 @@ POST /avatar/actions/{actionId}/approve
 
 **响应 `data`：** `AgentAction`
 
-**说明：** 当前支持批准 `comment_post`，会发布一条 `isAgent=true` 的广场评论。
+**说明：** 当前支持批准 `comment_post`，会发布一条 `isAgent=true` 的广场评论。批准后触发 UCB Bandit 正向反馈（+4）。
 
-### 11.6 拒绝分身行动
+#### 11.8.5 拒绝分身行动
 
 ```
 POST /avatar/actions/{actionId}/reject
@@ -2274,6 +2865,8 @@ POST /avatar/actions/{actionId}/reject
 **需要认证：** ✅
 
 **响应 `data`：** `AgentAction`
+
+**说明：** 拒绝后触发 UCB Bandit 负向反馈（-2），帮助分身学习你不喜欢的时段/内容。
 
 ---
 
@@ -2325,7 +2918,7 @@ POST /avatar/actions/{actionId}/reject
 | 40 | GET | `/user/settings` | User | 获取设置 |
 | 41 | POST | `/user/settings` | User | 更新设置 |
 | 42 | GET | `/user/semester-report` | User | 学期报告 |
-| 43 | GET | `/social/matches` | Social | 已匹配列表 |
+| 43 | GET | `/social/matches?include_pending=` | Social | 已匹配列表（可选含 pending 搭子） |
 | 44 | POST | `/social/match-requests` | Social | 发送匹配请求 |
 | 45 | GET | `/social/messages/{matchId}?limit=&before=` | Social | 获取匹配消息 |
 | 46 | POST | `/social/messages/{matchId}` | Social | 发送消息 |
@@ -2353,10 +2946,29 @@ POST /avatar/actions/{actionId}/reject
 | 68 | GET | `/plaza/posts/{postId}/comments` | Plaza | 评论列表 |
 | 69 | POST | `/plaza/posts/{postId}/comments` | Plaza | 发送评论 |
 | 70 | POST | `/plaza/posts/{postId}/agent-comment` | Plaza | AI 分身自动评论 |
-| 71 | GET | `/avatar/matches` | Plaza | 分身推荐匹配 |
-| 72 | POST | `/avatar/matches/{matchId}/action` | Plaza | 处理分身推荐 |
+| 71 | GET | `/avatar/memories?category=` | Avatar | 分身记忆列表 |
+| 72 | POST | `/avatar/memories` | Avatar | 添加记忆 |
+| 73 | PUT | `/avatar/memories/{memoryId}` | Avatar | 更新记忆 |
+| 74 | DELETE | `/avatar/memories/{memoryId}` | Avatar | 删除记忆 |
+| 75 | GET | `/avatar/status` | Avatar | 获取分身状态（含个性化冲浪计划） |
+| 76 | PUT | `/avatar/status` | Avatar | 更新分身状态 |
+| 77 | POST | `/avatar/usage-events` | Avatar | 上报 App 使用事件（个性化冲浪学习） |
+| 78 | GET | `/avatar/surf-logs?limit=` | Avatar | 分身冲浪执行日志 |
+| 79 | GET | `/avatar/matches` | Avatar | 分身推荐匹配列表（帖子型 + 用户型双通道） |
+| 80 | POST | `/avatar/matches/rebuild` | Avatar | 重新生成分身推荐（规则宽召回 + AI精排） |
+| 81 | POST | `/avatar/matches/{matchId}/action` | Avatar | 处理分身推荐（chat/dismiss） |
+| 82 | POST | `/avatar/matches/{matchId}/start-chat` | Avatar | 从分身推荐一键发起搭子申请（Phase 7） |
+| 83 | GET | `/avatar/profile` | Avatar | 获取分身侧写 |
+| 84 | POST | `/avatar/profile/regenerate` | Avatar | 重新生成分身侧写 |
+| 85 | GET | `/avatar/card` | Avatar | 获取分身名片 |
+| 86 | POST | `/avatar/card/regenerate` | Avatar | 重新生成分身名片 |
+| 87 | GET | `/avatar/actions?status=` | Avatar | 分身行动列表 |
+| 88 | POST | `/avatar/actions/plaza-comment-draft` | Avatar | 生成广场评论草稿 |
+| 89 | POST | `/avatar/actions/auto-surf` | Avatar | 触发一次分身自动冲浪 |
+| 90 | POST | `/avatar/actions/{actionId}/approve` | Avatar | 批准分身行动 |
+| 91 | POST | `/avatar/actions/{actionId}/reject` | Avatar | 拒绝分身行动 |
 
-**共计 72 个接口**（Auth 4 + Material 8 + Upload 2 + Diary 12 + Chat 6 + AI 2 + User 8 + Social 10 + Anniversary 5 + Study 6 + Plaza 9）
+**共计 91 个接口**（Auth 4 + Material 8 + Upload 2 + Diary 12 + Chat 6 + AI 2 + User 8 + Social 10 + Anniversary 5 + Study 6 + Plaza 9 + **Avatar 21**）
 
 ---
 
@@ -2412,6 +3024,13 @@ POST /avatar/actions/{actionId}/reject
 | 广场帖子类型 | `'buddy'` \| `'help'` \| `'share'` \| `'dating'` | `PlazaPost.type` |
 | 分身推荐状态 | `'new'` \| `'viewed'` \| `'chatting'` \| `'dismissed'` | `AgentMatch.status` |
 | 分身推荐操作 | `'chat'` \| `'dismiss'` | `POST /avatar/matches/{matchId}/action` |
+| 分身推荐匹配来源 | `'post'` \| `'user'` | `AvatarMatch.matchType` |
+| 分身推荐意图类型 | `'buddy'` \| `'help'` \| `'share'` \| `'dating'` | `AvatarMatch.intentType` |
+| 冲浪频率模式 | `'adaptive'` \| `'low'` \| `'medium'` \| `'high'` \| `'custom'` | `AvatarStatus.surfFrequency` |
+| 使用事件类型 | `'app_open'` \| `'app_resume'` \| `'app_close'` \| `'active_ping'` \| `'page_view'` | `POST /avatar/usage-events` |
+| 冲浪计划模式 | `'cold_start'` \| `'personalized'` | `personalizedSurfPlan.mode` |
+| 冲浪日志状态 | `'running'` \| `'success'` \| `'skipped'` \| `'failed'` | `AvatarSurfLog.status` |
+| 冲浪触发来源 | `'scheduler'` \| `'manual'` \| `'post_publish'` \| `'profile_update'` | `AvatarSurfLog.trigger` |
 | 主题 | `'light'` \| `'dark'` | `Settings.theme` |
 | 待办优先级 | `'low'` \| `'medium'` \| `'high'` | `Todo.priority` |
 

@@ -37,6 +37,8 @@ class MatchOut(CamelModel):
     school: str
     common_tags: List[str]
     matched_at: int
+    status: str = "accepted"
+    match_type: str = "long_term"
 
 
 class MatchRequestOut(CamelModel):

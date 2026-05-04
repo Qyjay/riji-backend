@@ -2,6 +2,7 @@
 社交模块测试
 """
 import pytest
+from app.config import settings
 from tests.conftest import create_test_user, get_auth_header
 
 
@@ -53,6 +54,33 @@ def test_respond_match_request(client):
     assert resp.status_code == 200
     assert resp.json()["code"] == 0
     assert resp.json()["data"] is None
+
+
+def test_list_matches_include_pending_shows_buddy(client):
+    """默认 GET /social/matches 不含 pending；include_pending=true 可核对搭子申请"""
+    user1_data = create_test_user(client, username="pendmatch1")
+    user2_data = create_test_user(client, username="pendmatch2")
+    headers1 = get_auth_header(user1_data["token"])
+    target_id = user2_data["user"]["id"]
+    apply_resp = client.post(
+        "/api/social/buddy",
+        json={"target_user_id": target_id, "reason": "测 pending 列表"},
+        headers=headers1,
+    )
+    assert apply_resp.status_code == 200
+    request_id = apply_resp.json()["data"]["id"]
+
+    default_resp = client.get("/api/social/matches", headers=headers1)
+    assert default_resp.status_code == 200
+    assert all(m["id"] != request_id for m in default_resp.json()["data"])
+
+    pend_resp = client.get("/api/social/matches?include_pending=true", headers=headers1)
+    assert pend_resp.status_code == 200
+    pend_data = pend_resp.json()["data"]
+    row = next((m for m in pend_data if m["id"] == request_id), None)
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["matchType"] == "buddy"
 
 
 def test_buddy_request_uses_target_user_id(client):
@@ -237,8 +265,12 @@ def test_create_match_request_rejects_missing_user(client):
     assert data["message"] == "用户不存在"
 
 
-def test_social_full_flow_with_messages_and_match_report(client):
+def test_social_full_flow_with_messages_and_match_report(client, monkeypatch):
     """社交完整链路：匹配、接受、发消息、查消息、查匹配报告"""
+    monkeypatch.setattr(settings, "MINIMAX_MOCK", True)
+    from app.ai import minimax_client as _mc
+
+    monkeypatch.setattr(_mc, "_minimax_client", None)
     user1_data = create_test_user(client, username="socialflow1")
     user2_data = create_test_user(client, username="socialflow2")
     headers1 = get_auth_header(user1_data["token"])
