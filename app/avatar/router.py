@@ -14,16 +14,19 @@ from app.response import success
 from app.avatar import schemas, service
 from app.avatar.schemas import (
     AgentActionOut,
+    AtoaSessionOut,
     AutoSurfResultOut,
     AvatarCardOut,
     AvatarMemoryOut,
-    AvatarMatchOut,
     AvatarProfileOut,
     AvatarStatusOut,
-    RebuildMatchesResultOut,
-    StartChatRequest,
-    StartChatResultOut,
+    ContinueAtoaChatResultOut,
+    DecideAtoaRequest,
+    DecideAtoaResultOut,
+    MutualMatchItemOut,
+    ProbeLogItemOut,
     SurfLogsOut,
+    TriggerSurfResultOut,
     UsageEventOut,
 )
 
@@ -38,19 +41,6 @@ def _serialize_memory(d: dict) -> dict:
 def _serialize_status(d: dict) -> dict:
     """转 camelCase 输出"""
     return AvatarStatusOut(**d).model_dump(by_alias=True)
-
-
-def _serialize_match(d: dict) -> dict:
-    """转 camelCase 输出（嵌套 post / target_user 也需要转换）"""
-    from app.plaza.schemas import PlazaPostOut
-    d = dict(d)
-    if "post" in d and isinstance(d["post"], dict):
-        d["post"] = PlazaPostOut(**d["post"]).model_dump(by_alias=True)
-    return AvatarMatchOut(**d).model_dump(by_alias=True)
-
-
-def _serialize_rebuild_result(d: dict) -> dict:
-    return RebuildMatchesResultOut(**d).model_dump(by_alias=True)
 
 
 def _serialize_profile(d: dict) -> dict:
@@ -165,6 +155,41 @@ def record_usage_event(
     return success(_serialize_usage_event(result))
 
 
+@router.post("/surf/trigger", summary="【调试】立即触发一次完整分身冲浪（跳过时间窗口限制）")
+async def trigger_surf(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    调试专用接口：等价于外部调度脚本 `python scripts/run_avatar_scheduler.py --user <username>`，
+    但跳过 next_surf_at 时间窗口检查，可在 Swagger 中随时触发。
+
+    完整执行链路：
+    - AtoA 探针通道（Phase 8A）
+    - 写入 AvatarSurfLog
+    - 更新 last_surf_at / daily_surf_count / next_surf_at
+    - Bandit 记录一次 pull（Phase 3）
+    """
+    from app.models.avatar import AvatarStatus
+    # 跳过 next_surf_at 检查：将其置为 0 后再调 service
+    status_row = db.query(AvatarStatus).filter(AvatarStatus.user_id == current_user.id).first()
+    if status_row:
+        status_row.next_surf_at = 0
+        db.commit()
+
+    result = await service.run_avatar_surf_for_user(db, current_user.id, trigger="manual")
+    out = TriggerSurfResultOut(
+        status=result.get("status", "skipped"),
+        generated_matches=result.get("generated_matches", 0),
+        atoa_scanned=result.get("atoa_scanned", 0),
+        atoa_mutual=result.get("atoa_mutual", 0),
+        surf_report=result.get("surf_report", ""),
+        top10_session_id=result.get("top10_session_id"),
+        skipped_reason=result.get("reason", ""),
+    )
+    return success(out.model_dump(by_alias=True))
+
+
 @router.get("/surf-logs", summary="分身冲浪日志")
 def list_surf_logs(
     limit: int = Query(20, ge=1, le=100),
@@ -174,65 +199,6 @@ def list_surf_logs(
     """查看分身定时冲浪的执行结果和跳过原因。"""
     result = service.list_surf_logs(db, current_user.id, limit)
     return success(_serialize_surf_logs(result))
-
-
-# ==================== 分身推荐 ====================
-
-@router.get("/matches", summary="分身推荐列表")
-def list_matches(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """获取分身推荐列表，排除已忽略的，按匹配度降序"""
-    items = service.list_matches(db, current_user.id)
-    return success([_serialize_match(item) for item in items])
-
-
-@router.post("/matches/rebuild", summary="重新生成分身推荐（规则召回 + AI精排）")
-async def rebuild_avatar_matches(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """
-    主动触发一次完整的分身推荐重建：
-    - Phase 5：帖子通道 + 用户通道双路规则宽召回
-    - Phase 6：对 top-10 未精排匹配进行 AI 精排，生成自然理由和开场白
-    返回本次执行统计摘要。
-    """
-    result = await service.rebuild_avatar_matches(db, current_user.id)
-    return success(_serialize_rebuild_result(result))
-
-
-@router.post("/matches/{match_id}/action", summary="分身匹配操作")
-def match_action(
-    match_id: str,
-    body: schemas.MatchActionRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """对推荐匹配执行操作：dismiss（忽略）或 chat（发起聊天）"""
-    service.match_action(db, current_user.id, match_id, body.action)
-    return success(None)
-
-
-@router.post("/matches/{match_id}/start-chat", summary="从分身推荐一键发起搭子申请")
-def start_chat_from_match(
-    match_id: str,
-    body: StartChatRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """
-    Phase 7 社交闭环：将分身推荐转化为真实搭子申请。
-    - 自动识别目标用户（用户型匹配用 target_user_id，帖子型用帖子作者）
-    - 防重复：已有 pending/accepted 申请时直接复用，返回 isDuplicate=true
-    - 可选传入 openingMessage 自定义开场白，不传则使用 AI 建议开场白
-    - 成功发起后触发 Bandit 最强正向反馈（+10）
-    """
-    result = service.start_chat_from_match(
-        db, current_user.id, match_id, body.opening_message
-    )
-    return success(StartChatResultOut(**result).model_dump(by_alias=True))
 
 
 # ==================== 分身侧写 ====================
@@ -275,6 +241,89 @@ def regenerate_avatar_card(
     """基于画像和结构化记忆重新生成分身名片"""
     result = service.regenerate_avatar_card(db, current_user.id)
     return success(_serialize_card(result))
+
+
+# ==================== Phase 8A: AtoA 探针监察接口 ====================
+
+@router.get("/probe-log", summary="分身探针日志（我发起的 AtoA 互动）")
+def get_probe_log(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    outcome: Optional[str] = Query(None, description="按 outcome 筛选，如 pending_user_decision / blocked / connected"),
+    session_id: Optional[str] = Query(None, description="按 AtoaSession ID 筛选"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    默认仅返回 **最近一次成功冲浪** 对应会话中的探针；同一对方用户只保留最新一条。
+    传入 `session_id` 可查看指定历史会话（仍按对方用户去重）。
+    支持 `outcome` 筛选。
+    """
+    items = service.get_probe_log(db, current_user.id, limit, offset, outcome, session_id)
+    return success([ProbeLogItemOut(**item).model_dump(by_alias=True) for item in items])
+
+
+@router.get("/atoa/sessions", summary="AtoA 搭子模式会话列表（Phase 8A）")
+def get_atoa_sessions(
+    limit: int = Query(5, ge=1, le=20),
+    offset: int = Query(0, ge=0),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    仅返回 **最近一次成功冲浪** 对应的 Top-10 会话（0～1 条）；pending/decided 按对方用户去重统计。
+    """
+    items = service.get_atoa_sessions(db, current_user.id, limit, offset)
+    return success([AtoaSessionOut(**item).model_dump(by_alias=True) for item in items])
+
+
+@router.get("/mutual-matches", summary="AtoA 双向匹配列表")
+def get_mutual_matches(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    获取 AtoA 双向达标的推荐匹配（两个分身都感兴趣的候选）。
+    这是 Phase 8 的主推荐入口，优先级高于普通帖子/用户型匹配。
+    """
+    items = service.get_mutual_matches(db, current_user.id, limit, offset)
+    return success([MutualMatchItemOut(**item).model_dump(by_alias=True) for item in items])
+
+
+@router.post("/atoa/{interaction_id}/continue", summary="继续 AtoA 分身对话（Phase 8B）")
+async def continue_atoa_chat(
+    interaction_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    用户选择「继续聊」后，触发分身续聊 ≤3 轮，追加到现有对话记录。
+    返回新增的对话轮次（new_turns）及完整对话（conversation）。
+    只有发起方（user_a）可操作；outcome=blocked/connected 时不允许继续。
+    """
+    result = await service.continue_atoa_conversation(db, current_user.id, interaction_id)
+    return success(ContinueAtoaChatResultOut(**result).model_dump(by_alias=True))
+
+
+@router.post("/atoa/{interaction_id}/decide", summary="AtoA 最终决策（Phase 8C）")
+async def decide_atoa(
+    interaction_id: str,
+    body: DecideAtoaRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    用户对 AtoA 互动做最终决策：
+    - decision=block：禁止往下聊，关联推荐 dismissed，对方不可见。
+    - decision=connect：结交搭子，发起社交申请，对方可见。
+    openingMessage 仅 connect 时有效，留空则使用 AI 开场白。
+    """
+    result = await service.decide_atoa_outcome(
+        db, current_user.id, interaction_id, body.decision, body.opening_message
+    )
+    return success(DecideAtoaResultOut(**result).model_dump(by_alias=True))
 
 
 # ==================== 分身行动草稿/审批 ====================

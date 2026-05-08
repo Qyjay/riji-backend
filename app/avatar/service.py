@@ -19,6 +19,8 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.avatar import (
+    AvatarAtoaInteraction,
+    AvatarAtoaSession,
     AvatarMemory,
     AvatarMatch,
     AvatarProfile,
@@ -463,10 +465,9 @@ def update_bandit_feedback(db: Session, user_id: str, reward: float) -> None:
     即「上次冲浪发生在几点，就把这次反馈记到那个小时的臂上」。
 
     奖励参考：
-      用户对匹配选择 chat  → reward = +5.0
-      用户对匹配选择 dismiss → reward = -2.0
       用户批准 AgentAction → reward = +4.0
       用户拒绝 AgentAction → reward = -2.0
+      （从推荐发起搭子见 `start_chat_from_match`，reward = +10.0）
     """
     status = db.query(AvatarStatus).filter(AvatarStatus.user_id == user_id).first()
     if not status or not status.last_surf_at:
@@ -491,14 +492,14 @@ def update_bandit_feedback(db: Session, user_id: str, reward: float) -> None:
     db.commit()
 
 
-def run_avatar_surf_for_user(db: Session, user_id: str, trigger: str = "scheduler") -> dict:
+async def run_avatar_surf_for_user(db: Session, user_id: str, trigger: str = "scheduler") -> dict:
     """
     为单个用户执行一次完整冲浪循环（方案B 调度器调用入口）：
 
     1. 检查分身是否开启、是否在静默模式
     2. 检查幂等锁，防止重复调度
-    3. 调用 _refresh_matches 生成/更新推荐匹配
-    4. 记录 AvatarSurfLog
+    3. 调用 _refresh_matches_async（含 AtoA 探针通道）
+    4. 记录 AvatarSurfLog（含 AtoA 统计 + surf_report）
     5. 更新 last_surf_at、daily_surf_count、next_surf_at
     6. 在 Bandit 臂里记录一次 pull（探索次数 +1）
     """
@@ -536,7 +537,7 @@ def run_avatar_surf_for_user(db: Session, user_id: str, trigger: str = "schedule
     db.commit()
 
     try:
-        _refresh_matches(db, user_id)
+        surf_stats = await _refresh_matches_async(db, user_id)
 
         new_matches_count = (
             db.query(AvatarMatch)
@@ -565,12 +566,41 @@ def run_avatar_surf_for_user(db: Session, user_id: str, trigger: str = "schedule
         status.next_surf_at = compute_next_surf_at_from_plan(plan, _now_ms())
         status.surf_lock_until = 0
 
+        # Phase 8A: 写入 AtoA 统计、surf_report 和 top10_session_id
+        atoa_scanned = surf_stats.get("atoa_scanned", 0)
+        atoa_mutual = surf_stats.get("atoa_mutual", 0)
+        atoa_one_sided = surf_stats.get("atoa_one_sided", 0)
+        top10_session_id = surf_stats.get("session_id")
+        log.scanned_atoa_pairs = atoa_scanned
+        log.upgraded_to_mutual = atoa_mutual
+        log.top10_session_id = top10_session_id
+        log.surf_report = generate_surf_report(
+            atoa_scanned, atoa_mutual, atoa_one_sided,
+            surf_stats.get("matched", 0),
+        )
+
+        # 同步 session.surf_log_id
+        if top10_session_id:
+            _session = db.query(AvatarAtoaSession).filter(
+                AvatarAtoaSession.id == top10_session_id
+            ).first()
+            if _session:
+                _session.surf_log_id = log.id
+
         log.status = "success"
         log.generated_matches = new_matches_count
         log.finished_at = _now_ms()
         db.commit()
 
-        return {"status": "success", "generated_matches": new_matches_count, "user_id": user_id}
+        return {
+            "status": "success",
+            "generated_matches": new_matches_count,
+            "atoa_scanned": atoa_scanned,
+            "atoa_mutual": atoa_mutual,
+            "surf_report": log.surf_report,
+            "top10_session_id": top10_session_id,
+            "user_id": user_id,
+        }
 
     except Exception as exc:
         log.status = "failed"
@@ -702,6 +732,10 @@ def _surf_log_to_dict(log: AvatarSurfLog) -> dict:
         "error_message": log.error_message or "",
         "started_at": log.started_at,
         "finished_at": log.finished_at,
+        "scanned_atoa_pairs": getattr(log, "scanned_atoa_pairs", None) or 0,
+        "upgraded_to_mutual": getattr(log, "upgraded_to_mutual", None) or 0,
+        "surf_report": getattr(log, "surf_report", None) or "",
+        "top10_session_id": getattr(log, "top10_session_id", None),
     }
 
 
@@ -1127,18 +1161,882 @@ def _rule_score_user_match(
     }
 
 
-def _refresh_matches(db: Session, user_id: str) -> None:
+# ==================== Phase 8A: AtoA 双向分身探针 ====================
+
+# 双方均达阈值才算 mutual；仅 A 达阈值算 one_sided
+_ATOA_MUTUAL_THRESHOLD = 25
+# 规则预筛最低分（低于此分直接跳过，不调用 AI）
+_ATOA_PREFILTER_THRESHOLD = 10
+# 全系统 auto_match_enabled=True 用户数低于此值时，AtoA 通道冷启动跳过
+_ATOA_COLD_START_MIN_USERS = 3
+# 每次冲浪展示给用户的最多候选数
+_ATOA_TOP_N = 10
+# 用户打断时双向降分幅度
+_ATOA_BLOCK_PENALTY = 10
+
+
+def _recall_atoa_candidates(db: Session, user_id: str) -> list[User]:
     """
-    Phase 5 规则宽召回：帖子通道 + 用户通道双路召回，写入 AvatarMatch 表。
-    帖子通道：扫描最近 60 条广场帖子，按兴趣词/频道/学校打分。
-    用户通道：三路行为/关系/画像信号召回候选用户，取其最近帖子作为载体写入。
+    AtoA 专用召回：返回满足 AtoA 条件的候选用户列表。
+    条件（全部满足）：
+      1. AvatarStatus.is_active = True
+      2. AvatarStatus.auto_match_enabled = True  ← 关键门槛
+      3. AvatarCard.visibility != "private"
+      4. 我未曾 dismiss 对方
+      5. 对方未曾 dismiss 我
+    """
+    # 我曾 dismiss 的用户 ID 集合
+    i_dismissed: set[str] = {
+        row.target_user_id
+        for row in db.query(AvatarMatch.target_user_id)
+        .filter(
+            AvatarMatch.user_id == user_id,
+            AvatarMatch.status == "dismissed",
+            AvatarMatch.target_user_id != None,  # noqa: E711
+        )
+        .all()
+    }
+
+    # 对方曾 dismiss 我的用户 ID 集合
+    dismissed_me: set[str] = {
+        row.user_id
+        for row in db.query(AvatarMatch.user_id)
+        .filter(
+            AvatarMatch.target_user_id == user_id,
+            AvatarMatch.status == "dismissed",
+            AvatarMatch.match_type == "atoa",
+        )
+        .all()
+    }
+
+    blocked = i_dismissed | dismissed_me
+
+    # 查 auto_match_enabled=True 且有可见名片的用户
+    eligible_user_ids: list[str] = []
+    statuses = (
+        db.query(AvatarStatus)
+        .filter(
+            AvatarStatus.user_id != user_id,
+            AvatarStatus.is_active == True,  # noqa: E712
+            AvatarStatus.auto_match_enabled == True,  # noqa: E712
+        )
+        .all()
+    )
+    for st in statuses:
+        if st.user_id in blocked:
+            continue
+        card = db.query(AvatarCard).filter(AvatarCard.user_id == st.user_id).first()
+        if card and card.visibility != "private":
+            eligible_user_ids.append(st.user_id)
+
+    if not eligible_user_ids:
+        return []
+    return db.query(User).filter(User.id.in_(eligible_user_ids)).all()
+
+
+def _collect_interaction_signals_for_pair(
+    db: Session, user_a_id: str, user_b_id: str
+) -> dict:
+    """
+    收集 A 与 B 之间的有方向性双向互动信号。
+    返回 {comment_a_to_b, comment_b_to_a, like_a_to_b, same_post_overlap, has_social_match}。
+    """
+    # A 评论了 B 的帖子
+    b_post_ids = [
+        row.id for row in db.query(PlazaPost.id).filter(PlazaPost.user_id == user_b_id).all()
+    ]
+    comment_a_to_b = (
+        db.query(PlazaComment)
+        .filter(PlazaComment.user_id == user_a_id, PlazaComment.post_id.in_(b_post_ids))
+        .count()
+        if b_post_ids else 0
+    )
+
+    # B 评论了 A 的帖子
+    a_post_ids = [
+        row.id for row in db.query(PlazaPost.id).filter(PlazaPost.user_id == user_a_id).all()
+    ]
+    comment_b_to_a = (
+        db.query(PlazaComment)
+        .filter(PlazaComment.user_id == user_b_id, PlazaComment.post_id.in_(a_post_ids))
+        .count()
+        if a_post_ids else 0
+    )
+
+    # A 点赞了 B 的帖子
+    like_a_to_b = (
+        db.query(PostLike)
+        .filter(PostLike.user_id == user_a_id, PostLike.post_id.in_(b_post_ids))
+        .count()
+        if b_post_ids else 0
+    )
+
+    # 双方都参与过的帖子数
+    a_engaged = set(a_post_ids)
+    b_engaged = set(b_post_ids)
+    if a_engaged and b_engaged:
+        a_commented = {
+            row.post_id
+            for row in db.query(PlazaComment.post_id)
+            .filter(PlazaComment.user_id == user_a_id)
+            .all()
+        }
+        b_commented = {
+            row.post_id
+            for row in db.query(PlazaComment.post_id)
+            .filter(PlazaComment.user_id == user_b_id)
+            .all()
+        }
+        same_post_overlap = len(a_commented & b_commented)
+    else:
+        same_post_overlap = 0
+
+    # 是否已有搭子关系
+    has_social_match = (
+        db.query(SocialMatch)
+        .filter(
+            (
+                ((SocialMatch.user_id == user_a_id) & (SocialMatch.target_id == user_b_id))
+                | ((SocialMatch.user_id == user_b_id) & (SocialMatch.target_id == user_a_id))
+            ),
+            SocialMatch.status.in_(["pending", "accepted"]),
+        )
+        .count()
+        > 0
+    )
+
+    return {
+        "comment_a_to_b": comment_a_to_b,
+        "comment_b_to_a": comment_b_to_a,
+        "like_a_to_b": like_a_to_b,
+        "same_post_overlap": same_post_overlap,
+        "has_social_match": has_social_match,
+    }
+
+
+# ── Phase 8A: Top-10 粗筛 + 会话管理 ─────────────────────────────────────────
+
+def _score_all_atoa_candidates(
+    db: Session,
+    user_id: str,
+    candidates: list[User],
+    excluded_ids: set[str],
+    dismissed_target_user_ids: set[str],
+) -> list[dict]:
+    """
+    对所有 AtoA 候选批量规则评分（廉价，不调用 AI）。
+    返回按 score 降序排列的列表，每项 {user, score, shared_topics, intent_type}。
+    已在 excluded_ids 或 dismissed_target_user_ids 中的候选会被跳过。
     """
     current_user = db.query(User).filter(User.id == user_id).first()
     if not current_user:
+        return []
+
+    card_a = db.query(AvatarCard).filter(AvatarCard.user_id == user_id).first()
+    inputs_a = _collect_match_keywords(db, user_id)
+    scored: list[dict] = []
+
+    for candidate in candidates:
+        if candidate.id in excluded_ids:
+            continue
+        if candidate.id in dismissed_target_user_ids:
+            continue
+
+        card_b = db.query(AvatarCard).filter(AvatarCard.user_id == candidate.id).first()
+        if not card_b or card_b.visibility == "private":
+            continue
+
+        # 规则预筛（不调用 AI）
+        skip = _prefilter_atoa_pair(current_user, candidate, card_a, card_b, dismissed_target_user_ids)
+        if skip:
+            continue
+
+        # 收集互动信号
+        signals = _collect_interaction_signals_for_pair(db, user_id, candidate.id)
+
+        # 规则打分（A 视角对 B）
+        result = _rule_score_user_match(db, current_user, candidate, inputs_a, signals)
+        base_score = result["score"] if result else 0
+
+        # AtoA 互补加分（在规则分基础上叠加）
+        atoa_bonus = 0
+        if card_a and card_b:
+            atoa_bonus += 10
+        tags_a = set(str(t).lower() for t in _decode(card_a.interest_tags, [])) if card_a else set()
+        tags_b = set(str(t).lower() for t in _decode(card_b.interest_tags, []))
+        shared_topics = sorted(tags_a & tags_b)
+
+        intents_a = set(str(t).lower() for t in _decode(card_a.social_intent, [])) if card_a else set()
+        intents_b = set(str(t).lower() for t in _decode(card_b.social_intent, []))
+        _intent_bonus_table = {
+            ("buddy", "buddy"): 12, ("study", "study"): 10, ("dating", "dating"): 12,
+            ("help", "buddy"): 10, ("buddy", "help"): 10,
+            ("share", "share"): 8, ("sport", "sport"): 10,
+        }
+        for ia in intents_a:
+            for ib in intents_b:
+                bonus = _intent_bonus_table.get((ia, ib), 0)
+                if bonus:
+                    atoa_bonus += bonus
+                    break
+
+        score = min(base_score + atoa_bonus, 99)
+        scored.append({
+            "user": candidate,
+            "score": score,
+            "shared_topics": shared_topics,
+            "intent_type": result["intent_type"] if result else "buddy",
+            "reasons_a": result["reasons"] if result else [],
+        })
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return scored
+
+
+def _build_atoa_session(
+    db: Session,
+    user_id: str,
+    scored_candidates: list[dict],
+    surf_log_id: Optional[str] = None,
+) -> AvatarAtoaSession:
+    """
+    创建新的 AtoaSession，记录 Top-N 候选和完整评分快照（含第11+位，用于补位）。
+    若已有 active session 且仍有 pending_user_decision 的 interaction，则将旧的标记为 superseded 后再新建。
+    """
+    now = _now_ms()
+
+    # 将旧的 active session 标记为 superseded
+    old_sessions = (
+        db.query(AvatarAtoaSession)
+        .filter(AvatarAtoaSession.user_id == user_id, AvatarAtoaSession.status == "active")
+        .all()
+    )
+    for old in old_sessions:
+        old.status = "superseded"
+        old.updated_at = now
+
+    # 构建候选 ID 列表（Top-N）和完整评分快照
+    top_n = scored_candidates[:_ATOA_TOP_N]
+    all_cands = scored_candidates  # 含第11+位，供补位使用
+    candidate_ids = [item["user"].id for item in top_n]
+    score_snapshot = {item["user"].id: item["score"] for item in all_cands}
+
+    session = AvatarAtoaSession(
+        id=str(uuid4()),
+        user_id=user_id,
+        candidate_ids=_encode(candidate_ids),
+        excluded_ids=_encode([]),
+        score_snapshot=_encode(score_snapshot),
+        status="active",
+        surf_log_id=surf_log_id,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(session)
+    db.flush()
+    return session
+
+
+def _get_replacement_candidate(
+    db: Session,
+    session: AvatarAtoaSession,
+) -> Optional[User]:
+    """
+    从 session.score_snapshot 中找排名最高的、
+    不在 session.excluded_ids 中、且尚无 AtoaInteraction 的候选。
+    即取评分快照中第11、12...位里第一个未排除的候选。
+    """
+    snapshot: dict = _decode(session.score_snapshot, {})
+    excluded: list = _decode(session.excluded_ids, [])
+    candidate_ids: list = _decode(session.candidate_ids, [])
+
+    # 已排除 + 已经在Top-10中的，都不补位
+    skip_set = set(excluded) | set(candidate_ids)
+
+    # 按评分降序遍历快照中的候选，找第一个可用的
+    sorted_cands = sorted(snapshot.items(), key=lambda x: x[1], reverse=True)
+    for user_id, _score in sorted_cands:
+        if user_id in skip_set:
+            continue
+        # 检查该用户是否已有 interaction（任何 outcome）
+        has_interaction = (
+            db.query(AvatarAtoaInteraction)
+            .filter(
+                AvatarAtoaInteraction.user_a_id == session.user_id,
+                AvatarAtoaInteraction.user_b_id == user_id,
+                AvatarAtoaInteraction.session_id == session.id,
+            )
+            .first()
+        ) is not None
+        if has_interaction:
+            continue
+        user = db.query(User).filter(User.id == user_id).first()
+        if user:
+            return user
+    return None
+
+
+def _apply_block_penalty(
+    db: Session,
+    user_a_id: str,
+    user_b_id: str,
+) -> None:
+    """
+    打断时双向降分：
+    - A侧：将 A 的 AvatarMatch 中对 B 的记录降权（或写入 feedback_score -= PENALTY）
+    - B侧：在 B 的所有对 A 的 AvatarMatch 中降低 match_score，使 A 下次不进 B 的 Top-10
+    整个过程对 B 完全不可见。
+    """
+    # A 对 B 的记录降分
+    match_ab = (
+        db.query(AvatarMatch)
+        .filter(
+            AvatarMatch.user_id == user_a_id,
+            AvatarMatch.target_user_id == user_b_id,
+        )
+        .first()
+    )
+    if match_ab:
+        match_ab.match_score = max(0, (match_ab.match_score or 0) - _ATOA_BLOCK_PENALTY)
+
+    # B 对 A 的记录降分（B 看不到，仅影响下次粗筛排名）
+    match_ba = (
+        db.query(AvatarMatch)
+        .filter(
+            AvatarMatch.user_id == user_b_id,
+            AvatarMatch.target_user_id == user_a_id,
+        )
+        .first()
+    )
+    if match_ba:
+        match_ba.match_score = max(0, (match_ba.match_score or 0) - _ATOA_BLOCK_PENALTY)
+
+
+async def _simulate_atoa_conversation(
+    card_a: AvatarCard,
+    card_b: AvatarCard,
+    max_rounds: int = 3,
+    prior_conversation: Optional[list[dict]] = None,
+) -> list[dict]:
+    """
+    【AtoA 核心】用 MiniMax 模拟两个分身之间的探针对话。
+    每次最多产生 max_rounds 轮（1轮 = avatar_a + avatar_b 各一条消息，共 2 条）。
+    prior_conversation: 非 None 时为续聊模式，AI 参考历史生成延续性对话。
+    Mock 模式：根据 interest_tags 交集生成固定模板对话，不调用真实 API。
+    """
+    from app.ai.minimax_client import get_minimax_client
+    from app.config import settings
+
+    max_messages = max_rounds * 2  # 每轮 2 条消息
+    tags_a: list[str] = _decode(card_a.interest_tags, [])
+    tags_b: list[str] = _decode(card_b.interest_tags, [])
+    shared = list(set(tags_a) & set(tags_b))
+    intent_a = ", ".join(_decode(card_a.social_intent, [])[:2]) or "找搭子"
+    intent_b = ", ".join(_decode(card_b.social_intent, [])[:2]) or "找搭子"
+    is_continuation = bool(prior_conversation)
+
+    if getattr(settings, "MINIMAX_MOCK", True):
+        rounds: list[dict] = []
+        topics = shared if shared else [intent_a]
+        mock_templates = [
+            (f"关于{topics[0]}，你平时怎么安排的？", f"我一般{topics[0]}这方面会花比较多时间，你呢？"),
+            (f"听起来不错，我们可以多交流一下{topics[0]}相关的。", f"好啊，感觉我们在这方面挺有共鸣的。"),
+            ("你有什么近期的计划吗？", "有的，我打算好好规划一下，希望能找到志同道合的朋友一起。"),
+        ]
+        start_idx = len(prior_conversation) // 2 if is_continuation else 0
+        for i in range(min(max_rounds, len(mock_templates))):
+            idx = (start_idx + i) % len(mock_templates)
+            a_text, b_text = mock_templates[idx]
+            if is_continuation and i == 0:
+                a_text = f"继续上次的话题，{a_text}"
+            rounds.append({"role": "avatar_a", "content": a_text})
+            rounds.append({"role": "avatar_b", "content": b_text})
+        return rounds[:max_messages]
+
+    client = get_minimax_client()
+    summary_a = (card_a.public_summary or "").strip()[:80]
+    summary_b = (card_b.public_summary or "").strip()[:80]
+    shared_str = "、".join(shared[:4]) if shared else "无明显交集"
+
+    history_section = ""
+    if is_continuation and prior_conversation:
+        history_lines = []
+        for turn in prior_conversation[-6:]:  # 最近 3 轮作为上下文
+            role_label = "分身A" if turn["role"] == "avatar_a" else "分身B"
+            history_lines.append(f"{role_label}：{turn['content']}")
+        history_section = f"\n\n【已有对话历史（最近几轮）】\n" + "\n".join(history_lines) + "\n\n请在此基础上继续对话，保持连贯性。"
+
+    prompt = f"""你需要模拟两个 AI 分身之间的对话（{"续聊" if is_continuation else "初次探路"}），生成 {max_rounds} 轮。
+
+分身A 的人设：
+- 公开简介：{summary_a or "暂无"}
+- 兴趣标签：{", ".join(tags_a[:5])}
+- 社交意图：{intent_a}
+
+分身B 的人设：
+- 公开简介：{summary_b or "暂无"}
+- 兴趣标签：{", ".join(tags_b[:5])}
+- 社交意图：{intent_b}
+
+双方共同兴趣：{shared_str}{history_section}
+
+规则：
+1. 严格生成 {max_rounds} 轮（共 {max_rounds * 2} 条消息），分身A 先开口
+2. 每条消息 1-2 句话，语气自然、不过于正式
+3. 只使用名片上的公开信息，不涉及私密内容
+4. 不替用户做任何承诺（如「我们加个微信吧」等）
+
+请严格按以下JSON格式输出（共 {max_rounds * 2} 个元素，不要有任何额外文字）：
+[
+  {{"role": "avatar_a", "content": "..."}},
+  {{"role": "avatar_b", "content": "..."}},
+  ...
+]"""
+
+    # fallback_topic 在 Mock 分支外也需要可用
+    fallback_topic = shared[0] if shared else intent_a
+
+    try:
+        raw = await client.chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_rounds * 150,
+            temperature=0.75,
+        )
+        start = raw.find("[")
+        end = raw.rfind("]") + 1
+        if start != -1 and end > start:
+            conversation = json.loads(raw[start:end])
+            if isinstance(conversation, list) and len(conversation) >= 1:
+                return conversation[:max_messages]
+    except Exception:
+        pass
+
+    # 降级 fallback（API 调用失败或返回格式不符时使用）
+    fallback = []
+    for i in range(min(max_rounds, 3)):
+        suffix = f"（续聊第{i+1}轮）" if is_continuation else ""
+        fallback.append({"role": "avatar_a", "content": f"你好{suffix}，想多了解一下你的{fallback_topic}经历。"})
+        fallback.append({"role": "avatar_b", "content": f"没问题，很高兴聊聊{fallback_topic}相关的话题。"})
+    return fallback[:max_messages]
+
+
+def _prefilter_atoa_pair(
+    current_user: User,
+    candidate: User,
+    card_a: Optional[AvatarCard],
+    card_b: Optional[AvatarCard],
+    dismissed_target_user_ids: set[str],
+) -> Optional[str]:
+    """
+    AtoA 规则预筛，通过返回 None，不通过返回跳过原因字符串。
+    廉价快速，过不了不调用 AI。
+    """
+    if candidate.id in dismissed_target_user_ids:
+        return "已 dismiss"
+    if not card_a or not card_b:
+        return "名片不完整"
+    if card_b.visibility == "private":
+        return "对方名片不可见"
+
+    # 兴趣词最低重合
+    tags_a = set(str(t).lower() for t in _decode(card_a.interest_tags, []))
+    tags_b = set(str(t).lower() for t in _decode(card_b.interest_tags, []))
+    if not tags_a.intersection(tags_b):
+        return "无兴趣词重合"
+
+    # 学校 only 过滤
+    if getattr(candidate, "school_only", False):
+        if (candidate.school or "") != (current_user.school or ""):
+            return "school_only 限制"
+
+    return None
+
+
+async def _score_atoa_pair(
+    db: Session,
+    user_a: User,
+    user_b: User,
+    dismissed_target_user_ids: set[str],
+) -> Optional[dict]:
+    """
+    AtoA 两步评估：规则预筛 → 分身对话 → 双向打分。
+    返回 None 表示不值得写入（双方均低于下限，或预筛拒绝）。
+    """
+    card_a = db.query(AvatarCard).filter(AvatarCard.user_id == user_a.id).first()
+    card_b = db.query(AvatarCard).filter(AvatarCard.user_id == user_b.id).first()
+
+    # Step 1: 规则预筛
+    skip_reason = _prefilter_atoa_pair(user_a, user_b, card_a, card_b, dismissed_target_user_ids)
+    if skip_reason:
+        return None
+
+    # 收集双向互动信号
+    raw_signals = _collect_interaction_signals_for_pair(db, user_a.id, user_b.id)
+
+    # 计算分身名片兴趣词重合数，补充进信号字典（供 _rule_score_user_match 评分使用）
+    tags_a_set = set(str(t).lower() for t in _decode(card_a.interest_tags, []))
+    tags_b_set = set(str(t).lower() for t in _decode(card_b.interest_tags, []))
+    interest_overlap_count = len(tags_a_set & tags_b_set)
+
+    # 映射到 _rule_score_user_match 期望的 key 名称（A 视角）
+    signals_ab = {
+        "comment_to_them": raw_signals["comment_a_to_b"],
+        "comment_to_me": raw_signals["comment_b_to_a"],
+        "like_to_them": raw_signals["like_a_to_b"],
+        "same_post_overlap": raw_signals["same_post_overlap"],
+        "has_social_match": raw_signals["has_social_match"],
+        "interest_overlap": interest_overlap_count,
+    }
+    # B 视角：方向翻转
+    signals_ba = {
+        "comment_to_them": raw_signals["comment_b_to_a"],
+        "comment_to_me": raw_signals["comment_a_to_b"],
+        "like_to_them": 0,
+        "same_post_overlap": raw_signals["same_post_overlap"],
+        "has_social_match": raw_signals["has_social_match"],
+        "interest_overlap": interest_overlap_count,
+    }
+
+    inputs_a = _collect_match_keywords(db, user_a.id)
+    inputs_b = _collect_match_keywords(db, user_b.id)
+
+    result_ab = _rule_score_user_match(db, user_a, user_b, inputs_a, signals_ab)
+    result_ba = _rule_score_user_match(db, user_b, user_a, inputs_b, signals_ba)
+
+    score_ab = result_ab["score"] if result_ab else 0
+    score_ba = result_ba["score"] if result_ba else 0
+
+    # 双方均低于下限，不写入任何记录
+    if score_ab < _ATOA_PREFILTER_THRESHOLD and score_ba < _ATOA_PREFILTER_THRESHOLD:
+        return None
+
+    # AtoA 互补加分
+    atoa_bonus = 0
+    tags_a = set(str(t).lower() for t in _decode(card_a.interest_tags, []))
+    tags_b = set(str(t).lower() for t in _decode(card_b.interest_tags, []))
+    shared_topics = sorted(tags_a & tags_b)
+
+    if card_a and card_b:
+        atoa_bonus += 10  # 双方都有名片
+
+    intents_a = set(str(t).lower() for t in _decode(card_a.social_intent, []))
+    intents_b = set(str(t).lower() for t in _decode(card_b.social_intent, []))
+    mutual_intent_pairs = {
+        ("buddy", "buddy"): 12, ("study", "study"): 10, ("dating", "dating"): 12,
+        ("help", "buddy"): 10, ("buddy", "help"): 10,
+        ("share", "share"): 8, ("sport", "sport"): 10,
+    }
+    for ia in intents_a:
+        for ib in intents_b:
+            pair_bonus = mutual_intent_pairs.get((ia, ib), 0)
+            atoa_bonus += pair_bonus
+            if pair_bonus:
+                break
+
+    score_ab = min(score_ab + atoa_bonus // 2, 99)
+    score_ba = min(score_ba + atoa_bonus // 2, 99)
+
+    # Step 2: 分身对话模拟（仅当任意一方 >= 预筛阈值时）
+    conversation: list[dict] = []
+    if score_ab >= _ATOA_PREFILTER_THRESHOLD or score_ba >= _ATOA_PREFILTER_THRESHOLD:
+        try:
+            conversation = await _simulate_atoa_conversation(card_a, card_b, max_rounds=3)
+        except Exception:
+            conversation = []
+
+    reasons_ab = result_ab["reasons"] if result_ab else []
+    reasons_ba = result_ba["reasons"] if result_ba else []
+    intent_type = result_ab["intent_type"] if result_ab else (result_ba["intent_type"] if result_ba else "buddy")
+
+    is_mutual = score_ab >= _ATOA_MUTUAL_THRESHOLD and score_ba >= _ATOA_MUTUAL_THRESHOLD
+
+    if score_ab >= _ATOA_MUTUAL_THRESHOLD:
+        # 双向达标 → mutual + 等待用户决策
+        # 单向达标 → 仅 A 可见，也进入等待用户决策
+        outcome = "mutual" if is_mutual else "pending_user_decision"
+    else:
+        outcome = "incompatible"
+
+    return {
+        "score_ab": score_ab,
+        "score_ba": score_ba,
+        "reasons_ab": reasons_ab,
+        "reasons_ba": reasons_ba,
+        "shared_topics": shared_topics,
+        "conversation": conversation,
+        "intent_type": intent_type,
+        "is_mutual": is_mutual,
+        "outcome": outcome,
+        "risk_flags": [],
+        "card_b_id": card_b.id if card_b else None,
+    }
+
+
+def _write_atoa_interaction(
+    db: Session,
+    user_a_id: str,
+    user_b_id: str,
+    score_data: dict,
+    triggered_match_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> AvatarAtoaInteraction:
+    """
+    写入或 upsert AvatarAtoaInteraction 探针日志。
+    Phase 8A 新逻辑：outcome 固定为 "pending_user_decision"，is_visible_to_b 始终 False。
+    不再自动设置 mutual/one_sided —— 由用户在 8C decide 接口触发。
+    session_id：关联本次 Top-10 粗筛会话。
+    """
+    now = _now_ms()
+    outcome = score_data.get("outcome", "pending_user_decision")
+
+    # 若同一会话内已存在该对的记录则 upsert
+    query = db.query(AvatarAtoaInteraction).filter(
+        AvatarAtoaInteraction.user_a_id == user_a_id,
+        AvatarAtoaInteraction.user_b_id == user_b_id,
+    )
+    if session_id:
+        query = query.filter(AvatarAtoaInteraction.session_id == session_id)
+    existing = query.first()
+
+    if existing:
+        existing.score_a = score_data.get("score_ab", 0)
+        existing.score_b = score_data.get("score_ba", 0)
+        existing.outcome = outcome
+        existing.shared_topics = _encode(score_data.get("shared_topics", []))
+        existing.reasons_a = _encode(score_data.get("reasons_ab", []))
+        existing.reasons_b = _encode(score_data.get("reasons_ba", []))
+        existing.risk_flags = _encode(score_data.get("risk_flags", []))
+        existing.conversation = _encode(score_data.get("conversation", []))
+        existing.is_visible_to_b = False
+        if triggered_match_id:
+            existing.triggered_match_id = triggered_match_id
+        existing.updated_at = now
+        return existing
+
+    interaction = AvatarAtoaInteraction(
+        id=str(uuid4()),
+        initiator_id=user_a_id,
+        session_id=session_id,
+        user_a_id=user_a_id,
+        user_b_id=user_b_id,
+        interaction_type="card_exchange",
+        outcome=outcome,
+        score_a=score_data.get("score_ab", 0),
+        score_b=score_data.get("score_ba", 0),
+        shared_topics=_encode(score_data.get("shared_topics", [])),
+        reasons_a=_encode(score_data.get("reasons_ab", [])),
+        reasons_b=_encode(score_data.get("reasons_ba", [])),
+        risk_flags=_encode(score_data.get("risk_flags", [])),
+        conversation=_encode(score_data.get("conversation", [])),
+        triggered_match_id=triggered_match_id,
+        is_visible_to_a=True,
+        is_visible_to_b=False,
+        interaction_phase=1,
+        user_decision=None,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(interaction)
+    return interaction
+
+
+def _upsert_atoa_match_pair(
+    db: Session,
+    user_a_id: str,
+    user_b_id: str,
+    score_data: dict,
+    interaction_id: str,
+) -> Tuple[AvatarMatch, AvatarMatch]:
+    """
+    原子写入 A→B 和 B→A 两条 AvatarMatch(match_type='atoa')，通过 peer_match_id 互指。
+    已存在则 upsert（更新分数和 is_mutual）。
+    返回 (match_ab, match_ba)。
+    """
+    now = _now_ms()
+
+    # 查找是否已存在 A→B
+    existing_ab = (
+        db.query(AvatarMatch)
+        .filter(
+            AvatarMatch.user_id == user_a_id,
+            AvatarMatch.target_user_id == user_b_id,
+            AvatarMatch.match_type == "atoa",
+        )
+        .first()
+    )
+    # 查找是否已存在 B→A
+    existing_ba = (
+        db.query(AvatarMatch)
+        .filter(
+            AvatarMatch.user_id == user_b_id,
+            AvatarMatch.target_user_id == user_a_id,
+            AvatarMatch.match_type == "atoa",
+        )
+        .first()
+    )
+
+    # 需要一个 anchor post（AtoA 匹配不依赖帖子，取对方最近一条帖子或留空）
+    anchor_b = (
+        db.query(PlazaPost)
+        .filter(PlazaPost.user_id == user_b_id)
+        .order_by(PlazaPost.created_at.desc())
+        .first()
+    )
+    anchor_a = (
+        db.query(PlazaPost)
+        .filter(PlazaPost.user_id == user_a_id)
+        .order_by(PlazaPost.created_at.desc())
+        .first()
+    )
+
+    # 如果两人都没帖子，无法写入（post_id 非空约束）
+    if not anchor_b or not anchor_a:
+        # 创建占位（理论上不应发生，因为召回时会保证有帖子）
+        return existing_ab, existing_ba  # type: ignore
+
+    if existing_ab and existing_ab.status != "dismissed":
+        existing_ab.match_score = score_data["score_ab"]
+        existing_ab.their_score = score_data["score_ba"]
+        existing_ab.match_reasons = _encode(score_data["reasons_ab"])
+        existing_ab.their_reasons = _encode(score_data["reasons_ba"])
+        existing_ab.is_mutual = True
+        existing_ab.intent_type = score_data["intent_type"]
+        existing_ab.target_avatar_card_id = score_data.get("card_b_id")
+        match_ab = existing_ab
+    else:
+        match_ab_id = str(uuid4())
+        match_ab = AvatarMatch(
+            id=match_ab_id,
+            user_id=user_a_id,
+            post_id=anchor_b.id,
+            target_user_id=user_b_id,
+            match_score=score_data["score_ab"],
+            their_score=score_data["score_ba"],
+            match_reasons=_encode(score_data["reasons_ab"]),
+            their_reasons=_encode(score_data["reasons_ba"]),
+            agent_conversation=_encode(score_data["conversation"]),
+            status="new",
+            match_type="atoa",
+            intent_type=score_data["intent_type"],
+            risk_flags=_encode(score_data["risk_flags"]),
+            is_mutual=True,
+            target_avatar_card_id=score_data.get("card_b_id"),
+            created_at=now,
+        )
+        db.add(match_ab)
+
+    if existing_ba and existing_ba.status != "dismissed":
+        existing_ba.match_score = score_data["score_ba"]
+        existing_ba.their_score = score_data["score_ab"]
+        existing_ba.match_reasons = _encode(score_data["reasons_ba"])
+        existing_ba.their_reasons = _encode(score_data["reasons_ab"])
+        existing_ba.is_mutual = True
+        existing_ba.intent_type = score_data["intent_type"]
+        existing_ba.target_avatar_card_id = score_data.get("card_b_id")
+        match_ba = existing_ba
+    else:
+        match_ba_id = str(uuid4())
+        match_ba = AvatarMatch(
+            id=match_ba_id,
+            user_id=user_b_id,
+            post_id=anchor_a.id,
+            target_user_id=user_a_id,
+            match_score=score_data["score_ba"],
+            their_score=score_data["score_ab"],
+            match_reasons=_encode(score_data["reasons_ba"]),
+            their_reasons=_encode(score_data["reasons_ab"]),
+            agent_conversation=_encode(score_data["conversation"]),
+            status="new",
+            match_type="atoa",
+            intent_type=score_data["intent_type"],
+            risk_flags=_encode(score_data["risk_flags"]),
+            is_mutual=True,
+            target_avatar_card_id=score_data.get("card_b_id"),
+            created_at=now,
+        )
+        db.add(match_ba)
+
+    db.flush()  # 获取 ID 用于互指
+
+    # 互指 peer_match_id
+    match_ab.peer_match_id = match_ba.id
+    match_ba.peer_match_id = match_ab.id
+
+    return match_ab, match_ba
+
+
+def _sync_atoa_mutual_flag(
+    db: Session, match_id: str, new_is_mutual: bool
+) -> None:
+    """
+    同步更新一对 AtoA 记录的 is_mutual 标志及对应 AtoaInteraction 的 outcome。
+    通过 peer_match_id 找到对方记录一并更新。
+    """
+    match = db.query(AvatarMatch).filter(AvatarMatch.id == match_id).first()
+    if not match or match.match_type != "atoa":
         return
+
+    match.is_mutual = new_is_mutual
+    new_outcome = "mutual" if new_is_mutual else "one_sided"
+
+    # 同步 peer 记录
+    if match.peer_match_id:
+        peer = db.query(AvatarMatch).filter(AvatarMatch.id == match.peer_match_id).first()
+        if peer:
+            peer.is_mutual = new_is_mutual
+
+    # 同步 AvatarAtoaInteraction
+    interaction = (
+        db.query(AvatarAtoaInteraction)
+        .filter(
+            AvatarAtoaInteraction.user_a_id == match.user_id,
+            AvatarAtoaInteraction.user_b_id == match.target_user_id,
+        )
+        .first()
+    )
+    if interaction:
+        interaction.outcome = new_outcome
+        interaction.is_visible_to_b = new_is_mutual
+        interaction.updated_at = _now_ms()
+
+
+def generate_surf_report(
+    atoa_scanned: int,
+    atoa_mutual: int,
+    atoa_one_sided: int,
+    fallback_matches: int,
+) -> str:
+    """生成本次冲浪的 Agent 汇报摘要文案，写入 AvatarSurfLog.surf_report。"""
+    parts: list[str] = []
+
+    if atoa_scanned > 0:
+        parts.append(f"分身今天为你找到了 {atoa_scanned} 位潜在搭子，已生成对话供你查看")
+        if fallback_matches > 0:
+            parts.append(f"还有 {fallback_matches} 条传统推荐")
+    elif fallback_matches > 0:
+        parts.append(f"分身今天为你匹配了 {fallback_matches} 条推荐")
+    else:
+        return "分身今天没有找到合适的候选，下次继续努力。"
+
+    return "，".join(parts) + "。"
+
+
+async def _refresh_matches_async(db: Session, user_id: str) -> dict:
+    """
+    Phase 8A 重构版：
+    AtoA 主路径（Top-10 粗筛 → 会话 → 分身对话 → pending_user_decision）
+    + 兜底通道（帖子型 / 用户型，对 auto_match_enabled=False 候选或 AtoA 冷启动时生效）
+
+    返回统计字典供 run_avatar_surf_for_user 写入 SurfLog。
+    """
+    current_user = db.query(User).filter(User.id == user_id).first()
+    if not current_user:
+        return {"browsed": 0, "matched": 0, "atoa_scanned": 0, "atoa_mutual": 0,
+                "atoa_one_sided": 0, "session_id": None}
     status = _get_or_create_status(db, user_id)
     if status.is_active is False:
-        return
+        return {"browsed": 0, "matched": 0, "atoa_scanned": 0, "atoa_mutual": 0,
+                "atoa_one_sided": 0, "session_id": None}
 
     inputs = _collect_match_keywords(db, user_id)
     enabled_channels = _decode(status.enabled_channels, ["buddy", "help", "share", "dating"])
@@ -1158,12 +2056,110 @@ def _refresh_matches(db: Session, user_id: str) -> None:
         )
         .all()
     }
+    # 通过 AtoaInteraction.blocked 得到的排除集合（打断过的用户）
+    blocked_user_ids: set[str] = {
+        row.user_b_id
+        for row in db.query(AvatarAtoaInteraction.user_b_id)
+        .filter(
+            AvatarAtoaInteraction.user_a_id == user_id,
+            AvatarAtoaInteraction.outcome == "blocked",
+        )
+        .all()
+    }
+    excluded_ids = dismissed_target_user_ids | blocked_user_ids
 
     browsed_count = 0
     matched_count = 0
+    atoa_scanned = 0
+    session_id: Optional[str] = None
     now = _now_ms()
 
-    # ── 帖子通道（原逻辑保留）──
+    # ── AtoA 主路径（Phase 8A Top-10 搭子模式）────────────────────────────────
+    atoa_enabled_globally = (
+        db.query(AvatarStatus)
+        .filter(
+            AvatarStatus.user_id != user_id,
+            AvatarStatus.is_active == True,  # noqa: E712
+            AvatarStatus.auto_match_enabled == True,  # noqa: E712
+        )
+        .count()
+        >= _ATOA_COLD_START_MIN_USERS
+    )
+
+    if atoa_enabled_globally and status.auto_match_enabled:
+        # 1. 召回所有 AtoA 候选
+        all_atoa_candidates = _recall_atoa_candidates(db, user_id)
+
+        # 2. 批量规则评分（廉价，不调用 AI）
+        scored = _score_all_atoa_candidates(
+            db, user_id, all_atoa_candidates, excluded_ids, dismissed_target_user_ids
+        )
+
+        if scored:
+            # 3. 建立 Top-10 会话（存储 candidate_ids + 完整 score_snapshot）
+            session = _build_atoa_session(db, user_id, scored)
+            session_id = session.id
+            db.flush()
+
+            top10 = scored[:_ATOA_TOP_N]
+            atoa_scanned = len(top10)
+
+            # 4. 对每位 Top-10 候选：规则预筛 → AI 分身对话 → 写 AtoaInteraction
+            card_a = db.query(AvatarCard).filter(AvatarCard.user_id == user_id).first()
+            for item in top10:
+                candidate: User = item["user"]
+                card_b = db.query(AvatarCard).filter(AvatarCard.user_id == candidate.id).first()
+
+                # 规则预筛（不调用 AI）
+                skip = _prefilter_atoa_pair(
+                    current_user, candidate, card_a, card_b, excluded_ids
+                )
+                if skip:
+                    atoa_scanned -= 1
+                    continue
+
+                # 生成分身对话（AI，最多 3 轮）
+                conversation: list[dict] = []
+                if card_a and card_b:
+                    try:
+                        conversation = await _simulate_atoa_conversation(card_a, card_b, max_rounds=3)
+                    except Exception:
+                        conversation = []
+
+                # 收集双向信号（用于写入 reasons_ba）
+                signals_ab = _collect_interaction_signals_for_pair(db, user_id, candidate.id)
+                signals_ba = {
+                    "comment_a_to_b": signals_ab["comment_b_to_a"],
+                    "comment_b_to_a": signals_ab["comment_a_to_b"],
+                    "like_a_to_b": 0,
+                    "same_post_overlap": signals_ab["same_post_overlap"],
+                    "has_social_match": signals_ab["has_social_match"],
+                }
+                inputs_b = _collect_match_keywords(db, candidate.id)
+                result_ba = _rule_score_user_match(db, candidate, current_user, inputs_b, signals_ba)
+
+                score_data = {
+                    "outcome": "pending_user_decision",
+                    "score_ab": item["score"],
+                    "score_ba": result_ba["score"] if result_ba else 0,
+                    "shared_topics": item["shared_topics"],
+                    "reasons_ab": item["reasons_a"],
+                    "reasons_ba": result_ba["reasons"] if result_ba else [],
+                    "risk_flags": [],
+                    "conversation": conversation,
+                    "intent_type": item["intent_type"],
+                    "is_mutual": False,
+                }
+
+                _write_atoa_interaction(
+                    db, user_id, candidate.id, score_data,
+                    session_id=session_id
+                )
+                db.flush()
+
+            db.commit()
+
+    # ── 帖子通道（兜底，始终运行以保证推荐列表不为空）────────────────────────
     rows = (
         db.query(PlazaPost, User)
         .join(User, PlazaPost.user_id == User.id)
@@ -1210,32 +2206,27 @@ def _refresh_matches(db: Session, user_id: str) -> None:
             existing.match_reasons = _encode(match_data["reasons"])
             existing.agent_conversation = _encode(match_data["agent_conversation"])
 
-    # ── 用户通道（Phase 5 新增）──
+    # ── 用户通道（Phase 5 兜底）──────────────────────────────────────────────
     user_candidates = _recall_user_candidates(db, user_id, current_user, inputs)
     for candidate, signals in user_candidates:
-        if candidate.id in dismissed_target_user_ids:
+        if candidate.id in excluded_ids:
             continue
-        score_data = _rule_score_user_match(db, current_user, candidate, inputs, signals)
-        if not score_data:
+        score_data_u = _rule_score_user_match(db, current_user, candidate, inputs, signals)
+        if not score_data_u:
             continue
 
-        # 取候选用户最近一条符合频道的帖子作为载体
         anchor_post = (
             db.query(PlazaPost)
-            .filter(
-                PlazaPost.user_id == candidate.id,
-                PlazaPost.type.in_(enabled_channels),
-            )
+            .filter(PlazaPost.user_id == candidate.id, PlazaPost.type.in_(enabled_channels))
             .order_by(PlazaPost.created_at.desc())
             .first()
         )
         if not anchor_post:
-            continue  # 候选用户没有帖子则跳过
+            continue
 
         browsed_count += 1
         matched_count += 1
 
-        # 检查是否已存在该用户型匹配
         existing = (
             db.query(AvatarMatch)
             .filter(
@@ -1251,18 +2242,18 @@ def _refresh_matches(db: Session, user_id: str) -> None:
                 user_id=user_id,
                 post_id=anchor_post.id,
                 target_user_id=candidate.id,
-                match_score=score_data["score"],
-                match_reasons=_encode(score_data["reasons"]),
+                match_score=score_data_u["score"],
+                match_reasons=_encode(score_data_u["reasons"]),
                 agent_conversation=_encode([]),
                 status="new",
                 match_type="user",
-                intent_type=score_data["intent_type"],
+                intent_type=score_data_u["intent_type"],
                 created_at=now,
             ))
         elif existing.status != "dismissed":
-            existing.match_score = score_data["score"]
-            existing.match_reasons = _encode(score_data["reasons"])
-            existing.intent_type = score_data["intent_type"]
+            existing.match_score = score_data_u["score"]
+            existing.match_reasons = _encode(score_data_u["reasons"])
+            existing.intent_type = score_data_u["intent_type"]
             existing.post_id = anchor_post.id
 
     status.browsed_count = max(status.browsed_count or 0, browsed_count)
@@ -1270,214 +2261,27 @@ def _refresh_matches(db: Session, user_id: str) -> None:
     status.last_active_at = now
     db.commit()
 
-
-# ==================== Phase 6: AI 精排 ====================
-
-async def _ai_refine_top_matches(
-    db: Session,
-    user_id: str,
-    match_records: List[AvatarMatch],
-) -> None:
-    """
-    Phase 6: 对未精排的 AvatarMatch 记录进行 AI 精排。
-    - 批量构建候选人描述，发送给 MiniMax 做综合评分
-    - 输出：精排分、更自然的推荐理由、开场白建议、风险标注
-    - Mock 模式：跳过真实 API，生成模拟数据
-    """
-    from app.ai.minimax_client import get_minimax_client
-
-    if not match_records:
-        return
-
-    current_user = db.query(User).filter(User.id == user_id).first()
-    if not current_user:
-        return
-
-    inputs = _collect_match_keywords(db, user_id)
-    my_profile_text = (
-        f"名字: {current_user.name or current_user.username}, "
-        f"学校: {current_user.school or '未知'}, 专业: {current_user.major or '未知'}, "
-        f"年级: {current_user.grade or '未知'}, "
-        f"兴趣: {', '.join(inputs['interests'][:5])}, "
-        f"社交意图: {', '.join(inputs['intents'][:3])}"
-    )
-
-    # 构建候选人描述
-    candidates_desc: list[dict] = []
-    match_map: dict[str, AvatarMatch] = {}
-
-    for m in match_records[:10]:
-        match_map[m.id] = m
-        if m.match_type == "user" and m.target_user_id:
-            target_user = db.query(User).filter(User.id == m.target_user_id).first()
-            target_card = (
-                db.query(AvatarCard).filter(AvatarCard.user_id == m.target_user_id).first()
-                if target_user
-                else None
-            )
-            if not target_user:
-                continue
-            candidate_profile = (
-                f"名字: {target_user.name or target_user.username}, "
-                f"学校: {target_user.school or '未知'}, 专业: {target_user.major or '未知'}, "
-                f"兴趣: {', '.join(_decode(target_card.interest_tags, [])[:4]) if target_card else '未知'}, "
-                f"社交意图: {', '.join(_decode(target_card.social_intent, [])[:2]) if target_card else '未知'}"
-            )
-        else:
-            post = db.query(PlazaPost).filter(PlazaPost.id == m.post_id).first()
-            post_user = db.query(User).filter(User.id == post.user_id).first() if post else None
-            post_card = (
-                db.query(AvatarCard).filter(AvatarCard.user_id == post.user_id).first()
-                if post_user
-                else None
-            )
-            if not post or not post_user:
-                continue
-            candidate_profile = (
-                f"名字: {post_user.name or post_user.username}, "
-                f"学校: {post_user.school or '未知'}, "
-                f"帖子内容: {(post.content or '')[:60]}, "
-                f"帖子标签: {', '.join(_decode(post.tags, [])[:4])}, "
-                f"兴趣: {', '.join(_decode(post_card.interest_tags, [])[:3]) if post_card else '未知'}"
-            )
-
-        candidates_desc.append({
-            "id": m.id,
-            "profile": candidate_profile,
-            "rule_score": m.match_score or 0,
-            "rule_reasons": _decode(m.match_reasons, [])[:3],
-        })
-
-    if not candidates_desc:
-        return
-
-    now = _now_ms()
-    client = get_minimax_client()
-
-    if client.mock:
-        # Mock 模式：生成模拟数据，不消耗 API
-        for desc in candidates_desc:
-            m = match_map.get(desc["id"])
-            if not m:
-                continue
-            rule_reasons = desc.get("rule_reasons") or []
-            mock_reasons = [(r[:18] + ("…" if len(r) > 18 else "")) for r in rule_reasons[:2]]
-            if not mock_reasons:
-                mock_reasons = ["有共同话题", "互动记录不错"]
-            m.suggested_opening = "你好，我在分身那边看到了你，感觉我们挺合拍的，有机会聊聊吗？"
-            m.match_reasons = _encode(mock_reasons + ["分身觉得你们挺合适的"])
-            m.match_score = min(99, (m.match_score or 50) + 5)
-            m.risk_flags = _encode([])
-            m.ai_refined = True
-            m.ai_refined_at = now
-        db.commit()
-        return
-
-    # 真实 AI 调用
-    prompt = (
-        "你是一个大学生社交推荐助手，帮助用户找到志同道合的搭子。\n"
-        f"当前用户信息：\n{my_profile_text}\n\n"
-        "以下是系统推荐的候选人列表（已通过规则初步筛选）：\n"
-        f"{json.dumps(candidates_desc, ensure_ascii=False, indent=2)}\n\n"
-        "请对每个候选人进行精排，返回 JSON 数组，每个元素包含：\n"
-        "- id: 候选人 ID（保持原值）\n"
-        "- refined_score: 精排后推荐分 0-99（整数）\n"
-        "- reasons: 推荐理由列表（最多3条，每条12-24字、口语化）。"
-        "禁止复述或轻微改写候选数据里的 rule_reasons 原文；须结合 profile 里的具体姓名、学校、专业、帖子标签或互动事实重新写。\n"
-        "- suggested_opening: 开场白（40-70字为宜，上限80字），以当前用户分身口吻，点名对方或具体话题，避免「要不要聊聊呀」等万能短句。\n"
-        "- risk_flags: 风险标注列表（如意图不匹配则标'意图不匹配'，无风险则为[]）\n"
-        "只返回 JSON 数组，不要有任何解释文字。"
-    )
-
-    try:
-        response_text = await client.chat_completion(
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1500,
-            temperature=0.4,
-        )
-        content = response_text.strip()
-        # 剥掉可能的 markdown 代码块包装
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-        refined_list = json.loads(content.strip())
-        if not isinstance(refined_list, list):
-            return
-        refined_map = {item["id"]: item for item in refined_list if isinstance(item, dict)}
-
-        for m in match_records:
-            item = refined_map.get(m.id)
-            if not item:
-                continue
-            new_score = item.get("refined_score")
-            if new_score is not None:
-                m.match_score = max(0, min(99, int(new_score)))
-            reasons = item.get("reasons") or []
-            if reasons:
-                m.match_reasons = _encode(reasons[:4])
-            opening = str(item.get("suggested_opening") or "").strip()
-            if opening:
-                m.suggested_opening = opening[:100]
-            m.risk_flags = _encode((item.get("risk_flags") or [])[:5])
-            m.ai_refined = True
-            m.ai_refined_at = now
-
-        db.commit()
-    except Exception:
-        # AI 精排失败时静默降级，规则结果仍然有效
-        pass
-
-
-async def rebuild_avatar_matches(db: Session, user_id: str) -> dict:
-    """
-    Phase 5+6 完整分身推荐重建流水线：
-      1. 规则宽召回（帖子通道 + 用户通道）
-      2. AI 精排 top-10 未精排的候选
-    返回执行摘要。
-    """
-    # Phase 5: 规则宽召回
-    _refresh_matches(db, user_id)
-
-    # Phase 6: 对未精排的 top-10 做 AI 精排
-    unrefined = (
-        db.query(AvatarMatch)
-        .filter(
-            AvatarMatch.user_id == user_id,
-            AvatarMatch.status != "dismissed",
-            AvatarMatch.ai_refined == False,  # noqa: E712
-        )
-        .order_by(AvatarMatch.match_score.desc())
-        .limit(10)
-        .all()
-    )
-
-    refined_count = 0
-    if unrefined:
-        await _ai_refine_top_matches(db, user_id, unrefined)
-        refined_count = len(unrefined)
-
-    total = (
-        db.query(AvatarMatch)
-        .filter(AvatarMatch.user_id == user_id, AvatarMatch.status != "dismissed")
-        .count()
-    )
-    ai_refined_total = (
-        db.query(AvatarMatch)
-        .filter(
-            AvatarMatch.user_id == user_id,
-            AvatarMatch.status != "dismissed",
-            AvatarMatch.ai_refined == True,  # noqa: E712
-        )
-        .count()
-    )
-
     return {
-        "total_matches": total,
-        "newly_ai_refined": refined_count,
-        "ai_refined_total": ai_refined_total,
-        "refreshed_at": _now_ms(),
+        "browsed": browsed_count,
+        "matched": matched_count,
+        "atoa_scanned": atoa_scanned,
+        "atoa_mutual": 0,        # Phase 8A：不自动判断 mutual，由用户决定
+        "atoa_one_sided": 0,
+        "session_id": session_id,
     }
+
+
+def _refresh_matches(db: Session, user_id: str) -> None:
+    """
+    同步兼容包装器（供 list_matches 等同步路径调用，不含 AtoA 通道）。
+    AtoA 通道需要 async，只能由 run_avatar_surf_for_user（async）触发。
+    """
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_refresh_matches_async(db, user_id))
+    except RuntimeError:
+        asyncio.run(_refresh_matches_async(db, user_id))
 
 
 def list_matches(db: Session, user_id: str) -> List[dict]:
@@ -1530,124 +2334,6 @@ def list_matches(db: Session, user_id: str) -> List[dict]:
             "risk_flags": _decode(match.risk_flags, []),
         })
     return result
-
-
-def match_action(db: Session, user_id: str, match_id: str, action: str) -> None:
-    """分身匹配操作：dismiss / chat（操作后同步更新 UCB Bandit 反馈）"""
-    if action not in ("dismiss", "chat"):
-        raise ApiException(code=PARAM_INVALID, message="action 只能是 dismiss 或 chat")
-
-    match = db.query(AvatarMatch).filter(
-        AvatarMatch.id == match_id,
-        AvatarMatch.user_id == user_id,
-    ).first()
-    if not match:
-        raise ApiException(code=NOT_FOUND, message="匹配记录不存在", status_code=404)
-
-    status_map = {"dismiss": "dismissed", "chat": "chatting"}
-    match.status = status_map[action]
-    db.commit()
-    # Phase 3：将用户操作反馈给 Bandit 臂（chat +5 / dismiss -2）
-    reward_map = {"chat": 5.0, "dismiss": -2.0}
-    update_bandit_feedback(db, user_id, reward_map[action])
-
-
-# ==================== Phase 7: 社交闭环 ====================
-
-def start_chat_from_match(
-    db: Session,
-    user_id: str,
-    match_id: str,
-    opening_message: Optional[str] = None,
-) -> dict:
-    """
-    Phase 7: 从分身推荐一键发起搭子申请，完成「推荐 → 真实社交」的闭环。
-
-    流程：
-    1. 校验 AvatarMatch 归属与合法状态
-    2. 解析目标用户 ID（用户型匹配用 target_user_id，帖子型用帖子作者）
-    3. 检查是否已有 pending/accepted 的 social.Match（防重复）
-    4. 调用 apply_buddy() 创建搭子申请，开场白写入 match_report
-    5. 更新 AvatarMatch.status = "chatting"
-    6. 触发 Bandit 最强正向反馈（+10），远高于普通 chat（+5）
-
-    返回：
-      social_match_id — 创建/已有的社交搭子申请 ID
-      suggested_opening — 当前匹配的 AI 开场白（供前端预填）
-      is_duplicate — 是否复用了已有申请
-    """
-    from app.models.social import Match as SocialMatch
-
-    match = db.query(AvatarMatch).filter(
-        AvatarMatch.id == match_id,
-        AvatarMatch.user_id == user_id,
-    ).first()
-    if not match:
-        raise ApiException(code=NOT_FOUND, message="匹配记录不存在", status_code=404)
-    if match.status == "dismissed":
-        raise ApiException(code=PARAM_INVALID, message="已忽略的推荐不能发起申请")
-
-    # 解析目标用户 ID
-    if match.match_type == "user" and match.target_user_id:
-        target_user_id = match.target_user_id
-    else:
-        post = db.query(PlazaPost).filter(PlazaPost.id == match.post_id).first()
-        if not post:
-            raise ApiException(code=NOT_FOUND, message="帖子已删除，无法定位目标用户", status_code=404)
-        target_user_id = post.user_id
-
-    if target_user_id == user_id:
-        raise ApiException(code=PARAM_INVALID, message="不能向自己发起搭子申请")
-
-    # 检查是否已有 pending/accepted 的搭子申请（防重复）
-    existing = db.query(SocialMatch).filter(
-        (
-            ((SocialMatch.user_id == user_id) & (SocialMatch.target_id == target_user_id))
-            | ((SocialMatch.user_id == target_user_id) & (SocialMatch.target_id == user_id))
-        ),
-        SocialMatch.match_type == "buddy",
-        SocialMatch.status.in_(["pending", "accepted"]),
-    ).first()
-
-    if existing:
-        match.status = "chatting"
-        db.commit()
-        return {
-            "social_match_id": existing.id,
-            "suggested_opening": match.suggested_opening or "",
-            "is_duplicate": True,
-        }
-
-    # 开场白：优先使用用户传入的，其次用 AI 生成的
-    report = (opening_message or match.suggested_opening or "").strip()[:200]
-
-    # 创建搭子申请
-    from uuid import uuid4 as _uuid4
-    now = _now_ms()
-    social_match = SocialMatch(
-        id=str(_uuid4()),
-        user_id=user_id,
-        target_id=target_user_id,
-        common_tags=_encode([match.intent_type or "buddy"]),
-        status="pending",
-        match_type="buddy",
-        match_report=report,
-        created_at=now,
-    )
-    db.add(social_match)
-
-    # 更新 AvatarMatch 状态
-    match.status = "chatting"
-    db.commit()
-
-    # Phase 3: 触发最强正向 Bandit 反馈（真实发起申请 > 普通 chat 意向）
-    update_bandit_feedback(db, user_id, 10.0)
-
-    return {
-        "social_match_id": social_match.id,
-        "suggested_opening": match.suggested_opening or "",
-        "is_duplicate": False,
-    }
 
 
 # ==================== 分身行动草稿/审批 ====================
@@ -2144,3 +2830,396 @@ async def regenerate_profile(db: Session, user_id: str) -> dict:
     db.commit()
     db.refresh(profile)
     return _profile_to_dict(profile)
+
+
+# ==================== Phase 8A: 用户监察接口 ====================
+
+def _latest_success_surf_log(db: Session, user_id: str) -> Optional[AvatarSurfLog]:
+    """最近一次成功的分身冲浪日志（按 started_at）。"""
+    return (
+        db.query(AvatarSurfLog)
+        .filter(
+            AvatarSurfLog.user_id == user_id,
+            AvatarSurfLog.status == "success",
+        )
+        .order_by(AvatarSurfLog.started_at.desc())
+        .first()
+    )
+
+
+def _latest_top10_session_id_from_surf(db: Session, user_id: str) -> Optional[str]:
+    """最近一次成功冲浪关联的 AtoaSession.id（无 AtoA 时为 None）。"""
+    log = _latest_success_surf_log(db, user_id)
+    if not log or not log.top10_session_id:
+        return None
+    return log.top10_session_id
+
+
+def get_probe_log(
+    db: Session,
+    user_id: str,
+    limit: int = 20,
+    offset: int = 0,
+    outcome: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> list[dict]:
+    """
+    返回我的分身发起的 AtoA 探针日志。
+
+    默认：仅 **最近一次成功冲浪** 对应的 `top10_session_id` 下，
+    每个对方用户（user_b）只保留 **最新一条** 互动（按 created_at）。
+
+    若传入 `session_id`，则查看该次会话（便于核对历史），规则同上（按 user_b 去重）。
+    """
+    target_sid = session_id if session_id else _latest_top10_session_id_from_surf(db, user_id)
+    if not target_sid:
+        return []
+
+    query = db.query(AvatarAtoaInteraction).filter(
+        AvatarAtoaInteraction.user_a_id == user_id,
+        AvatarAtoaInteraction.is_visible_to_a == True,  # noqa: E712
+        AvatarAtoaInteraction.session_id == target_sid,
+    )
+    if outcome:
+        query = query.filter(AvatarAtoaInteraction.outcome == outcome)
+
+    rows = query.order_by(AvatarAtoaInteraction.created_at.desc()).all()
+
+    # 同一 session、同一 user_b 可能有多条（多次冲浪重复探针）；只保留最新一条
+    seen_b: set[str] = set()
+    deduped: list[AvatarAtoaInteraction] = []
+    for row in rows:
+        if row.user_b_id in seen_b:
+            continue
+        seen_b.add(row.user_b_id)
+        deduped.append(row)
+
+    rows = deduped[offset : offset + limit]
+
+    _outcome_labels = {
+        "pending_user_decision": "等待你的决定",
+        "blocked": "已打断",
+        "connected": "已发出结交申请",
+        "connect_confirmed": "已成为搭子",
+        "connect_rejected": "对方拒绝了申请",
+        "mutual": "双向达标",
+        "one_sided": "单向感兴趣",
+        "incompatible": "不匹配",
+    }
+
+    result = []
+    for row in rows:
+        other = db.query(User).filter(User.id == row.user_b_id).first()
+        result.append({
+            "id": row.id,
+            "session_id": row.session_id,
+            "user_b_id": row.user_b_id,
+            "user_b_name": (other.name or other.username) if other else "",
+            "user_b_avatar": (other.avatar or "") if other else "",
+            "interaction_type": row.interaction_type,
+            "outcome": row.outcome,
+            "readable_outcome": _outcome_labels.get(row.outcome or "", row.outcome or ""),
+            "score_a": row.score_a,
+            "score_b": row.score_b,
+            "shared_topics": _decode(row.shared_topics, []),
+            "reasons_a": _decode(row.reasons_a, []),
+            "conversation": _decode(row.conversation, []),
+            "risk_flags": _decode(row.risk_flags, []),
+            "interaction_phase": row.interaction_phase or 1,
+            "user_decision": row.user_decision,
+            "is_mutual": row.outcome == "mutual",
+            "triggered_match_id": row.triggered_match_id,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        })
+    return result
+
+
+def get_atoa_sessions(
+    db: Session,
+    user_id: str,
+    limit: int = 5,
+    offset: int = 0,
+) -> list[dict]:
+    """
+    仅返回 **最近一次成功冲浪** 对应的 Top-10 会话（0 或 1 条）。
+
+    统计口径：同一 session 内按 user_b 去重后再计 pending / decided；
+    candidate_count 为粗筛候选人数（candidate_ids 长度）。
+    """
+    sid = _latest_top10_session_id_from_surf(db, user_id)
+    if not sid:
+        return []
+
+    s = db.query(AvatarAtoaSession).filter(AvatarAtoaSession.id == sid).first()
+    if not s or s.user_id != user_id:
+        return []
+
+    candidate_ids: list[str] = _decode(s.candidate_ids, [])
+    excluded_ids: list[str] = _decode(s.excluded_ids, [])
+
+    interactions = (
+        db.query(AvatarAtoaInteraction)
+        .filter(AvatarAtoaInteraction.session_id == s.id)
+        .order_by(AvatarAtoaInteraction.created_at.desc())
+        .all()
+    )
+    # 每个 user_b 只保留最新一条互动，再统计 outcome
+    seen_b: set[str] = set()
+    distinct_latest: list[AvatarAtoaInteraction] = []
+    for intr in interactions:
+        if intr.user_b_id in seen_b:
+            continue
+        seen_b.add(intr.user_b_id)
+        distinct_latest.append(intr)
+
+    outcome_counts: dict[str, int] = {}
+    for intr in distinct_latest:
+        outcome_counts[intr.outcome or ""] = outcome_counts.get(intr.outcome or "", 0) + 1
+
+    pending_count = outcome_counts.get("pending_user_decision", 0)
+    decided_count = sum(
+        v for k, v in outcome_counts.items() if k != "pending_user_decision"
+    )
+
+    row = {
+        "id": s.id,
+        "status": s.status,
+        "candidate_count": len(candidate_ids),
+        "excluded_count": len(excluded_ids),
+        "pending_count": pending_count,
+        "decided_count": decided_count,
+        "surf_log_id": s.surf_log_id,
+        "created_at": s.created_at,
+        "updated_at": s.updated_at,
+    }
+    # offset/limit：仅一条时 offset=0 仍可用；offset>=1 则视为翻页无数据
+    if offset > 0:
+        return []
+    if limit <= 0:
+        return []
+    return [row]
+
+
+def get_mutual_matches(
+    db: Session,
+    user_id: str,
+    limit: int = 20,
+    offset: int = 0,
+) -> list[dict]:
+    """
+    返回当前用户的全部 AtoA mutual 匹配（双向达标，is_mutual=True）。
+    供「分身推荐 - 双向匹配」专栏展示。
+    """
+    rows = (
+        db.query(AvatarMatch)
+        .filter(
+            AvatarMatch.user_id == user_id,
+            AvatarMatch.match_type == "atoa",
+            AvatarMatch.is_mutual == True,  # noqa: E712
+            AvatarMatch.status != "dismissed",
+        )
+        .order_by(AvatarMatch.match_score.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    result = []
+    for m in rows:
+        target = db.query(User).filter(User.id == m.target_user_id).first()
+        target_card = (
+            db.query(AvatarCard).filter(AvatarCard.user_id == m.target_user_id).first()
+            if target else None
+        )
+        result.append({
+            "id": m.id,
+            "target_user_id": m.target_user_id,
+            "target_user_name": (target.name or target.username) if target else "",
+            "target_user_avatar": (target.avatar or "") if target else "",
+            "target_user_school": (target.school or "") if target else "",
+            "target_card_interests": _decode(target_card.interest_tags, []) if target_card else [],
+            "target_card_intent": _decode(target_card.social_intent, []) if target_card else [],
+            "my_score": m.match_score or 0,
+            "their_score": m.their_score or 0,
+            "my_reasons": _decode(m.match_reasons, []),
+            "their_reasons": _decode(m.their_reasons, []),
+            "intent_type": m.intent_type or "buddy",
+            "suggested_opening": m.suggested_opening or "",
+            "status": m.status or "new",
+            "peer_match_id": m.peer_match_id,
+            "created_at": m.created_at,
+        })
+    return result
+
+
+# ==================== Phase 8B: 继续聊 ====================
+
+# 交互状态不允许继续聊的 outcome 集合
+_ATOA_TERMINAL_OUTCOMES = {"blocked", "connected", "incompatible"}
+
+
+async def continue_atoa_conversation(
+    db: Session,
+    user_id: str,
+    interaction_id: str,
+) -> dict:
+    """
+    Phase 8B：用户选择「继续聊」，触发分身续聊 ≤3 轮并追加到现有对话。
+    只有 user_a（发起方）可以操作。
+    """
+    interaction = db.query(AvatarAtoaInteraction).filter(
+        AvatarAtoaInteraction.id == interaction_id
+    ).first()
+    if not interaction:
+        raise ApiException(code=NOT_FOUND, message="AtoA 互动记录不存在", status_code=404)
+    if interaction.user_a_id != user_id:
+        raise ApiException(code=PARAM_INVALID, message="无权操作此互动记录", status_code=403)
+    if interaction.outcome in _ATOA_TERMINAL_OUTCOMES:
+        raise ApiException(
+            code=PARAM_INVALID,
+            message=f"当前状态 '{interaction.outcome}' 不允许继续聊",
+        )
+
+    card_a = db.query(AvatarCard).filter(AvatarCard.user_id == interaction.user_a_id).first()
+    card_b = db.query(AvatarCard).filter(AvatarCard.user_id == interaction.user_b_id).first()
+    if not card_a or not card_b:
+        raise ApiException(code=NOT_FOUND, message="分身名片不完整，无法续聊", status_code=400)
+
+    prior_conversation = _decode(interaction.conversation, [])
+    new_turns = await _simulate_atoa_conversation(
+        card_a, card_b,
+        max_rounds=3,
+        prior_conversation=prior_conversation,
+    )
+
+    # 追加对话
+    all_conversation = prior_conversation + new_turns
+    interaction.conversation = _encode(all_conversation)
+    interaction.interaction_phase = (interaction.interaction_phase or 1) + 1
+    interaction.user_decision = "continue"
+    # outcome 回到 pending_user_decision（等待用户下一步决策）
+    if interaction.outcome not in ("mutual",):
+        interaction.outcome = "pending_user_decision"
+    interaction.updated_at = _now_ms()
+    db.commit()
+
+    other = db.query(User).filter(User.id == interaction.user_b_id).first()
+    return {
+        "id": interaction.id,
+        "user_b_id": interaction.user_b_id,
+        "user_b_name": (other.name or other.username) if other else "",
+        "outcome": interaction.outcome,
+        "interaction_phase": interaction.interaction_phase,
+        "new_turns": new_turns,
+        "conversation": all_conversation,
+        "updated_at": interaction.updated_at,
+    }
+
+
+# ==================== Phase 8C: 最终决策 ====================
+
+async def decide_atoa_outcome(
+    db: Session,
+    user_id: str,
+    interaction_id: str,
+    decision: str,
+    opening_message: Optional[str] = None,
+) -> dict:
+    """
+    Phase 8C：用户对 AtoA 互动做最终决策。
+    decision = "block"   → 禁止往下聊：outcome=blocked，关联 match dismissed
+    decision = "connect" → 结交搭子：发起 social match，outcome=connected
+    """
+    if decision not in ("block", "connect"):
+        raise ApiException(code=PARAM_INVALID, message="decision 只能是 block 或 connect")
+
+    interaction = db.query(AvatarAtoaInteraction).filter(
+        AvatarAtoaInteraction.id == interaction_id
+    ).first()
+    if not interaction:
+        raise ApiException(code=NOT_FOUND, message="AtoA 互动记录不存在", status_code=404)
+    if interaction.user_a_id != user_id:
+        raise ApiException(code=PARAM_INVALID, message="无权操作此互动记录", status_code=403)
+    if interaction.outcome in ("blocked", "connected"):
+        raise ApiException(
+            code=PARAM_INVALID,
+            message=f"该互动已经是终态 '{interaction.outcome}'，不可重复决策",
+        )
+
+    now = _now_ms()
+
+    if decision == "block":
+        interaction.outcome = "blocked"
+        interaction.user_decision = "block"
+        interaction.is_visible_to_b = False
+        interaction.updated_at = now
+
+        # 同步关联的 AtoA AvatarMatch → dismissed
+        match = db.query(AvatarMatch).filter(
+            AvatarMatch.user_id == user_id,
+            AvatarMatch.target_user_id == interaction.user_b_id,
+            AvatarMatch.match_type == "atoa",
+            AvatarMatch.status != "dismissed",
+        ).first()
+        if match:
+            match.status = "dismissed"
+            _sync_atoa_mutual_flag(db, match.id, False)
+
+        db.commit()
+        return {"outcome": "blocked", "social_match_id": None}
+
+    # decision == "connect"
+    # 找关联的 AtoA AvatarMatch（mutual）
+    match = db.query(AvatarMatch).filter(
+        AvatarMatch.user_id == user_id,
+        AvatarMatch.target_user_id == interaction.user_b_id,
+        AvatarMatch.match_type == "atoa",
+        AvatarMatch.status != "dismissed",
+    ).first()
+
+    if not match:
+        # 若对方还没互通（one_sided），仍允许主动发起搭子申请
+        post_b = (
+            db.query(PlazaPost)
+            .filter(PlazaPost.user_id == interaction.user_b_id)
+            .order_by(PlazaPost.created_at.desc())
+            .first()
+        )
+        if not post_b:
+            raise ApiException(
+                code=NOT_FOUND,
+                message="对方暂无帖子，无法发起搭子申请，可先继续聊",
+                status_code=400,
+            )
+        match_id_temp = str(uuid4())
+        match = AvatarMatch(
+            id=match_id_temp,
+            user_id=user_id,
+            post_id=post_b.id,
+            target_user_id=interaction.user_b_id,
+            match_score=interaction.score_a or 0,
+            their_score=interaction.score_b or 0,
+            match_reasons=interaction.reasons_a or "[]",
+            their_reasons=interaction.reasons_b or "[]",
+            agent_conversation=interaction.conversation or "[]",
+            status="new",
+            match_type="atoa",
+            intent_type="buddy",
+            created_at=now,
+        )
+        db.add(match)
+        db.flush()
+
+    result = start_chat_from_match(db, user_id, match.id, opening_message)
+    social_match_id = result.get("social_match_id") or ""
+
+    interaction.outcome = "connected"
+    interaction.user_decision = "connect"
+    interaction.is_visible_to_b = True
+    # 存 social.Match.id，便于 §6.9 respond 后同步 connect_confirmed / connect_rejected
+    interaction.triggered_match_id = social_match_id or None
+    interaction.updated_at = now
+    db.commit()
+
+    return {"outcome": "connected", "social_match_id": social_match_id}

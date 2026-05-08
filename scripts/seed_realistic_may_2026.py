@@ -44,7 +44,7 @@ from app.memory.ingestion import (  # noqa: E402
     ingest_social_message,
 )
 from app.models.anniversary import Anniversary  # noqa: E402
-from app.models.avatar import AvatarMemory, AvatarProfile, AvatarStatus  # noqa: E402
+from app.models.avatar import AvatarMemory, AvatarProfile, AvatarStatus, AvatarUsageStat  # noqa: E402
 from app.models.chat import ChatMessage, ChatSession  # noqa: E402
 from app.models.derivative import DiaryDerivative  # noqa: E402
 from app.models.diary import Diary  # noqa: E402
@@ -216,7 +216,7 @@ def _avatar_card_from_persona(persona: dict[str, Any], now_ms: int) -> AvatarCar
         social_intent=_encode(persona["avatar_social_intent"], "[]"),
         conversation_style=_encode(persona["conversation_style"], "{}"),
         boundaries=_encode(persona["boundaries"], "[]"),
-        visibility="private",
+        visibility="public",
         updated_at=now_ms,
     )
 
@@ -3759,6 +3759,7 @@ def purge_existing_data(db) -> None:
     db.query(AvatarMemory).filter(AvatarMemory.user_id.in_(user_ids)).delete(synchronize_session=False)
     db.query(AvatarStatus).filter(AvatarStatus.user_id.in_(user_ids)).delete(synchronize_session=False)
     db.query(AvatarProfile).filter(AvatarProfile.user_id.in_(user_ids)).delete(synchronize_session=False)
+    db.query(AvatarUsageStat).filter(AvatarUsageStat.user_id.in_(user_ids)).delete(synchronize_session=False)
 
     db.query(Anniversary).filter(or_(Anniversary.user_id.in_(user_ids), Anniversary.diary_id.in_(diary_ids))).delete(synchronize_session=False)
     db.query(DiaryDerivative).filter(DiaryDerivative.diary_id.in_(diary_ids)).delete(synchronize_session=False)
@@ -3837,6 +3838,26 @@ def create_users(db) -> SeedContext:
                 generated_at=_ms("2026-05-03 23:18"),
             )
         )
+        # 7:00~23:00 每 2 小时一个冲浪槽，供测试期间随时触发调度
+        _surf_hours = [7, 9, 11, 13, 15, 17, 19, 21]
+        _surf_slots = [
+            {"hour": h, "minute": 45, "reason": f"你通常在 {h+1:02d}:00 后使用 App，提前预热推荐"}
+            for h in _surf_hours
+        ]
+        _surf_plan = _encode({
+            "mode": "personalized",
+            "confidence": 0.75,
+            "preferredHours": [9, 13, 18, 21],
+            "surfSlots": _surf_slots,
+            "quietHours": [0, 1, 2, 3, 4, 5, 6],
+            "dailyLimit": 8,
+            "minIntervalMinutes": 120,
+            "sampleSize": len(_surf_hours) * 7,
+            "updatedAt": _ms("2026-05-03 23:00"),
+            "banditArms": {},
+            "totalPulls": 0,
+            "feedbackHours": {},
+        }, "{}")
         db.add(
             AvatarStatus(
                 id=str(uuid4()),
@@ -3858,8 +3879,30 @@ def create_users(db) -> SeedContext:
                     },
                     "{}",
                 ),
+                auto_match_enabled=True,
+                quiet_mode=False,
+                next_surf_at=0,
+                surf_lock_until=0,
+                personalized_surf_plan=_surf_plan,
             )
         )
+        # 模拟 7:00~23:00 的 App 使用习惯，确保计划重算后仍保持全天覆盖
+        _now_seed = _ms("2026-05-08 12:00")  # 种子当前时间，保证 recency_bonus 成立
+        for _weekday in range(7):  # 每天都有记录
+            for _hour in _surf_hours:
+                db.add(
+                    AvatarUsageStat(
+                        id=str(uuid4()),
+                        user_id=user.id,
+                        weekday=_weekday,
+                        hour=_hour,
+                        open_count=8 + idx,          # 每个时段打开 8~14 次
+                        active_ms=1800000,            # 每次约 30 分钟活跃
+                        page_weights=_encode({"plaza": 5, "avatar": 3}, "{}"),
+                        last_seen_at=_now_seed,       # 最近一次在该时段使用
+                        updated_at=_now_seed,
+                    )
+                )
         for mem_idx, memory in enumerate(persona["avatar_memories"], start=1):
             db.add(
                 AvatarMemory(

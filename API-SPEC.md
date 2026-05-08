@@ -1371,7 +1371,7 @@ GET /social/matches?include_pending=
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `include_pending` | boolean | `false` | 为 `true` 时返回 `status` 为 `accepted` 与 `pending` 的匹配（便于核对「分身 start-chat」§11.7.4 或 `POST /social/buddy` 产生的待处理搭子）；为 `false` 时行为与历史一致，仅 `accepted` |
+| `include_pending` | boolean | `false` | 为 `true` 时返回 `status` 为 `accepted` 与 `pending` 的匹配（便于核对 AtoA `decide=connect`（§11.7.1.5）或 `POST /social/buddy` 产生的待处理搭子）；为 `false` 时行为与历史一致，仅 `accepted` |
 
 **响应 `data`：** `Match[]`（每项含 `status`、`matchType`，见 §6.1 `Match`）
 
@@ -1546,7 +1546,7 @@ POST /social/buddy/{requestId}/respond
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `requestId` | string | **`social.Match` 表主键**，即搭子记录在库里的 `id`。来源示例：`POST /social/buddy` 响应中的 `id`，或 **`POST /avatar/matches/{matchId}/start-chat`**（§11.7.4）响应中的 **`socialMatchId`**。**不得**使用分身推荐 `GET /avatar/matches` 返回的 **`AvatarMatch.id`**（与 `targetUser.id`、帖子 `post.id` 均不同）。 |
+| `requestId` | string | **`social.Match` 表主键**，即搭子记录在库里的 `id`。来源示例：`POST /social/buddy` 响应中的 `id`，或 **`POST /avatar/atoa/{interactionId}/decide`**（§11.7.1.5，`decision=connect`）响应中的 **`socialMatchId`**。**不得**使用分身互动 `id` 或用户 `id`。 |
 
 **请求体：**
 
@@ -1560,8 +1560,10 @@ POST /social/buddy/{requestId}/respond
 
 **实现说明：** 仅 **`Match.target_id` 等于当前用户** 的待处理搭子可申请可响应（接收方操作）。发起方（`user_id`）调用本接口会返回业务错误提示，不应由发起方「自批」申请。
 
+**Phase 8C 联动：** 若该 `social.Match` 由 **`POST /avatar/atoa/{interactionId}/decide`**（`connect`）创建，且发起方探针记录上 **`triggeredMatchId` 与本条 `Match.id` 一致**，接收方 `accept` / `reject` 后，服务端会将对应 **`GET /avatar/probe-log`** 条目的 **`outcome`** 同步为 **`connect_confirmed`** / **`connect_rejected`**。
+
 **错误码与典型 `message`（`ApiException`）：**
-- 记录不存在或 `id` 误用为分身推荐 id 等 → **404**，`message` 含引导：须使用 `start-chat` / 申请搭子返回的 **社交匹配 id**，而非 `AvatarMatch.id`
+- 记录不存在或 `id` 误用 → **404**，`message` 含引导：须使用 AtoA `decide=connect` 或 `POST /social/buddy` 返回的 **社交匹配 id**
 - 当前用户为该搭子记录的 **发起方**（`user_id`）→ **400**，`message` 含「请让对方（接收方）登录后调用」
 - 当前用户非该记录的参与方 → **404**，`message` 含「不是该申请的接收方」
 - 该搭子 **`status` 已不是 `pending`**（已处理）→ **400**，`message`：`该搭子申请已处理，无需再次响应`
@@ -2011,52 +2013,6 @@ POST /plaza/posts/{postId}/agent-comment
 - 帖子不存在 → `code` 非 0 + `message: "帖子不存在"`
 - 帖子不允许分身回复 → `code` 非 0 + `message: "该帖子不允许分身回复"`
 - 用户未配置分身画像 → `code` 非 0 + `message: "请先设置分身画像"`
-
-### 9.9 获取分身推荐匹配
-
-```
-GET /avatar/matches
-```
-
-**需要认证：** ✅
-
-**响应 `data`：** `AgentMatch[]`
-
-**实现说明：**
-- 首次访问时会基于 `avatar_card`、结构化记忆、共享 `plaza_post_index` 和广场帖子自动生成推荐
-- `school_only=true` 的帖子只对同校用户参与推荐
-- 排除 `status="dismissed"` 的记录
-- 按 `matchScore` 降序
-
-### 9.9.1 重新生成分身推荐（规则 + AI 精排）
-
-```
-POST /avatar/matches/rebuild
-```
-
-**需要认证：** ✅
-
-**响应 `data`：** 见 **§11.7.2**（`totalMatches` / `newlyAiRefined` / `aiRefinedTotal` / `refreshedAt`）。
-
-### 9.10 处理分身推荐（接受/忽略）
-
-```
-POST /avatar/matches/{matchId}/action
-```
-
-**需要认证：** ✅
-
-**请求体：**
-
-```typescript
-{
-  action: 'chat' | 'dismiss'
-}
-```
-
-**响应 `data`：** `null`
-
----
 
 ## 10. 记忆系统模块（Memory）
 
@@ -2527,6 +2483,11 @@ interface AvatarSurfLog {
   errorMessage: string
   startedAt: number
   finishedAt?: number
+  // Phase 8A（AtoA 搭子模式冲浪统计）
+  scannedAtoaPairs: number       // 本次进入 AtoA 探针的候选对数（与 Top-10 会话内实际生成条数一致）
+  upgradedToMutual: number       // 本次升级为双向达标的对数
+  surfReport: string             // 自然语言汇报摘要（可为空）
+  top10SessionId?: string         // 本次创建的 avatar_atoa_sessions.id，无则缺省或空串
 }
 ```
 
@@ -2606,69 +2567,144 @@ POST /avatar/card/regenerate
 
 ---
 
-### 11.7 分身推荐匹配（Phase 5–7）
+### 11.7 分身 AtoA 匹配（Phase 8）
 
-> Phase 5：`GET /avatar/matches` 同时返回**帖子型匹配**与**用户型匹配**（三路行为/关系/画像信号宽召回 + 规则打分）。
-> Phase 6：`POST /avatar/matches/rebuild` 触发完整推荐重建流水线，顶部若干条经当前配置的**大模型**（`LLM_PROVIDER`，如 VIVO）精排，生成开场白与 `riskFlags`。
-> Phase 7：`POST /avatar/matches/{matchId}/start-chat` 将推荐转为真实**搭子申请**（`social.Match`，`matchType=buddy`），见 **§11.7.4**。
+> Phase 8A：`run_avatar_surf_for_user`（外部 `scripts/run_avatar_scheduler.py` 等）内建 **AtoA Top-10 探针**：写入 `avatar_atoa_sessions` / `avatar_atoa_interactions`，对话由大模型生成；监察接口见 **§11.7.1**。双向达标记录同时落在 `AvatarMatch`（`matchType="atoa"`），列表见 **§11.7.1.3**。
+> Phase 8B / 8C：用户对单条探针「继续聊」或「打断 / 结交」，见 **§11.7.1.4**、**§11.7.1.5**；结交产生的待处理搭子与 **§6.2**、**§6.9** 一致。
 
-#### 11.7.1 获取推荐列表
+#### 11.7.1 Phase 8 AtoA 搭子模式（探针日志 / 会话 / 继续聊 / 决策）
+
+> 典型触发：外部调度执行 `run_avatar_surf_for_user`（如 `python scripts/run_avatar_scheduler.py --user <username>`），需分身开启且 `auto_match_enabled=true`，且全库满足 AtoA 冷启动人数门槛。对话由 **`LLM_PROVIDER`** 配置的大模型生成；`MINIMAX_MOCK=true` 时为模板对话（联调真实蓝心时请关闭 Mock）。
+
+##### 11.7.1.1 分身探针日志（我发起的 AtoA）
 
 ```
-GET /avatar/matches
+GET /avatar/probe-log?limit=20&offset=0&outcome=&session_id=
 ```
 
 **需要认证：** ✅
 
-**响应 `data`：** `AvatarMatch[]`
+**范围与去重（实现约定，前端对齐）：**
+
+- **默认（不传 `session_id`）**：只返回 **当前用户最近一次成功分身冲浪**（`AvatarSurfLog`，`status=success`，按 `started_at` 最新）所关联的 **`top10_session_id`**（即 `AvatarSurfLog.top10_session_id` → `avatar_atoa_sessions.id`）下的探针记录。
+  - 若最近一次成功冲浪 **未产生 AtoA**（`top10_session_id` 为空），**`data` 为空数组 `[]`**。
+- **`session_id` 有值**：仅在该次 **`avatar_atoa_sessions.id`** 下筛选（用于查看历史某轮会话），规则下同。
+- **同一 `session_id`、同一对方用户 `userBId`**：若存在多条互动（多次冲浪重复探针），**只保留 `created_at` 最新的一条**（按对方用户去重后再分页）。
+- **`outcome`**：在去重前的查询条件上筛选；**`limit` / `offset`**：在 **去重后的列表** 上分页。
+
+**Query 参数：**
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `limit` | number | 20 | 1–100；作用于去重后的列表 |
+| `offset` | number | 0 | 分页偏移；作用于去重后的列表 |
+| `outcome` | string | 无 | 可选，精确筛选：`pending_user_decision` / `blocked` / `connected` / `connect_confirmed` / `connect_rejected` / `mutual` / `one_sided` / `incompatible` 等 |
+| `session_id` | string | 无 | 可选；不传则限定为「最近一次成功冲浪」关联的会话 |
+
+**响应 `data`：** `ProbeLogItem[]`（**裸数组**，与项目内其它 `GET /avatar/*` 列表一致）
 
 ```typescript
-interface TargetUserBrief {
-  id: string
-  name: string
-  avatar: string
-  school: string
-  major: string
-  grade: string
+interface AtoaConversationTurn {
+  role: "avatar_a" | "avatar_b"   // avatar_a = 发起方（当前用户）分身，avatar_b = 候选用户分身
+  content: string
 }
 
-interface AvatarMatch {
+interface ProbeLogItem {
   id: string
-  postId: string
-  post: PlazaPost             // 锚定帖子（帖子型=匹配帖子，用户型=对方最近帖子）
-  matchScore: number          // 0–99（规则分，AI精排后会更新）
-  matchReasons: string[]      // 可读原因列表（AI精排后更口语化）
-  agentConversation: Array<{
-    from: "my_agent" | "their_agent"
-    content: string
-    timestamp: number
-  }>
-  status: "new" | "viewed" | "chatting" | "dismissed"
+  sessionId?: string
+  userBId: string
+  userBName: string
+  userBAvatar: string
+  interactionType: string         // 如 card_exchange
+  outcome: string                 // 见附录 C「AtoA 探针 outcome」
+  readableOutcome: string         // 中文可读说明
+  scoreA: number
+  scoreB: number
+  sharedTopics: string[]
+  reasonsA: string[]
+  conversation: AtoaConversationTurn[]
+  riskFlags: string[]
+  interactionPhase: number        // 轮组序号，「继续聊」后递增
+  userDecision?: string           // continue | block | connect
+  isMutual: boolean
+  triggeredMatchId?: string       // connect 成功后为 social.Match.id（与 §6.9 的 requestId 一致）
   createdAt: number
-  // Phase 5 用户型/帖子型匹配扩展字段
-  matchType: "post" | "user"          // post=帖子型召回，user=用户型召回
-  intentType: "buddy" | "help" | "share" | "dating"  // 推断的社交意图类型
-  targetUser: TargetUserBrief | null  // 用户型匹配时非空，帖子型为 null
-  // Phase 6 AI 精排新增字段
-  suggestedOpening: string            // AI 生成的开场白建议（空串表示未精排）
-  aiRefined: boolean                  // 是否已经过 AI 精排
-  riskFlags: string[]                 // 风险标注，如 ['意图不匹配']，无风险为 []
+  updatedAt: number
 }
 ```
 
-**实现说明：**
-- 每次请求时触发规则宽召回（帖子 + 用户双通道），自动刷新未精排记录
-- `matchType="user"` 的记录：`targetUser` 非空，`post` 为对方最近的广场帖子（作为入口锚点）
-- `school_only=true` 的帖子只对同校用户参与推荐
-- 排除 `status="dismissed"` 的记录，按 `matchScore` 降序
-
-#### 11.7.2 重新生成分身推荐（Phase 5+6）
+##### 11.7.1.2 AtoA 候选池会话（Top-10 进度）
 
 ```
-POST /avatar/matches/rebuild
+GET /avatar/atoa/sessions?limit=5&offset=0
 ```
 
 **需要认证：** ✅
+
+**范围（实现约定，前端对齐）：**
+
+- 只返回 **最近一次成功分身冲浪**（同上，`AvatarSurfLog` `status=success` 按 `started_at` 最新）所关联的 **`top10_session_id`** 对应的那一条 **`AvatarAtoaSession`**。
+- **`data` 长度为 0 或 1**：无成功冲浪、或最近一次冲浪未关联 AtoA 会话、或会话不存在时，为 **`[]`**。
+- **`pendingCount` / `decidedCount`**：在该 `session_id` 下，先按 **`userBId`（对方用户）只保留最新一条互动**，再统计 outcome（与 §11.7.1.1 去重口径一致）。
+- **`candidateCount`**：`candidate_ids`（粗筛候选用户 ID 列表）长度。
+- **`limit` / `offset`**：保留兼容；当前实现下 **`offset > 0` 时返回 `[]`**（仅一页，至多一条会话摘要）。
+
+**响应 `data`：** `AtoaSessionSummary[]`（裸数组）
+
+```typescript
+interface AtoaSessionSummary {
+  id: string
+  status: "active" | "completed" | "superseded"
+  candidateCount: number          // 粗筛写入会话时的候选人数（candidate_ids 长度）
+  excludedCount: number           // excluded_ids 长度（已打断等排除的候选）
+  pendingCount: number            // 去重后的对方用户中，outcome 仍为 pending_user_decision 的人数
+  decidedCount: number          // 去重后的对方用户中，已非 pending 的人数合计
+  surfLogId?: string             // 关联的 AvatarSurfLog.id（若有）
+  createdAt: number
+  updatedAt: number
+}
+```
+
+##### 11.7.1.3 AtoA 双向达标推荐列表
+
+```
+GET /avatar/mutual-matches?limit=20&offset=0
+```
+
+**需要认证：** ✅
+
+**响应 `data`：** `MutualAtoaMatch[]`（裸数组，`AvatarMatch` 中 `matchType="atoa"` 且 `isMutual=true`）
+
+```typescript
+interface MutualAtoaMatch {
+  id: string
+  targetUserId: string
+  targetUserName: string
+  targetUserAvatar: string
+  targetUserSchool: string
+  targetCardInterests: string[]
+  targetCardIntent: string[]
+  myScore: number
+  theirScore: number
+  myReasons: string[]
+  theirReasons: string[]
+  intentType: string
+  suggestedOpening: string
+  status: string                  // new / viewed / chatting / dismissed
+  peerMatchId?: string
+  createdAt: number
+}
+```
+
+##### 11.7.1.4 继续 AtoA 对话（Phase 8B）
+
+```
+POST /avatar/atoa/{interactionId}/continue
+```
+
+**需要认证：** ✅
+
+**路径参数：** `interactionId` — **§11.7.1.1** 返回的 `ProbeLogItem.id`（且须为当前用户作为发起方 `user_a` 的记录）。
 
 **请求体：** 无
 
@@ -2676,25 +2712,23 @@ POST /avatar/matches/rebuild
 
 ```typescript
 {
-  totalMatches: number      // 当前非dismissed匹配总数
-  newlyAiRefined: number   // 本次新精排的数量（已精排过的不重复处理）
-  aiRefinedTotal: number   // 全库已精排匹配数
-  refreshedAt: number      // 本次刷新时间戳（毫秒）
+  id: string
+  userBId: string
+  userBName: string
+  outcome: string               // 一般为 pending_user_decision
+  interactionPhase: number
+  newTurns: AtoaConversationTurn[]   // 本次新增 ≤3 轮（每轮 avatar_a + avatar_b 各一条）
+  conversation: AtoaConversationTurn[]  // 合并后的全量对话
+  updatedAt: number
 }
 ```
 
-**实现说明：**
-- **Phase 5**：同时执行帖子通道和用户通道双路规则召回
-  - 帖子通道：扫最新 60 条广场帖子，兴趣词 / 频道 / 学校多维打分
-  - 用户通道：三路信号（已有搭子关系 +25、互动行为 +8~14、画像相似 +10~25）召回用户，取其最近帖子作为锚点
-- **Phase 6**：取未精排的 top-10 调用大模型，输出精排分 / 自然理由 / 开场白 / 风险标注（`MINIMAX_MOCK=true` 时为 Mock，不调真实 API）
-- AI 精排失败时静默降级，规则分结果仍然有效
-- `aiRefined=true` 的记录不会被重复精排（幂等）
+**错误：** 非发起方 → **403**；`outcome` 已为 `blocked` / `connected` 等终态 → **400**（不允许继续聊）。
 
-#### 11.7.3 处理推荐（接受/忽略）
+##### 11.7.1.5 AtoA 最终决策（Phase 8C）
 
 ```
-POST /avatar/matches/{matchId}/action
+POST /avatar/atoa/{interactionId}/decide
 ```
 
 **需要认证：** ✅
@@ -2703,31 +2737,8 @@ POST /avatar/matches/{matchId}/action
 
 ```typescript
 {
-  action: "chat" | "dismiss"
-}
-```
-
-**响应 `data`：** `null`
-
-**实现说明：**
-- `chat`：标记为 `chatting`，同时触发 UCB Bandit 正向反馈（+5）
-- `dismiss`：标记为 `dismissed`，触发 Bandit 负向反馈（-2）
-
-#### 11.7.4 一键发起搭子申请（Phase 7，社交闭环）
-
-```
-POST /avatar/matches/{matchId}/start-chat
-```
-
-**需要认证：** ✅
-
-**路径参数：** `matchId` — 当前登录用户名下的一条 `AvatarMatch.id`。
-
-**请求体：**
-
-```typescript
-{
-  openingMessage?: string    // 用户自定义开场白；不传则使用本条的 suggestedOpening（Phase 6），再兜底空串（服务端截断至 200 字）
+  decision: "block" | "connect"
+  openingMessage?: string   // connect 时可选；不传则用关联 AvatarMatch 的 suggestedOpening 等兜底
 }
 ```
 
@@ -2735,32 +2746,14 @@ POST /avatar/matches/{matchId}/start-chat
 
 ```typescript
 {
-  socialMatchId: string      // 新建或复用的 social.Match.id；前端可跳转搭子/匹配详情
-  suggestedOpening: string   // 本条匹配上的 AI 建议开场白（与请求体无关，供展示/预填）
-  isDuplicate: boolean       // true：双方已存在 pending/accepted 的 buddy 申请，本次未建新行，仅复用 ID
+  outcome: "blocked" | "connected"
+  socialMatchId?: string      // connect 成功时非空，即 social.Match.id，用于 §6.2 / §6.9
 }
 ```
 
-**前置与状态变更：**
-- 仅允许 `AvatarMatch.status !== "dismissed"`；成功后（含复用已有申请）将本条 `AvatarMatch.status` 置为 `"chatting"`。
-- **目标用户解析**：`matchType="user"` 且存在 `targetUser.id` 时以该用户为目标；否则以锚定帖子 `post.userId` 为目标（帖子型）。
-- **搭子记录**：新建时写入 `social.Match`：`matchType="buddy"`，`status="pending"`，`matchReport` = 用户传入的 `openingMessage` 或 AI `suggestedOpening`（截断后），`commonTags` 含推断的 `intentType`。
-- **Bandit**：成功路径在服务端触发 UCB 反馈，奖励 **+10**（高于 `POST .../action` 中 `chat` 的 +5），用于强化「从推荐真正发起申请」的信号。
-- **防重复**：若双方已有 `buddy` 且 `status` 为 `pending` 或 `accepted`，不插入新 `social.Match`，返回已有 `socialMatchId` 且 `isDuplicate=true`，仍将本条 `AvatarMatch` 标为 `chatting`。
-
-**业务错误（`ApiException`，统一外层 `code`/`message`）：**
-
-| 场景 | HTTP | 说明 |
-|------|------|------|
-| 匹配不存在或非本人 | 404 | `匹配记录不存在` |
-| `status === "dismissed"` | 400 | `已忽略的推荐不能发起申请` |
-| 锚定帖子已删（帖子型无法解析作者） | 404 | `帖子已删除，无法定位目标用户` |
-| 目标为本人 | 400 | `不能向自己发起搭子申请` |
-
-**产品约定（与 TASK-G Phase 7 一致）：**
-- 分身不默认代发私聊；本接口只创建搭子申请并落库开场白，实际首条消息可由前端在对方同意后发送。
-- 前端建议：弹窗编辑 `openingMessage` → 调本接口 → 用 `socialMatchId` 跳转搭子详情；高风险 `riskFlags` 建议二次确认（产品层）。
-- **接收方同意/拒绝**：使用 **§6.9** `POST /social/buddy/{requestId}/respond`，路径中的 `requestId` **必须**为响应里的 **`socialMatchId`**；勿将 **`matchId`（`AvatarMatch.id`）**、**`targetUser.id`** 或 **帖子 `post.id`** 当作 `requestId`。待处理列表可用 **§6.2** `GET /social/matches?include_pending=true` 核对。
+**实现说明：**
+- **`block`**：`AtoaInteraction.outcome=blocked`；关联 `AvatarMatch`（`atoa`）置 `dismissed`；对方不可见。
+- **`connect`**：创建或复用 `social.Match`（`buddy`，`pending`），`AtoaInteraction.outcome=connected`，`isVisibleToB=true`；返回 **`socialMatchId`** 供接收方调 **§6.9**。
 
 ---
 
@@ -2954,21 +2947,22 @@ POST /avatar/actions/{actionId}/reject
 | 76 | PUT | `/avatar/status` | Avatar | 更新分身状态 |
 | 77 | POST | `/avatar/usage-events` | Avatar | 上报 App 使用事件（个性化冲浪学习） |
 | 78 | GET | `/avatar/surf-logs?limit=` | Avatar | 分身冲浪执行日志 |
-| 79 | GET | `/avatar/matches` | Avatar | 分身推荐匹配列表（帖子型 + 用户型双通道） |
-| 80 | POST | `/avatar/matches/rebuild` | Avatar | 重新生成分身推荐（规则宽召回 + AI精排） |
-| 81 | POST | `/avatar/matches/{matchId}/action` | Avatar | 处理分身推荐（chat/dismiss） |
-| 82 | POST | `/avatar/matches/{matchId}/start-chat` | Avatar | 从分身推荐一键发起搭子申请（Phase 7） |
-| 83 | GET | `/avatar/profile` | Avatar | 获取分身侧写 |
-| 84 | POST | `/avatar/profile/regenerate` | Avatar | 重新生成分身侧写 |
-| 85 | GET | `/avatar/card` | Avatar | 获取分身名片 |
-| 86 | POST | `/avatar/card/regenerate` | Avatar | 重新生成分身名片 |
-| 87 | GET | `/avatar/actions?status=` | Avatar | 分身行动列表 |
-| 88 | POST | `/avatar/actions/plaza-comment-draft` | Avatar | 生成广场评论草稿 |
-| 89 | POST | `/avatar/actions/auto-surf` | Avatar | 触发一次分身自动冲浪 |
-| 90 | POST | `/avatar/actions/{actionId}/approve` | Avatar | 批准分身行动 |
-| 91 | POST | `/avatar/actions/{actionId}/reject` | Avatar | 拒绝分身行动 |
+| 79 | GET | `/avatar/profile` | Avatar | 获取分身侧写 |
+| 80 | POST | `/avatar/profile/regenerate` | Avatar | 重新生成分身侧写 |
+| 81 | GET | `/avatar/card` | Avatar | 获取分身名片 |
+| 82 | POST | `/avatar/card/regenerate` | Avatar | 重新生成分身名片 |
+| 83 | GET | `/avatar/actions?status=` | Avatar | 分身行动列表 |
+| 84 | POST | `/avatar/actions/plaza-comment-draft` | Avatar | 生成广场评论草稿 |
+| 85 | POST | `/avatar/actions/auto-surf` | Avatar | 触发一次分身自动冲浪 |
+| 86 | POST | `/avatar/actions/{actionId}/approve` | Avatar | 批准分身行动 |
+| 87 | POST | `/avatar/actions/{actionId}/reject` | Avatar | 拒绝分身行动 |
+| 88 | GET | `/avatar/probe-log?limit=&offset=&outcome=&session_id=` | Avatar | Phase 8A：默认仅最近一次成功冲浪对应会话的探针；按对方用户去重；可传 `session_id` 查历史会话 |
+| 89 | GET | `/avatar/atoa/sessions?limit=&offset=` | Avatar | Phase 8A：仅最近一次成功冲浪对应的 Top-10 会话摘要（0～1 条）；pending/decided 按对方用户去重统计 |
+| 90 | GET | `/avatar/mutual-matches?limit=&offset=` | Avatar | Phase 8A：AtoA 双向达标推荐列表 |
+| 91 | POST | `/avatar/atoa/{interactionId}/continue` | Avatar | Phase 8B：继续 AtoA 分身对话 |
+| 92 | POST | `/avatar/atoa/{interactionId}/decide` | Avatar | Phase 8C：打断或结交（结交返回 socialMatchId） |
 
-**共计 91 个接口**（Auth 4 + Material 8 + Upload 2 + Diary 12 + Chat 6 + AI 2 + User 8 + Social 10 + Anniversary 5 + Study 6 + Plaza 9 + **Avatar 21**）
+**共计 92 个接口**（Auth 4 + Material 8 + Upload 2 + Diary 12 + Chat 6 + AI 2 + User 8 + Social 10 + Anniversary 5 + Study 6 + Plaza 9 + **Avatar 22**）
 
 ---
 
@@ -3022,9 +3016,9 @@ POST /avatar/actions/{actionId}/reject
 | 对话段状态 | `'open'` \| `'closed'` | `ChatSession.status` |
 | SSE 事件类型 | `'session'` \| `'ack'` \| `'chunk'` \| `'done'` \| `'error'` | `POST /chat/stream` |
 | 广场帖子类型 | `'buddy'` \| `'help'` \| `'share'` \| `'dating'` | `PlazaPost.type` |
-| 分身推荐状态 | `'new'` \| `'viewed'` \| `'chatting'` \| `'dismissed'` | `AgentMatch.status` |
-| 分身推荐操作 | `'chat'` \| `'dismiss'` | `POST /avatar/matches/{matchId}/action` |
-| 分身推荐匹配来源 | `'post'` \| `'user'` | `AvatarMatch.matchType` |
+| 分身推荐状态 | `'new'` \| `'viewed'` \| `'chatting'` \| `'dismissed'` | `AgentMatch.status`（`chatting` 由 AtoA 互动写入；`dismissed` 由 Phase 8C `decision=block` 写入） |
+| 分身推荐匹配来源 | `'post'` \| `'user'` \| `'atoa'` | `AvatarMatch.matchType` |
+| AtoA 探针 outcome | `'pending_user_decision'` \| `'blocked'` \| `'connected'` \| `'connect_confirmed'` \| `'connect_rejected'` \| `'mutual'` \| `'one_sided'` \| `'incompatible'` \| … | `GET /avatar/probe-log` 每条 `outcome`；终态以前三者为 Phase 8C 主路径 |
 | 分身推荐意图类型 | `'buddy'` \| `'help'` \| `'share'` \| `'dating'` | `AvatarMatch.intentType` |
 | 冲浪频率模式 | `'adaptive'` \| `'low'` \| `'medium'` \| `'high'` \| `'custom'` | `AvatarStatus.surfFrequency` |
 | 使用事件类型 | `'app_open'` \| `'app_resume'` \| `'app_close'` \| `'active_ping'` \| `'page_view'` | `POST /avatar/usage-events` |
