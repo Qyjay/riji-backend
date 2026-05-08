@@ -52,6 +52,18 @@
 
 建议匹配同学固定保留这组账号，不要再手动改密码，这样联调时前后端、算法、测试三方口径一致。
 
+### 2.1 AtoA 联调补充账号（脚本自建，非 11 天种子包）
+
+以下账号由 `scripts/atoa_live_test.py` 在本地库中**按需创建**：仅有用户行 + `avatar_status` / `avatar_cards` 等最小数据，**没有**本节主表对应的 11 天日记、广场、聊天与记忆回灌链路。用途是快速验证蓝心 AtoA 对话与 `AtoaSession` / `AtoaInteraction` 写入。
+
+| 用户名 | 密码 | 显示名（名片） | 简要定位 |
+| --- | --- | --- | --- |
+| `chen_chen_photo` | `123456` | 陈晨 | 摄影 / 旅行 / 咖啡，AtoA 候选 |
+| `li_mingyuan_hike` | `123456` | 明远 | 徒步 / 户外 / 旅行，AtoA 候选 |
+| `wang_zihan_book` | `123456` | 子涵 | 读书 / 文学 / 独立书店，AtoA 候选 |
+
+
+
 ## 3. 新增 5 人的定位
 
 新增 5 人补齐了原有 5 人之外的关系类型和兴趣面。
@@ -293,7 +305,6 @@ Authorization: Bearer <token>
 
 - `POST /api/auth/login`
 - `GET /api/avatar/matches`
-- `POST /api/avatar/matches/{match_id}/action`
 - `GET /api/social/matches`
 - `GET /api/social/messages/{match_id}`
 - `GET /api/social/matches/{match_id}/report`
@@ -371,5 +382,6 @@ Authorization: Bearer <token>
 ## 13. 相关文件
 
 - 种子脚本：`scripts/seed_realistic_may_2026.py`
+
 - 本说明文档：`docs/REALISTIC_USER_DATA_2026_MAY.md`
 

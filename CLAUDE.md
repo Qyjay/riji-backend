@@ -50,7 +50,7 @@ app/
 - AvatarMemory / AvatarStatus / AvatarMatch / AvatarProfile（AI 分身记忆、状态、推荐匹配、侧写）
 
 ## 接口规模
-- 当前 `/api` 路由总数：65（见 `docs/API-DOCS.md` 的接口汇总）
+- 当前 `/api` 路由总数：62（见 `docs/API-DOCS.md` 的接口汇总）
 - Task-F 相关新增接口：`POST /api/chat/close-session`、`GET /api/chat/session/{session_id}/messages`
 
 ## 规范

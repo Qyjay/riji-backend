@@ -6,6 +6,8 @@ AI 分身相关数据模型
 - AvatarProfile: 分身侧写
 - AvatarUsageStat: App 使用习惯聚合
 - AvatarSurfLog: 分身冲浪日志
+- AvatarAtoaSession: Phase 8A Top-10 粗筛会话（候选池 + 排除列表）
+- AvatarAtoaInteraction: Phase 8A AtoA 探针互动日志
 """
 from uuid import uuid4
 
@@ -98,6 +100,13 @@ class AvatarMatch(Base):
     ai_refined = Column(Boolean, default=False)         # 是否已经过 AI 精排
     ai_refined_at = Column(BigInteger, nullable=True)   # AI 精排时间
 
+    # Phase 8A AtoA 双向匹配字段
+    their_score = Column(Integer, default=0)            # 对方视角给我的规则打分
+    their_reasons = Column(Text, default="[]")          # JSON: string[]，对方视角的匹配理由
+    is_mutual = Column(Boolean, default=False)          # 是否双向达标
+    peer_match_id = Column(String, nullable=True)       # 对方那条 AvatarMatch 的 ID（atoa 型互相关联）
+    target_avatar_card_id = Column(String, nullable=True)  # 匹配时使用的对方名片 ID 快照
+
     __table_args__ = (
         # 按用户查询索引
         Index("ix_avatar_matches_user_id", "user_id"),
@@ -156,8 +165,110 @@ class AvatarSurfLog(Base):
     error_message = Column(Text, default="")
     started_at = Column(BigInteger, nullable=False)
     finished_at = Column(BigInteger, nullable=True)
+    # Phase 8A AtoA 统计字段
+    scanned_atoa_pairs = Column(Integer, default=0)     # 本次冲浪进入 AtoA 探针的候选对数
+    upgraded_to_mutual = Column(Integer, default=0)     # 本次升级为 mutual 的对数
+    surf_report = Column(Text, default="")              # Agent 汇报摘要文案（自然语言）
+
+    # Phase 8A: Top-10 会话关联
+    top10_session_id = Column(String, nullable=True)         # 本次冲浪创建的 AtoaSession.id
 
     __table_args__ = (
         Index("ix_avatar_surf_logs_user_time", "user_id", "started_at"),
         Index("ix_avatar_surf_logs_status", "status"),
+    )
+
+
+class AvatarAtoaSession(Base):
+    """Phase 8A: Top-10 搭子模式候选池会话。
+    每次冲浪触发 Top-10 粗筛后写一条记录，记录候选 ID 列表、排除列表和评分快照。
+    打断时从排除列表外的候选中自动补位。
+    """
+    __tablename__ = "avatar_atoa_sessions"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+
+    candidate_ids = Column(Text, default="[]")
+    # JSON: string[]，本次粗筛 Top-10 候选用户 ID（按评分降序排列）
+
+    excluded_ids = Column(Text, default="[]")
+    # JSON: string[]，用户已打断或已结交申请的候选 ID，补位时不再出现
+
+    score_snapshot = Column(Text, default="{}")
+    # JSON: {user_id: score}，粗筛时各候选的规则评分快照（含第11+位，用于补位）
+
+    status = Column(String, default="active")
+    # active     — 会话进行中，仍有候选未决策
+    # completed  — 所有候选已决策，可开启新一轮
+    # superseded — 被新的冲浪会话取代
+
+    surf_log_id = Column(String, nullable=True)   # 关联的 AvatarSurfLog.id
+
+    created_at = Column(BigInteger, nullable=False)
+    updated_at = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        Index("ix_atoa_sessions_user", "user_id", "created_at"),
+        Index("ix_atoa_sessions_user_status", "user_id", "status"),
+    )
+
+
+class AvatarAtoaInteraction(Base):
+    """Phase 8A: AtoA 探针互动日志，记录每一次两个分身互查的完整过程。"""
+    __tablename__ = "avatar_atoa_interactions"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    initiator_id = Column(String, ForeignKey("users.id"), nullable=False)
+    # 触发本次探针的冲浪用户（谁的冲浪任务写了这条记录）
+
+    session_id = Column(String, ForeignKey("avatar_atoa_sessions.id"), nullable=True)
+    # 所属的 AtoaSession（Top-10 粗筛会话），用于进度追踪和补位逻辑
+
+    user_a_id = Column(String, ForeignKey("users.id"), nullable=False)
+    user_b_id = Column(String, ForeignKey("users.id"), nullable=False)
+    # user_a 始终是 initiator（当前用户），user_b 是候选搭子
+
+    interaction_type = Column(String, default="card_exchange")
+
+    outcome = Column(String, default="pending_user_decision")
+    # pending_user_decision — 分身初次对话已生成，等待用户手动决策（初始值）
+    # blocked              — 用户打断，双向降分，已从候选池排除
+    # connected            — 用户发出结交申请，等待对方确认
+    # connect_confirmed    — 对方已确认，社交闭环完成
+    # connect_rejected     — 对方拒绝了结交申请
+
+    score_a = Column(Integer, default=0)    # A 视角打 B 的分
+    score_b = Column(Integer, default=0)    # B 视角打 A 的分（对方冲浪时补填）
+
+    shared_topics = Column(Text, default="[]")  # JSON: string[]，双方名片重合词
+
+    reasons_a = Column(Text, default="[]")  # JSON: string[]，A 视角的匹配理由
+    reasons_b = Column(Text, default="[]")  # JSON: string[]，B 视角的匹配理由
+
+    risk_flags = Column(Text, default="[]") # JSON: string[]，探针发现的风险
+
+    conversation = Column(Text, default="[]")
+    # JSON: [{role: "avatar_a"|"avatar_b", content: "..."}]
+    # 两个分身的模拟对话内容（AI 生成）
+
+    triggered_match_id = Column(String, nullable=True)  # outcome=connected 时为 social.Match.id（供 respond 后同步终态）
+
+    is_visible_to_a = Column(Boolean, default=True)     # A 在「分身动态」可见
+    is_visible_to_b = Column(Boolean, default=False)    # B 默认不可见，mutual 后开放
+
+    interaction_phase = Column(Integer, default=1)
+    # 当前是第几轮组（每组 ≤3 轮，用户选「继续聊」后 +1）
+
+    user_decision = Column(String, nullable=True)
+    # 用户最近一次操作：continue / block / connect
+
+    created_at = Column(BigInteger, nullable=False)
+    updated_at = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        Index("ix_atoa_interactions_initiator", "initiator_id", "created_at"),
+        Index("ix_atoa_interactions_pair", "user_a_id", "user_b_id"),
+        Index("ix_atoa_interactions_outcome", "outcome"),
+        Index("ix_atoa_interactions_session", "session_id"),
     )

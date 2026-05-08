@@ -320,4 +320,20 @@ def respond_buddy(db: Session, user_id: str, request_id: str, accept: bool) -> N
         raise ApiException(code=PARAM_INVALID, message="该搭子申请已处理，无需再次响应", status_code=400)
 
     match.status = "accepted" if accept else "rejected"
+
+    # 同步关联的 AtoaInteraction.outcome（Phase 8C 社交闭环）
+    try:
+        from app.models.avatar import AvatarAtoaInteraction
+        interaction = (
+            db.query(AvatarAtoaInteraction)
+            .filter(AvatarAtoaInteraction.triggered_match_id == match.id)
+            .first()
+        )
+        if interaction and interaction.outcome == "connected":
+            import time as _time
+            interaction.outcome = "connect_confirmed" if accept else "connect_rejected"
+            interaction.updated_at = int(_time.time() * 1000)
+    except Exception:
+        pass  # 不影响主流程
+
     db.commit()

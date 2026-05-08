@@ -99,8 +99,8 @@ def _collect_eligible_users(db, now_ms: int, target_username: str | None = None)
     return eligible
 
 
-def run_scheduler(dry_run: bool = False, target_username: str | None = None) -> None:
-    """主调度循环：扫描所有到期用户并触发冲浪。"""
+async def _run_scheduler_async(dry_run: bool = False, target_username: str | None = None) -> None:
+    """主调度循环（async）：扫描所有到期用户并触发冲浪。"""
     from app.avatar.service import run_avatar_surf_for_user
 
     init_db()
@@ -138,11 +138,15 @@ def run_scheduler(dry_run: bool = False, target_username: str | None = None) -> 
                 continue
 
             try:
-                result = run_avatar_surf_for_user(db, user.id, trigger="scheduler")
+                result = await run_avatar_surf_for_user(db, user.id, trigger="scheduler")
                 status_str = result.get("status", "?")
                 if status_str == "success":
                     matches = result.get("generated_matches", 0)
-                    print(f"[OK] success  新匹配={matches}")
+                    atoa_mutual = result.get("atoa_mutual", 0)
+                    report = result.get("surf_report", "")
+                    print(f"[OK] success  新匹配={matches}  AtoA互认={atoa_mutual}")
+                    if report:
+                        print(f"      报告: {report}")
                     success_count += 1
                 elif status_str == "skipped":
                     reason = result.get("reason", "")
@@ -215,4 +219,11 @@ if __name__ == "__main__":
     if args.report:
         print_status_report()
     else:
-        run_scheduler(dry_run=args.dry_run, target_username=args.user)
+        import asyncio
+        asyncio.run(_run_scheduler_async(dry_run=args.dry_run, target_username=args.user))
+
+
+def run_scheduler(dry_run: bool = False, target_username: str | None = None) -> None:
+    """同步兼容包装器（供旧代码调用）。"""
+    import asyncio
+    asyncio.run(_run_scheduler_async(dry_run=dry_run, target_username=target_username))

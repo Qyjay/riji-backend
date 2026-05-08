@@ -1987,81 +1987,6 @@ data: {"type":"error","message":"AI 服务暂时不可用"}
 
 ---
 
-### GET /api/avatar/matches — 分身推荐列表 🔒
-
-分身会在访问列表时自动浏览可见广场帖子，根据 `avatar_card`、结构化记忆、共享帖子索引和学校可见性生成推荐，并与对方分身名片形成初步对话摘要。
-
-**响应 data：** 裸数组
-
-```json
-[
-  {
-    "id": "uuid",
-    "postId": "uuid",
-    "post": { "...PlazaPost 完整对象...": true },
-    "matchScore": 92,
-    "matchReasons": [
-      "你们都在南开大学",
-      "都在准备雅思（目标7分）",
-      "常去同一个图书馆"
-    ],
-    "agentConversation": [
-      {
-        "from": "my_agent",
-        "content": "我主人也在备考雅思，每天下午泡图书馆",
-        "timestamp": 1711440000000
-      },
-      {
-        "from": "their_agent",
-        "content": "太好了！可以约图书馆一起学",
-        "timestamp": 1711440060000
-      }
-    ],
-    "status": "new",
-    "createdAt": 1711440000000
-  }
-]
-```
-
-**字段说明：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| postId | string | 匹配的帖子 ID |
-| post | PlazaPost | 帖子完整对象（嵌套） |
-| matchScore | number | 匹配度 0-100 |
-| matchReasons | string[] | 匹配原因列表 |
-| agentConversation | array | 分身对话记录 |
-| agentConversation[].from | string | "my_agent" / "their_agent" |
-| status | string | "new" / "viewed" / "chatting" / "dismissed" |
-
-**实现说明：**
-- 自动跳过自己发布的帖子和已 `dismissed` 的帖子。
-- `school_only=true` 的帖子只对同校用户参与推荐。
-- 推荐理由可以来自同校、帖子内容命中兴趣、双方 avatar_card 共同兴趣、对方 `plaza_post_index` 共享记忆等。
-
-**实现状态：** ✅ 已实现
-
----
-
-### POST /api/avatar/matches/{match_id}/action — 分身匹配操作 🔒
-
-**请求 Body：**
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| action | string | ✅ | "dismiss"（忽略）/ "chat"（发起私聊） |
-
-**响应 data：** null
-
-**核心逻辑：**
-- action="dismiss" → 将匹配状态更新为 "dismissed"
-- action="chat" → 将匹配状态更新为 "chatting"，可选创建私聊会话
-
-**实现状态：** ✅ 已实现
-
----
-
 ### GET /api/avatar/profile — 获取分身侧写 🔒
 
 AI 根据记忆库生成的分身人格摘要。
@@ -2743,28 +2668,27 @@ class AvatarProfile(Base):
 | 77 | DELETE | /api/avatar/memories/{memory_id} | 分身 | ✅ |
 | 78 | GET | /api/avatar/status | 分身 | ✅ |
 | 79 | PUT | /api/avatar/status | 分身 | ✅ |
-| 80 | GET | /api/avatar/matches | 分身 | ✅ |
-| 81 | POST | /api/avatar/matches/{match_id}/action | 分身 | ✅ |
-| 82 | GET | /api/avatar/profile | 分身 | ✅ |
-| 83 | POST | /api/avatar/profile/regenerate | 分身 | ✅ |
-| 84 | GET | /api/avatar/card | 分身 | ✅ |
-| 85 | POST | /api/avatar/card/regenerate | 分身 | ✅ |
-| 86 | GET | /api/avatar/actions | 分身 | ✅ |
-| 87 | POST | /api/avatar/actions/plaza-comment-draft | 分身 | ✅ |
-| 88 | POST | /api/avatar/actions/auto-surf | 分身 | ✅ |
-| 89 | POST | /api/avatar/actions/{action_id}/approve | 分身 | ✅ |
-| 90 | POST | /api/avatar/actions/{action_id}/reject | 分身 | ✅ |
-| 91 | POST | /api/memory/ingest | 记忆 | ✅ |
-| 92 | GET | /api/memory/documents | 记忆 | ✅ |
-| 93 | GET | /api/memory/documents/{document_id} | 记忆 | ✅ |
-| 94 | POST | /api/memory/search | 记忆 | ✅ |
-| 95 | POST | /api/memory/documents/{document_id}/extract | 记忆 | ✅ |
-| 96 | GET | /api/memory/facts | 记忆 | ✅ |
-| 97 | POST | /api/memory/facts | 记忆 | ✅ |
-| 98 | PUT | /api/memory/facts/{fact_id} | 记忆 | ✅ |
-| 99 | DELETE | /api/memory/facts/{fact_id} | 记忆 | ✅ |
-| 100 | POST | /api/memory/profile/regenerate | 记忆 | ✅ |
-**统计：** 本文档当前覆盖 100 个 `/api` 接口条目，其中 99 个 ✅、1 个 🟡、0 个 🔴
+| 80 | POST | /api/avatar/surf/trigger | 分身 | ✅ |
+| 81 | GET | /api/avatar/profile | 分身 | ✅ |
+| 82 | POST | /api/avatar/profile/regenerate | 分身 | ✅ |
+| 83 | GET | /api/avatar/card | 分身 | ✅ |
+| 84 | POST | /api/avatar/card/regenerate | 分身 | ✅ |
+| 85 | GET | /api/avatar/actions | 分身 | ✅ |
+| 86 | POST | /api/avatar/actions/plaza-comment-draft | 分身 | ✅ |
+| 87 | POST | /api/avatar/actions/auto-surf | 分身 | ✅ |
+| 88 | POST | /api/avatar/actions/{action_id}/approve | 分身 | ✅ |
+| 89 | POST | /api/avatar/actions/{action_id}/reject | 分身 | ✅ |
+| 90 | POST | /api/memory/ingest | 记忆 | ✅ |
+| 91 | GET | /api/memory/documents | 记忆 | ✅ |
+| 92 | GET | /api/memory/documents/{document_id} | 记忆 | ✅ |
+| 93 | POST | /api/memory/search | 记忆 | ✅ |
+| 94 | POST | /api/memory/documents/{document_id}/extract | 记忆 | ✅ |
+| 95 | GET | /api/memory/facts | 记忆 | ✅ |
+| 96 | POST | /api/memory/facts | 记忆 | ✅ |
+| 97 | PUT | /api/memory/facts/{fact_id} | 记忆 | ✅ |
+| 98 | DELETE | /api/memory/facts/{fact_id} | 记忆 | ✅ |
+| 99 | POST | /api/memory/profile/regenerate | 记忆 | ✅ |
+**统计：** 本文档当前覆盖 99 个 `/api` 接口条目，其中 98 个 ✅、1 个 🟡、0 个 🔴
 
 ---
 
@@ -2797,8 +2721,8 @@ class AvatarProfile(Base):
 | detect_duplicate_chat_material | 对话素材判重 | chat_completion | /chat/close-session, /chat（静默切段时自动调用） |
 | summarize_chat_session | 对话摘要 | chat_completion | /chat/close-session, /chat（静默切段时自动调用） |
 | generate_avatar_profile | 分身侧写生成 | chat_completion | /avatar/profile/regenerate |
-| match_post | 帖子匹配打分 / 自动冲浪兴趣判断 | chat_completion | /avatar/matches, /avatar/actions/auto-surf |
-| agent_conversation | 分身对话模拟 / 广场评论草稿 | chat_completion | /avatar/matches, /avatar/actions/plaza-comment-draft, /plaza/posts/{post_id}/agent-comment |
+| match_post | 帖子匹配打分 / 自动冲浪兴趣判断 | chat_completion | /avatar/actions/auto-surf |
+| agent_conversation | AtoA 分身对话模拟 / 广场评论草稿 | chat_completion | /avatar/atoa/* , /avatar/actions/plaza-comment-draft, /plaza/posts/{post_id}/agent-comment |
 
 ---
 

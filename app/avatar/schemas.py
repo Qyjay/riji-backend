@@ -7,7 +7,6 @@ from typing import Optional
 from pydantic import BaseModel
 
 from app.serializers import CamelModel
-from app.plaza.schemas import PlazaPostOut
 
 
 # ==================== 请求 Schema ====================
@@ -41,11 +40,6 @@ class UpdateStatusRequest(BaseModel):
     auto_publish_enabled: Optional[bool] = None
 
 
-class MatchActionRequest(BaseModel):
-    """分身匹配操作请求"""
-    action: str                         # "dismiss" / "chat"
-
-
 class CreateAgentCommentDraftRequest(BaseModel):
     """创建广场分身评论草稿"""
     post_id: str
@@ -66,6 +60,99 @@ class RecordUsageEventRequest(BaseModel):
 
 
 # ==================== 响应 Schema ====================
+
+# Phase 8A ──────────────────────────────────────────────────────────────────
+
+class AtoaConversationTurn(BaseModel):
+    """AtoA 对话轮次"""
+    role: str       # avatar_a / avatar_b
+    content: str
+
+
+class ProbeLogItemOut(CamelModel):
+    """GET /api/avatar/probe-log 单条记录"""
+    id: str
+    session_id: Optional[str] = None
+    user_b_id: str
+    user_b_name: str
+    user_b_avatar: str
+    interaction_type: str
+    outcome: str
+    # pending_user_decision / blocked / connected / connect_confirmed / connect_rejected
+    readable_outcome: str                   # 中文可读文案
+    score_a: int
+    score_b: int
+    shared_topics: list[str]
+    reasons_a: list[str]
+    conversation: list[AtoaConversationTurn]
+    risk_flags: list[str]
+    interaction_phase: int = 1
+    user_decision: Optional[str] = None    # continue / block / connect
+    is_mutual: bool
+    triggered_match_id: Optional[str] = None  # connected 后为 social.Match.id
+    created_at: int
+    updated_at: int
+
+
+class AtoaSessionOut(CamelModel):
+    """GET /api/avatar/atoa/sessions 单条 AtoaSession 摘要"""
+    id: str
+    status: str                     # active / completed / superseded
+    candidate_count: int            # Top-10 候选数
+    excluded_count: int             # 已排除（打断/结交）的候选数
+    pending_count: int              # 待决策的候选数
+    decided_count: int              # 已决策的候选数
+    surf_log_id: Optional[str] = None
+    created_at: int
+    updated_at: int
+
+
+class MutualMatchItemOut(CamelModel):
+    """GET /api/avatar/mutual-matches 单条记录"""
+    id: str
+    target_user_id: str
+    target_user_name: str
+    target_user_avatar: str
+    target_user_school: str
+    target_card_interests: list[str]
+    target_card_intent: list[str]
+    my_score: int
+    their_score: int
+    my_reasons: list[str]
+    their_reasons: list[str]
+    intent_type: str
+    suggested_opening: str
+    status: str
+    peer_match_id: Optional[str] = None
+    created_at: int
+
+
+# Phase 8B ──────────────────────────────────────────────────────────────────
+
+class ContinueAtoaChatResultOut(CamelModel):
+    """POST /api/avatar/atoa/{id}/continue 响应"""
+    id: str
+    user_b_id: str
+    user_b_name: str
+    outcome: str
+    interaction_phase: int
+    new_turns: list[AtoaConversationTurn]
+    conversation: list[AtoaConversationTurn]
+    updated_at: int
+
+
+# Phase 8C ──────────────────────────────────────────────────────────────────
+
+class DecideAtoaRequest(BaseModel):
+    """POST /api/avatar/atoa/{id}/decide 请求"""
+    decision: str                             # "block" | "connect"
+    opening_message: Optional[str] = None    # connect 时可选的开场白
+
+
+class DecideAtoaResultOut(CamelModel):
+    """POST /api/avatar/atoa/{id}/decide 响应"""
+    outcome: str                              # "blocked" | "connected"
+    social_match_id: Optional[str] = None    # connect 成功时
 
 class AvatarMemoryOut(CamelModel):
     """记忆响应（camelCase 输出）"""
@@ -107,56 +194,6 @@ class AvatarStatusOut(CamelModel):
     auto_match_enabled: bool
     auto_comment_enabled: bool
     auto_publish_enabled: bool
-
-
-class TargetUserBriefOut(CamelModel):
-    """用户型匹配的目标用户摘要（不含私密信息）"""
-    id: str
-    name: str
-    avatar: str
-    school: str
-    major: str
-    grade: str
-
-
-class AvatarMatchOut(CamelModel):
-    """分身推荐匹配响应（camelCase 输出）"""
-    id: str
-    post_id: str
-    post: PlazaPostOut                          # 锚定帖子（帖子型=匹配帖子，用户型=对方最近帖）
-    match_score: int
-    match_reasons: list[str]
-    agent_conversation: list[dict]
-    status: str
-    created_at: int
-    # Phase 5 用户型/帖子型匹配扩展字段
-    match_type: str = "post"                    # post | user
-    intent_type: str = "buddy"                  # buddy/help/share/dating
-    target_user: Optional[TargetUserBriefOut] = None  # 用户型匹配时非空
-    # Phase 6 AI 精排字段
-    suggested_opening: str = ""                 # AI 生成的开场白
-    ai_refined: bool = False                    # 是否已 AI 精排
-    risk_flags: list[str] = []                  # 风险标注
-
-
-class StartChatRequest(BaseModel):
-    """从分身推荐一键发起搭子申请（Phase 7）"""
-    opening_message: Optional[str] = None   # 用户可选编辑的开场白；不传则使用 AI 建议开场白
-
-
-class StartChatResultOut(CamelModel):
-    """发起搭子申请的结果"""
-    social_match_id: str        # 创建/已有的 social.Match ID，前端跳转至搭子详情
-    suggested_opening: str      # 本次推荐的 AI 开场白（供前端展示或预填）
-    is_duplicate: bool          # True = 双方已有 pending/accepted 申请，复用已有记录
-
-
-class RebuildMatchesResultOut(CamelModel):
-    """触发分身推荐重建（规则 + AI 精排）的结果"""
-    total_matches: int
-    newly_ai_refined: int
-    ai_refined_total: int
-    refreshed_at: int
 
 
 class AvatarProfileOut(CamelModel):
@@ -221,9 +258,25 @@ class AvatarSurfLogOut(CamelModel):
     error_message: str
     started_at: int
     finished_at: Optional[int] = None
+    # Phase 8A AtoA 统计字段
+    scanned_atoa_pairs: int = 0
+    upgraded_to_mutual: int = 0
+    surf_report: str = ""
+    top10_session_id: Optional[str] = None
 
 
 class SurfLogsOut(CamelModel):
     """分身冲浪日志列表"""
     items: list[AvatarSurfLogOut]
     total: int
+
+
+class TriggerSurfResultOut(CamelModel):
+    """POST /avatar/surf/trigger 响应"""
+    status: str                         # success / skipped / failed
+    generated_matches: int = 0
+    atoa_scanned: int = 0
+    atoa_mutual: int = 0
+    surf_report: str = ""
+    top10_session_id: Optional[str] = None
+    skipped_reason: str = ""

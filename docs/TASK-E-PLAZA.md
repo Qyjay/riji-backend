@@ -265,22 +265,9 @@ class AddMemoryRequest(BaseModel):
 
 ---
 
-#### 14. POST /api/avatar/matches/{match_id}/action — 分身匹配操作
+#### 14. （已移除）原 POST /api/avatar/matches/{match_id}/action
 
-**前端调用：** `dismissMatch(matchId)` 或 `acceptMatch(matchId)`
-
-**请求 Body：**
-
-```python
-class MatchActionRequest(BaseModel):
-    action: str                         # "dismiss" / "chat"
-```
-
-**返回格式：** null
-
-**实现要点：**
-- action="dismiss" → status 更新为 "dismissed"
-- action="chat" → status 更新为 "chatting"
+该轻量接口已下线。推荐状态请用 **`POST /api/avatar/matches/{match_id}/start-chat`**（`chatting`）、**`POST /api/avatar/atoa/{interactionId}/decide`**（`block` → `dismissed`）等路径维护；详见根目录 `API-SPEC.md` §11.7。
 
 ---
 
@@ -381,10 +368,6 @@ class UpdateMemoryRequest(BaseModel):
     is_pinned: Optional[bool] = None
     category: Optional[str] = None
     tags: Optional[list[str]] = None
-
-
-class MatchActionRequest(BaseModel):
-    action: str                         # "dismiss" / "chat"
 
 
 class UpdateStatusRequest(BaseModel):
@@ -553,7 +536,7 @@ def _serialize_comment(d: dict) -> dict:
 | 文件 | 内容 |
 |------|------|
 | `app/avatar/__init__.py` | 空文件 |
-| `app/avatar/schemas.py` | `AddMemoryRequest`、`UpdateMemoryRequest`、`UpdateStatusRequest`、`MatchActionRequest`、`AvatarMemoryOut`、`AvatarStatusOut`、`AvatarMatchOut`、`AvatarProfileOut`（照搬输出 Schema 章节） |
+| `app/avatar/schemas.py` | `AddMemoryRequest`、`UpdateMemoryRequest`、`UpdateStatusRequest`、`AvatarMemoryOut`、`AvatarStatusOut`、`AvatarMatchOut`、`AvatarProfileOut`（照搬输出 Schema 章节） |
 | `app/avatar/service.py` | 先实现记忆+状态的 6 个函数 |
 | `app/avatar/router.py` | 先注册记忆+状态的 6 个端点，`APIRouter(prefix="/avatar", tags=["AI分身"])` |
 
@@ -581,7 +564,7 @@ def _serialize_comment(d: dict) -> dict:
 | # | 函数 | 接口 | 关键逻辑 |
 |---|------|------|----------|
 | 13 | `list_matches(db, user_id)` | GET /avatar/matches | JOIN plaza_posts + users 构建嵌套 PlazaPostOut；排除 status="dismissed"；排序 match_score DESC |
-| 14 | `match_action(db, user_id, match_id, action)` | POST /avatar/matches/{id}/action | action="dismiss" → status="dismissed"；action="chat" → status="chatting" |
+| 14 | `start_chat_from_match(db, user_id, match_id, opening_message)` | POST /avatar/matches/{id}/start-chat | 创建搭子申请，`AvatarMatch.status` → `chatting`；Bandit +10 |
 | 15 | `get_profile(db, user_id)` | GET /avatar/profile | 不存在返回默认空侧写 `{summary:"", diary_count:0, chat_count:0, generated_at:0}` |
 | 16 | `regenerate_profile(db, user_id)` | POST /avatar/profile/regenerate | 读取用户记忆 + 日记/聊天 → 调用 MiniMax AI chat_completion → 写入/更新 avatar_profiles 表 |
 
@@ -624,7 +607,7 @@ app.include_router(avatar_router, prefix="/api")
 | 文件 | 测试内容 |
 |------|----------|
 | `tests/test_plaza.py` | ① 创建帖子 → ② 列表浏览 → ③ 频道筛选 → ④ 帖子详情 → ⑤ 点赞/取消点赞 → ⑥ 添加评论 → ⑦ 评论列表 → ⑧ school_only 逻辑验证 |
-| `tests/test_avatar.py` | ① 添加记忆 → ② 记忆列表 → ③ 更新记忆 → ④ 删除记忆 → ⑤ 获取/更新状态 → ⑥ 推荐列表 → ⑦ 忽略/接受匹配 → ⑧ 获取/重新生成侧写 |
+| `tests/test_avatar.py` | ① 添加记忆 → ② 记忆列表 → ③ 更新记忆 → ④ 删除记忆 → ⑤ 获取/更新状态 → ⑥ 推荐列表 → ⑦ 从推荐发起搭子（start-chat）等 → ⑧ 获取/重新生成侧写 |
 
 **测试基础设施（参考已有 tests/）：**
 - `TestClient(app)` + 注册/登录获取 token
@@ -658,9 +641,9 @@ pytest tests/test_plaza.py tests/test_avatar.py -v
 4. **P1 — 分身状态（2 个接口）** ← Step 2
    - GET/PUT /avatar/status
 
-5. **P2 — 分身推荐 + 操作（2 个接口）** ← Step 3
+5. **P2 — 分身推荐 + 发起搭子（2 个接口）** ← Step 3
    - GET /avatar/matches
-   - POST /avatar/matches/{id}/action
+   - POST /avatar/matches/{id}/start-chat
 
 6. **P2 — 分身侧写（2 个接口）** ← Step 3
    - GET /avatar/profile
