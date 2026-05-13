@@ -257,10 +257,23 @@ class MiniMaxClient:
 
         if "qwen3.5-plus" in self.vivo_model.lower():
             payload["enable_thinking"] = self.vivo_enable_thinking
-        else:
-            payload["thinking"] = {"type": "enable" if self.vivo_enable_thinking else "disabled"}
+        elif self.vivo_enable_thinking:
+            payload["thinking"] = {"type": "enabled"}
 
         return payload
+
+    @staticmethod
+    def _vivo_error_message(data: object) -> str:
+        if not isinstance(data, dict):
+            return ""
+        error = data.get("error")
+        if isinstance(error, dict):
+            code = str(error.get("code") or "").strip()
+            message = str(error.get("message") or "").strip()
+            if code and message:
+                return f"{code} {message}"
+            return message or code
+        return ""
 
     @staticmethod
     def _aspect_ratio_to_vivo_size(aspect_ratio: str) -> str:
@@ -995,6 +1008,13 @@ class MiniMaxClient:
                     )
                     resp.raise_for_status()
                     data = resp.json()
+                    error_message = self._vivo_error_message(data)
+                    if error_message:
+                        raise ApiException(
+                            code=AI_SERVICE_ERROR,
+                            message=f"VIVO 请求失败: {error_message[:200]}",
+                            status_code=502,
+                        )
                     text = self._extract_chat_text_from_response(data)
                     if text:
                         return text
@@ -1146,6 +1166,13 @@ class MiniMaxClient:
                             break
                         try:
                             data = json.loads(data_str)
+                            error_message = self._vivo_error_message(data)
+                            if error_message:
+                                raise ApiException(
+                                    code=AI_SERVICE_ERROR,
+                                    message=f"{provider_name} 流式请求失败: {error_message[:200]}",
+                                    status_code=502,
+                                )
                             text = self._extract_stream_delta_text(data)
                             if text:
                                 if char_mode and len(text) > 1:

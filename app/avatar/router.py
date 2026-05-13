@@ -9,9 +9,12 @@ from sqlalchemy.orm import Session
 
 from app.dependencies import get_current_user
 from app.database import get_db
+from app.models.avatar import AvatarMatch
+from app.models.plaza import PlazaPost
 from app.models.user import User
 from app.response import success
 from app.avatar import schemas, service
+from app.social import service as social_service
 from app.avatar.schemas import (
     AgentActionOut,
     AtoaSessionOut,
@@ -23,6 +26,7 @@ from app.avatar.schemas import (
     ContinueAtoaChatResultOut,
     DecideAtoaRequest,
     DecideAtoaResultOut,
+    MatchActionRequest,
     MutualMatchItemOut,
     ProbeLogItemOut,
     SurfLogsOut,
@@ -68,6 +72,51 @@ def _serialize_usage_event(d: dict) -> dict:
 
 def _serialize_surf_logs(d: dict) -> dict:
     return SurfLogsOut(**d).model_dump(by_alias=True)
+
+
+@router.get("/matches", summary="分身推荐列表（旧版兼容）")
+def list_matches(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """兼容旧前端的分身推荐接口。"""
+    return success(service.list_matches(db, current_user.id))
+
+
+@router.post("/matches/{match_id}/action", summary="分身推荐操作（旧版兼容）")
+def handle_match_action(
+    match_id: str,
+    body: MatchActionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """兼容旧前端的推荐操作：dismiss / chat。"""
+    match = db.query(AvatarMatch).filter(
+        AvatarMatch.id == match_id,
+        AvatarMatch.user_id == current_user.id,
+    ).first()
+    if not match:
+        raise service.ApiException(code=service.NOT_FOUND, message="推荐不存在", status_code=404)
+
+    if body.action == "dismiss":
+        match.status = "dismissed"
+        db.commit()
+        return success(None)
+
+    if body.action == "chat":
+        target_user_id = match.target_user_id
+        if not target_user_id:
+            post = db.query(PlazaPost).filter(PlazaPost.id == match.post_id).first()
+            target_user_id = post.user_id if post else None
+        if not target_user_id:
+            raise service.ApiException(code=service.PARAM_INVALID, message="无法找到推荐对象", status_code=400)
+
+        social_match = social_service.apply_buddy(db, current_user.id, target_user_id, "")
+        match.status = "chatting"
+        db.commit()
+        return success({"socialMatchId": social_match.id})
+
+    raise service.ApiException(code=service.PARAM_INVALID, message="action 只能是 dismiss 或 chat", status_code=400)
 
 
 # ==================== 记忆 CRUD ====================

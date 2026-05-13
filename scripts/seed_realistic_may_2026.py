@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Seed five realistic users with dense activity from 2026-04-23 to 2026-05-03.
 
 Design goals:

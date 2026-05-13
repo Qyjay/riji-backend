@@ -59,6 +59,11 @@ class RecordUsageEventRequest(BaseModel):
     page: Optional[str] = ""              # 当前页面，如 plaza/diary/chat/avatar
 
 
+class MatchActionRequest(BaseModel):
+    """旧版分身推荐操作请求"""
+    action: str                           # dismiss | chat
+
+
 # ==================== 响应 Schema ====================
 
 # Phase 8A ──────────────────────────────────────────────────────────────────
