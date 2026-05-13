@@ -2284,9 +2284,10 @@ def _refresh_matches(db: Session, user_id: str) -> None:
         asyncio.run(_refresh_matches_async(db, user_id))
 
 
-def list_matches(db: Session, user_id: str) -> List[dict]:
+def list_matches(db: Session, user_id: str, refresh: bool = True) -> List[dict]:
     """分身推荐列表，排除 dismissed，按 match_score DESC（含帖子型 + 用户型匹配）"""
-    _refresh_matches(db, user_id)
+    if refresh:
+        _refresh_matches(db, user_id)
 
     # 查询所有未 dismissed 的匹配，附带帖子和帖子作者
     rows = (

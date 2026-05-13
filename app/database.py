@@ -3,18 +3,39 @@
 使用同步 SQLAlchemy（降低组员门槛）
 """
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 from app.config import settings
+
+
+def _sqlite_connect_args(database_url: str) -> dict:
+    if "sqlite" not in database_url:
+        return {}
+    return {
+        "check_same_thread": False,
+        "timeout": 30,
+    }
+
 
 # 创建同步数据库引擎
 # SQLite 需要 check_same_thread=False 以支持多线程
 engine = create_engine(
     settings.DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {},
+    connect_args=_sqlite_connect_args(settings.DATABASE_URL),
     echo=False,  # 设置为 True 可打印 SQL 语句（调试用）
 )
+
+
+if "sqlite" in settings.DATABASE_URL:
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.close()
+
 
 # 创建会话工厂
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

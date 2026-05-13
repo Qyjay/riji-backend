@@ -80,7 +80,7 @@ def list_matches(
     db: Session = Depends(get_db),
 ):
     """兼容旧前端的分身推荐接口。"""
-    return success(service.list_matches(db, current_user.id))
+    return success(service.list_matches(db, current_user.id, refresh=False))
 
 
 @router.post("/matches/{match_id}/action", summary="分身推荐操作（旧版兼容）")
