@@ -229,7 +229,7 @@ async def upload_voice_and_transcribe(file: UploadFile, user_id: str) -> dict:
     }
 
 
-def create_material(db: Session, user_id: str, data: dict) -> dict:
+def create_material(db: Session, user_id: str, data: dict, *, index_memory: bool = True) -> dict:
     """创建素材"""
     now_ms = _now_ms()
     now_dt = _now_dt()
@@ -262,9 +262,10 @@ def create_material(db: Session, user_id: str, data: dict) -> dict:
     db.add(material)
     db.commit()
     db.refresh(material)
-    from app.memory.ingestion import ingest_material
+    if index_memory:
+        from app.memory.ingestion import ingest_material
 
-    ingest_material(db, material)
+        ingest_material(db, material)
     return material_to_dict(material)
 
 
@@ -287,7 +288,7 @@ def get_material(db: Session, user_id: str, material_id: str) -> dict:
     return material_to_dict(m)
 
 
-def update_material(db: Session, user_id: str, material_id: str, data: dict) -> dict:
+def update_material(db: Session, user_id: str, material_id: str, data: dict, *, index_memory: bool = True) -> dict:
     """更新素材字段"""
     m = db.query(RawMaterial).filter(
         RawMaterial.id == material_id,
@@ -311,10 +312,33 @@ def update_material(db: Session, user_id: str, material_id: str, data: dict) -> 
 
     db.commit()
     db.refresh(m)
+    if index_memory:
+        from app.memory.ingestion import ingest_material
+
+        ingest_material(db, m)
+    return material_to_dict(m)
+
+
+def ingest_material_by_id(material_id: str, user_id: str) -> None:
+    """Index one material into memory using an independent DB session.
+
+    This is intended for FastAPI background tasks so material creation can
+    return quickly while vector indexing continues off the request path.
+    """
+    from app.database import SessionLocal
     from app.memory.ingestion import ingest_material
 
-    ingest_material(db, m)
-    return material_to_dict(m)
+    bg_db = SessionLocal()
+    try:
+        material = (
+            bg_db.query(RawMaterial)
+            .filter(RawMaterial.id == material_id, RawMaterial.user_id == user_id)
+            .first()
+        )
+        if material:
+            ingest_material(bg_db, material)
+    finally:
+        bg_db.close()
 
 
 def delete_material(db: Session, user_id: str, material_id: str) -> None:

@@ -4,7 +4,7 @@ prefix="/api/materials", tags=["素材管理"]
 """
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, UploadFile
 from sqlalchemy.orm import Session
 
 from app.dependencies import get_current_user
@@ -36,6 +36,7 @@ async def upload_voice(
 @router.post("", summary="创建素材")
 async def create_material(
     body: schemas.MaterialCreate,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -44,7 +45,8 @@ async def create_material(
     if not data.get("emotion"):
         data["emotion"] = {"label": "平静", "score": 0.5, "emoji": "😐"}
 
-    result = service.create_material(db, current_user.id, data)
+    result = service.create_material(db, current_user.id, data, index_memory=False)
+    background_tasks.add_task(service.ingest_material_by_id, result["id"], current_user.id)
     if data.get("content") and not body.emotion.get("label"):
         try:
             emotion = await service.extract_emotion(db, current_user.id, result["id"])
@@ -80,13 +82,15 @@ def get_material(
 def update_material(
     material_id: str,
     body: schemas.MaterialUpdate,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """更新素材字段"""
     result = service.update_material(
-        db, current_user.id, material_id, body.model_dump(exclude_unset=True)
+        db, current_user.id, material_id, body.model_dump(exclude_unset=True), index_memory=False
     )
+    background_tasks.add_task(service.ingest_material_by_id, material_id, current_user.id)
     return success(_serialize(result))
 
 
