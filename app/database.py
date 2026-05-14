@@ -3,10 +3,19 @@
 使用同步 SQLAlchemy（降低组员门槛）
 """
 import os
-from sqlalchemy import create_engine, event
+from sqlalchemy import String, create_engine, event
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 from app.config import settings
+
+
+@compiles(String, "mysql")
+def _compile_mysql_string(element, compiler, **kwargs):
+    """MySQL requires VARCHAR length; SQLite allowed the existing bare String."""
+    if element.length is None:
+        return "VARCHAR(255)"
+    return compiler.visit_VARCHAR(element, **kwargs)
 
 
 def _sqlite_connect_args(database_url: str) -> dict:
@@ -18,12 +27,26 @@ def _sqlite_connect_args(database_url: str) -> dict:
     }
 
 
+def _engine_kwargs(database_url: str) -> dict:
+    kwargs = {
+        "connect_args": _sqlite_connect_args(database_url),
+        "echo": False,  # 设置为 True 可打印 SQL 语句（调试用）
+    }
+    if "mysql" in database_url:
+        kwargs.update(
+            {
+                "pool_pre_ping": True,
+                "pool_recycle": 1800,
+            }
+        )
+    return kwargs
+
+
 # 创建同步数据库引擎
 # SQLite 需要 check_same_thread=False 以支持多线程
 engine = create_engine(
     settings.DATABASE_URL,
-    connect_args=_sqlite_connect_args(settings.DATABASE_URL),
-    echo=False,  # 设置为 True 可打印 SQL 语句（调试用）
+    **_engine_kwargs(settings.DATABASE_URL),
 )
 
 
