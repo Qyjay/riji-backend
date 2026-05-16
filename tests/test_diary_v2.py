@@ -95,8 +95,8 @@ class TestDiaryGeneration:
         assert resp.status_code == 200
         assert resp.json()["data"]["total"] == 1
 
-    def test_generate_diary_same_day_updates_existing(self, client: TestClient):
-        """同一天重复生成：应更新同一篇日记，不新增第二篇"""
+    def test_generate_diary_same_day_returns_existing(self, client: TestClient):
+        """同一天重复生成：应返回已有日记，不新增第二篇，也不覆盖内容"""
         auth, headers = _create_user_with_material(client, "diary_gen4")
 
         first_resp = client.post(
@@ -108,7 +108,7 @@ class TestDiaryGeneration:
         first_data = first_resp.json()["data"]
         first_id = first_data["id"]
 
-        # 补一条同日素材，二次生成应更新同一篇日记
+        # 补一条同日素材，二次生成应直接返回已有日记。
         add_mat_resp = client.post("/api/materials", json={
             "type": "text",
             "content": "晚上和同学一起散步",
@@ -125,11 +125,11 @@ class TestDiaryGeneration:
         second_data = second_resp.json()["data"]
 
         assert second_data["id"] == first_id
-        assert second_data["weather"] == "阴"
+        assert second_data["weather"] == "晴"
         assert second_data["editCount"] == 0
         assert second_data["maxEdits"] == DIARY_MAX_EDITS
 
-        # 列表总数保持 1，说明是更新不是新建
+        # 列表总数保持 1，说明没有新增第二篇。
         list_resp = client.get("/api/diaries", headers=headers)
         assert list_resp.status_code == 200
         assert list_resp.json()["data"]["total"] == 1

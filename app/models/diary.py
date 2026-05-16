@@ -1,7 +1,7 @@
 """
 日记数据模型
 """
-from sqlalchemy import BigInteger, Boolean, Column, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, Column, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 
 from app.database import Base
 
@@ -38,6 +38,7 @@ class Diary(Base):
     date = Column(String, default="")                   # 所属日期 "2026-03-25"
 
     __table_args__ = (
+        UniqueConstraint("user_id", "date", name="uq_diaries_user_date"),
         # 按用户和时间排序索引，提升列表查询性能
         Index("ix_diaries_user_created", "user_id", "created_at"),
     )

@@ -13,6 +13,7 @@ from typing import List
 from uuid import uuid4
 
 from sqlalchemy import func, or_, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -573,6 +574,13 @@ def diary_to_dict(d: Diary) -> dict:
     }
 
 
+def _diary_response(d: Diary) -> dict:
+    """Serialize a diary with the API's camelCase response contract."""
+    from app.diary.schemas import DiaryOut
+
+    return DiaryOut(**diary_to_dict(d)).model_dump(by_alias=True)
+
+
 def list_diaries(db: Session, user_id: str, page: int = 1, page_size: int = 10) -> dict:
     """分页查询日记列表"""
     total = db.query(Diary).filter(Diary.user_id == user_id).count()
@@ -714,6 +722,14 @@ async def generate_diary(
     """AI 生成当日日记"""
     normalized_weather = _normalize_weather_text(weather)
 
+    existing = (
+        db.query(Diary)
+        .filter(Diary.user_id == user_id, Diary.date == date)
+        .first()
+    )
+    if existing:
+        return _diary_response(existing)
+
     materials_query = db.query(RawMaterial).filter(RawMaterial.user_id == user_id)
     materials = (
         _apply_material_date_filter(materials_query, date)
@@ -761,7 +777,7 @@ async def generate_diary(
     ai_tags = _extract_ai_tags(result, normalized_weather, emotion_summary)
     diary_tags = _merge_diary_tags(material_tags, ai_tags)
 
-    # 同一天已有日记时，更新而不是新建
+    # AI 调用耗时较长，并发请求可能同时进入；写入前必须再次检查。
     existing = (
         db.query(Diary)
         .filter(Diary.user_id == user_id, Diary.date == date)
@@ -769,36 +785,7 @@ async def generate_diary(
     )
 
     if existing:
-        existing.content = result.get("content", "")
-        existing.title = result.get("title", "今日日记")
-        existing.weather = normalized_weather
-        existing.material_ids = _encode(material_ids)
-        existing.emotion_summary = _encode(emotion_summary)
-        existing.emotion = _encode(emotion_payload)
-        existing.images = _encode(diary_images)
-        existing.image_understandings = _encode(image_understandings)
-        existing.tags = _encode(diary_tags)
-        existing.status = "draft"
-        existing.updated_at = now
-
-        db.commit()
-
-        # 通过“当日情绪趋势”逻辑再次聚合，作为最终 emotion/emotion_summary。
-        trend_summary = get_emotion_trend(db, user_id, existing.id)
-        existing.emotion_summary = _encode(trend_summary)
-        existing.emotion = _encode(_build_legacy_emotion_payload(trend_summary, materials))
-        existing.updated_at = _now_ms()
-        db.commit()
-
-        db.refresh(existing)
-        from app.memory.ingestion import ingest_diary
-
-        ingest_diary(db, existing)
-        from app.diary.schemas import DiaryOut
-
-        payload = DiaryOut(**diary_to_dict(existing)).model_dump(by_alias=True)
-        payload["imageUnderstandings"] = image_understandings
-        return payload
+        return _diary_response(existing)
 
     d = Diary(
         id=_uuid(),
@@ -822,7 +809,18 @@ async def generate_diary(
     db.add(d)
     if user:
         user.diary_count = (user.diary_count or 0) + 1
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = (
+            db.query(Diary)
+            .filter(Diary.user_id == user_id, Diary.date == date)
+            .first()
+        )
+        if existing:
+            return _diary_response(existing)
+        raise
 
     # 通过“当日情绪趋势”逻辑再次聚合，作为最终 emotion/emotion_summary。
     trend_summary = get_emotion_trend(db, user_id, d.id)
@@ -835,11 +833,7 @@ async def generate_diary(
     from app.memory.ingestion import ingest_diary
 
     ingest_diary(db, d)
-    from app.diary.schemas import DiaryOut
-
-    payload = DiaryOut(**diary_to_dict(d)).model_dump(by_alias=True)
-    payload["imageUnderstandings"] = image_understandings
-    return payload
+    return _diary_response(d)
 
 
 def _list_material_user_ids_by_date(db: Session, date: str) -> List[str]:
