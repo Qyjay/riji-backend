@@ -91,36 +91,65 @@ def _apply_material_date_filter(query, date: str):
     return query.filter(RawMaterial.date == date_value)
 
 
-def _score_to_int(score_raw) -> int:
-    """将 0-1 或 0-100 的情绪分统一为 0-100 整数。"""
+def _score_to_valence(score_raw, label: str = "") -> int:
+    """将情绪分统一为 -10~10 的好坏分，兼容旧版 0~1 / 0~100 置信分。"""
     try:
         score = float(score_raw)
     except Exception:
-        score = 50.0
+        score = 0.0
 
-    if score <= 1:
-        score *= 100
+    # 新版分数直接表达情绪好坏；旧版小数/百分制分数需结合情绪类型推断正负。
+    if -10 <= score <= 10 and (score < 0 or score > 1 or float(score).is_integer()):
+        return max(-10, min(10, int(round(score))))
 
-    score_int = int(score)
-    return max(0, min(100, score_int))
+    if 0 <= score <= 1:
+        intensity = score
+    elif 1 < score <= 100:
+        intensity = score / 100
+    else:
+        return max(-10, min(10, int(round(score))))
+
+    label_base = {
+        "开心": 8,
+        "期待": 6,
+        "感动": 6,
+        "平静": 0,
+        "无聊": -2,
+        "焦虑": -5,
+        "愤怒": -6,
+        "难过": -7,
+    }.get(label, 0)
+    return max(-10, min(10, int(round(label_base * intensity))))
 
 
 def _build_emotion_trend_from_materials(materials: List[RawMaterial]) -> dict:
-    """基于素材列表聚合当日情绪趋势。"""
+    """基于素材列表聚合当日情绪趋势，精确到分钟且同一分钟只保留最早素材。"""
     trend = []
     emotion_counts = {}
+    seen_minutes = set()
 
-    for m in materials:
+    def material_ts(material: RawMaterial) -> int:
+        return int(material.created_at or material.start_time or material.end_time or 0)
+
+    for m in sorted(materials, key=material_ts):
         em = _decode(m.emotion, {})
         label = (em.get("label") or "").strip()
         if not label:
             continue
 
-        hour = datetime.fromtimestamp(m.created_at / 1000).hour if m.created_at else 0
-        score_int = _score_to_int(em.get("score", 0.5))
+        ts = material_ts(m)
+        dt = datetime.fromtimestamp(ts / 1000) if ts else datetime.fromtimestamp(0)
+        minute_key = dt.strftime("%H:%M")
+        if minute_key in seen_minutes:
+            continue
+        seen_minutes.add(minute_key)
+
+        score_int = _score_to_valence(em.get("score", 0), label)
 
         trend.append({
-            "hour": hour,
+            "hour": dt.hour,
+            "minute": dt.minute,
+            "time": minute_key,
             "label": label,
             "score": score_int,
         })
@@ -136,13 +165,13 @@ def _build_legacy_emotion_payload(emotion_summary: dict, materials: List[RawMate
     trend = emotion_summary.get("trend", [])
 
     scores = [
-        item.get("score", 50)
+        item.get("score", 0)
         for item in trend
         if item.get("label") == dominant
     ]
     if not scores:
-        scores = [item.get("score", 50) for item in trend]
-    score = int(sum(scores) / len(scores)) if scores else 50
+        scores = [item.get("score", 0) for item in trend]
+    score = int(sum(scores) / len(scores)) if scores else 0
 
     emoji = ""
     for m in materials:
@@ -538,7 +567,7 @@ def diary_to_dict(d: Diary) -> dict:
     # 从 emotion_summary 提取 legacy emotion 字段
     dominant = emotion_summary.get("dominant", "")
     trend = emotion_summary.get("trend", [])
-    legacy_score = trend[0]["score"] if trend else 50
+    legacy_score = trend[0]["score"] if trend else 0
     emotion = _decode(d.emotion, {
         "emoji": "😐",
         "label": dominant or "平静",

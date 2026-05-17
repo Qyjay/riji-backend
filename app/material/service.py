@@ -149,7 +149,7 @@ def _same_payload(last: RawMaterial, payload: dict) -> bool:
 
 
 def _normalize_create_payload(data: dict) -> dict:
-    default_emotion = {"label": "平静", "score": 0.5, "emoji": "😐"}
+    default_emotion = {"label": "平静", "score": 0, "emoji": "😐"}
     payload = {
         "type": data["type"],
         "content": data.get("content", "") or "",
@@ -207,7 +207,7 @@ def material_to_dict(m: RawMaterial) -> dict:
         "media_url": _decode_media_urls(m.media_url or ""),
         "thumbnail_url": _decode_thumbnail_urls(m.thumbnail_url or ""),
         "location": _decode(m.location, {}),
-        "emotion": _decode(m.emotion, {"label": "平静", "score": 0.5, "emoji": "😐"}),
+        "emotion": _decode(m.emotion, {"label": "平静", "score": 0, "emoji": "😐"}),
         "tags": _decode(m.tags, []),
         "date": m.date or "",
         "created_at": m.created_at,

@@ -43,7 +43,7 @@ async def create_material(
     """创建一条素材记录，自动触发 AI 情绪提取"""
     data = body.model_dump()
     if not data.get("emotion"):
-        data["emotion"] = {"label": "平静", "score": 0.5, "emoji": "😐"}
+        data["emotion"] = {"label": "平静", "score": 0, "emoji": "😐"}
 
     result = service.create_material(db, current_user.id, data, index_memory=False)
     background_tasks.add_task(service.ingest_material_by_id, result["id"], current_user.id)

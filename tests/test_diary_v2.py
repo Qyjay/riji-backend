@@ -646,13 +646,13 @@ class TestDiaryEmotionTrend:
         auth = create_test_user(client, username="diary_emo2")
         headers = get_auth_header(auth["token"])
 
-        # 创建带情绪的素材
+        # 创建带情绪的素材；同一分钟内多条素材只保留最早一条
         for idx in range(2):
             client.post("/api/materials", json={
                 "type": "text",
                 "content": f"开心的事{idx + 1}",
                 "date": "2026-03-25",
-                "emotion": {"label": "开心", "score": 0.9, "emoji": "😊"},
+                "emotion": {"label": "开心", "score": 8, "emoji": "😊"},
             }, headers=headers)
 
         gen_resp = client.post("/api/diaries/generate", json={"date": "2026-03-25"}, headers=headers)
@@ -662,19 +662,23 @@ class TestDiaryEmotionTrend:
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert data["dominant"] == "开心"
-        assert len(data["trend"]) == 2
+        assert len(data["trend"]) == 1
 
-        # 时间格式校验：hour 为 0-23 的数字，趋势按时间非降序
-        hours = []
+        # 时间格式校验：趋势精确到分钟，分数为 -10~10，趋势按时间非降序
+        times = []
         for item in data["trend"]:
             assert isinstance(item["hour"], int)
             assert 0 <= item["hour"] <= 23
+            assert isinstance(item["minute"], int)
+            assert 0 <= item["minute"] <= 59
+            assert isinstance(item["time"], str)
+            assert len(item["time"]) == 5
             assert isinstance(item["label"], str) and item["label"]
             assert isinstance(item["score"], int)
-            assert 0 <= item["score"] <= 100
-            hours.append(item["hour"])
+            assert -10 <= item["score"] <= 10
+            times.append(item["time"])
 
-        assert hours == sorted(hours)
+        assert times == sorted(times)
 
     def test_emotion_trend_all_materials_without_label(self, client: TestClient):
         """所有素材都没有 emotion.label 时，趋势应为空"""
@@ -706,7 +710,7 @@ class TestDiaryEmotionTrend:
         auth = create_test_user(client, username="diary_emo4")
         headers = get_auth_header(auth["token"])
 
-        # 有效情绪素材
+        # 有效情绪素材：兼容旧版 0~1 置信分，按情绪类型映射为 -10~10 好坏分
         valid_resp = client.post("/api/materials", json={
             "type": "text",
             "content": "开心的事",
@@ -736,9 +740,12 @@ class TestDiaryEmotionTrend:
         assert len(trend_data["trend"]) == 1
         item = trend_data["trend"][0]
         assert item["label"] == "开心"
-        assert item["score"] == 90
+        assert item["score"] == 7
         assert isinstance(item["hour"], int)
         assert 0 <= item["hour"] <= 23
+        assert isinstance(item["minute"], int)
+        assert 0 <= item["minute"] <= 59
+        assert isinstance(item["time"], str)
 
 
 class TestDiaryAI:
