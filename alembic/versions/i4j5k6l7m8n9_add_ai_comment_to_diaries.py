@@ -34,7 +34,7 @@ def upgrade() -> None:
     if "ai_comment" not in columns:
         op.add_column(
             "diaries",
-            sa.Column("ai_comment", sa.Text(), nullable=True, server_default=""),
+            sa.Column("ai_comment", sa.Text(), nullable=True),
         )
 
     op.execute(sa.text("UPDATE diaries SET ai_comment = '' WHERE ai_comment IS NULL"))
