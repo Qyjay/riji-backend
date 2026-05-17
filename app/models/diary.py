@@ -30,6 +30,7 @@ class Diary(Base):
     # v2 新增字段
     title = Column(String, default="")                  # 日记标题（AI 生成）
     special_date = Column(String, default="")           # 特殊日期标注（如纪念日名称）
+    ai_comment = Column(Text, default="")               # AI 分身对本篇日记的点评
     emotion_summary = Column(Text, default="{}")        # JSON: 情绪汇总 {dominant, distribution}
     material_ids = Column(Text, default="[]")           # JSON: 关联素材 ID 列表
     edit_count = Column(Integer, default=0)             # 已修改次数

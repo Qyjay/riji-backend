@@ -113,6 +113,17 @@ def get_emotion_trend(
     return success(result)
 
 
+@router.post("/{diary_id}/ai-comment", summary="生成日记 AI 点评")
+async def generate_diary_ai_comment(
+    diary_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """为日记生成并保存真实 AI 分身点评；已存在时直接返回。"""
+    result = await service.generate_diary_ai_comment(db, current_user.id, diary_id)
+    return success(result)
+
+
 @router.post("/{diary_id}/extract", summary="AI 提取信息")
 async def extract_diary_info(
     diary_id: str,

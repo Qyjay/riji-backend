@@ -48,6 +48,14 @@ def _resolve_derivative_ai_timeout_sec() -> int:
 
 DERIVATIVE_AI_TIMEOUT_SEC = _resolve_derivative_ai_timeout_sec()
 DERIVATIVE_COMIC_FALLBACK_IMAGE = "https://placehold.co/1024x1024/EEE/31343C?text=Diary+Comic&font=roboto"
+AI_COMMENT_RAG_SOURCE_TYPES = [
+    "diary",
+    "material",
+    "plaza_post",
+    "plaza_comment",
+    "social_message",
+    "chat_session",
+]
 
 
 DEFAULT_EMOTION_EMOJI = {
@@ -187,6 +195,80 @@ def _build_legacy_emotion_payload(emotion_summary: dict, materials: List[RawMate
         "label": dominant,
         "score": score,
     }
+
+
+def _format_emotion_trend_for_comment(emotion_summary: dict) -> str:
+    """为 AI 点评压缩情绪趋势上下文。"""
+    trend = emotion_summary.get("trend", []) if isinstance(emotion_summary, dict) else []
+    lines = []
+    for item in trend[:24]:
+        time_label = str(item.get("time") or "").strip()
+        if not time_label:
+            try:
+                hour = int(item.get("hour", 0))
+                minute = int(item.get("minute", 0))
+            except Exception:
+                hour, minute = 0, 0
+            time_label = f"{hour:02d}:{minute:02d}"
+        label = str(item.get("label") or "平静").strip()
+        score = item.get("score", 0)
+        lines.append(f"- {time_label} {label}（好坏分 {score}）")
+    return "\n".join(lines) if lines else "- 无有效情绪趋势"
+
+
+def _build_ai_comment_query(diary: Diary, materials_text: str) -> str:
+    """构造记忆检索 query，让 RAG 优先召回与当日主题相关的记忆。"""
+    parts = [
+        diary.title or "",
+        diary.content or "",
+        diary.weather or "",
+        materials_text or "",
+    ]
+    return "\n".join(part for part in parts if part).strip()[:1800]
+
+
+def _build_ai_comment_system_prompt(db: Session, user_id: str, query: str) -> str:
+    """使用聊天同源人格，并注入长期记忆/RAG 上下文。"""
+    base_prompt = (
+        "你是日迹 App 的 AI 伙伴，是用户长期相处的 AI 分身。"
+        "你了解用户的日记、素材、聊天和长期记忆，负责在每天日记生成后给出一句真实、具体、温暖的点评。\n\n"
+        "【角色要求】\n"
+        "1. 你不是旁观者，而是熟悉用户生活脉络的 AI 伙伴。\n"
+        "2. 可以自然利用相关长期记忆，但不要暴露“我检索到记忆”等系统过程。\n"
+        "3. 点评必须贴合当天日记内容，关注用户的感受、成长、关系或选择。\n"
+        "4. 语气克制、亲近、真诚，不说教，不夸张治愈，不给空泛鸡汤。\n"
+        "5. 不虚构日记没有出现的事实，不做医学、心理诊断。\n\n"
+        "【输出要求】\n"
+        "只输出一句中文点评，20 到 60 字；不要 JSON；不要引号；不要 Markdown；不要换行。"
+    )
+    if not getattr(settings, "MEMORY_ENABLED", True):
+        return base_prompt
+    try:
+        from app.memory.prompts import append_memory_to_system_prompt, format_memory_context
+        from app.memory.retriever import retrieve_memories
+
+        memories = retrieve_memories(
+            db,
+            user_id=user_id,
+            query=query,
+            scenario="chat",
+            top_k=getattr(settings, "MEMORY_TOP_K", 6),
+            source_types=AI_COMMENT_RAG_SOURCE_TYPES,
+        )
+        memory_context = format_memory_context(memories, scenario="chat")
+        return append_memory_to_system_prompt(base_prompt, memory_context, scenario="chat")
+    except Exception:
+        return base_prompt
+
+
+def _sanitize_ai_comment(raw: str) -> str:
+    """规范模型输出，避免多余格式污染页面。"""
+    text_value = re.sub(r"\s+", " ", str(raw or "").strip())
+    text_value = re.sub(r"^```(?:\w+)?|```$", "", text_value).strip()
+    text_value = text_value.strip("\"'“”‘’")
+    if len(text_value) > 80:
+        text_value = text_value[:80].rstrip("，。,. ") + "..."
+    return text_value
 
 
 def _format_material_time(m: RawMaterial) -> str:
@@ -584,6 +666,7 @@ def diary_to_dict(d: Diary) -> dict:
         "date": d.date or "",
         "weather": d.weather or "",
         "special_date": d.special_date or "",
+        "ai_comment": d.ai_comment or "",
         "emotion_summary": emotion_summary,
         "material_ids": _decode(d.material_ids, []),
         "style": d.style or "日记式",
@@ -608,6 +691,81 @@ def _diary_response(d: Diary) -> dict:
     from app.diary.schemas import DiaryOut
 
     return DiaryOut(**diary_to_dict(d)).model_dump(by_alias=True)
+
+
+async def _generate_ai_comment_for_diary(
+    db: Session,
+    user_id: str,
+    diary: Diary,
+    materials: List[RawMaterial],
+    materials_text: str = "",
+) -> str:
+    """调用聊天同源 LLM + RAG，为日记生成真实 AI 分身点评。"""
+    from app.ai.minimax_client import get_minimax_client
+
+    client = get_minimax_client()
+    if not hasattr(client, "generate_diary_comment"):
+        return ""
+
+    material_context = materials_text or _build_materials_prompt_text(materials, diary.date or "")
+    emotion_summary = _decode(diary.emotion_summary, {})
+    query = _build_ai_comment_query(diary, material_context)
+    system_prompt = _build_ai_comment_system_prompt(db, user_id, query)
+    user_prompt = (
+        "请为下面这篇日记写一句 AI 分身点评。\n\n"
+        f"- 日期：{diary.date or '未知'}\n"
+        f"- 标题：{diary.title or '无标题'}\n"
+        f"- 天气：{diary.weather or '未记录'}\n"
+        f"- 主要情绪：{emotion_summary.get('dominant') or '未识别'}\n"
+        "- 情绪趋势：\n"
+        f"{_format_emotion_trend_for_comment(emotion_summary)}\n\n"
+        "- 当日素材摘要：\n"
+        f"{material_context[:1800] or '无'}\n\n"
+        "- 日记正文：\n"
+        f"{(diary.content or '')[:2600]}"
+    )
+    try:
+        comment = await client.generate_diary_comment(
+            user_prompt,
+            system_prompt=system_prompt,
+        )
+        return _sanitize_ai_comment(comment)
+    except Exception:
+        return ""
+
+
+async def generate_diary_ai_comment(db: Session, user_id: str, diary_id: str) -> dict:
+    """为已有日记生成并持久化 AI 分身点评，幂等避免重复调用模型。"""
+    diary = (
+        db.query(Diary)
+        .filter(Diary.id == diary_id, Diary.user_id == user_id)
+        .first()
+    )
+    if not diary:
+        raise ApiException(code=NOT_FOUND, message="日记不存在", status_code=404)
+
+    if (diary.ai_comment or "").strip():
+        return {"aiComment": diary.ai_comment or ""}
+
+    material_ids = _decode(diary.material_ids, [])
+    materials = []
+    if material_ids:
+        materials = (
+            db.query(RawMaterial)
+            .filter(RawMaterial.user_id == user_id, RawMaterial.id.in_(material_ids))
+            .order_by(RawMaterial.created_at)
+            .all()
+        )
+
+    comment = await _generate_ai_comment_for_diary(db, user_id, diary, materials)
+    if not comment:
+        raise ApiException(code=PARAM_ERROR, message="AI 点评生成失败，请稍后重试", status_code=500)
+
+    diary.ai_comment = comment
+    diary.updated_at = _now_ms()
+    db.commit()
+    db.refresh(diary)
+    return {"aiComment": diary.ai_comment or ""}
 
 
 def list_diaries(db: Session, user_id: str, page: int = 1, page_size: int = 10) -> dict:
@@ -859,6 +1017,19 @@ async def generate_diary(
     db.commit()
 
     db.refresh(d)
+    ai_comment = await _generate_ai_comment_for_diary(
+        db,
+        user_id,
+        d,
+        materials,
+        materials_text=materials_text,
+    )
+    if ai_comment:
+        d.ai_comment = ai_comment
+        d.updated_at = _now_ms()
+        db.commit()
+        db.refresh(d)
+
     from app.memory.ingestion import ingest_diary
 
     ingest_diary(db, d)

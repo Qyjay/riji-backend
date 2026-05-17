@@ -52,6 +52,7 @@ class DiaryOut(CamelModel):
     date: str
     weather: str
     special_date: str
+    ai_comment: str = ""
     emotion_summary: Dict[str, Any]
     material_ids: List[str]
     style: str

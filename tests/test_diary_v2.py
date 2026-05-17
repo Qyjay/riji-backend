@@ -289,6 +289,97 @@ class TestDiaryGeneration:
         for tag in ["校园", "晚霞", "运动", "学习", "成长", "回忆"]:
             assert tag in data["tags"]
 
+    def test_generate_diary_persists_ai_comment(self, client: TestClient, db, monkeypatch):
+        """生成日记时调用真实 AI 点评链路并保存 aiComment。"""
+        auth = create_test_user(client, username="diary_ai_comment")
+        headers = get_auth_header(auth["token"])
+
+        material_resp = client.post("/api/materials", json={
+            "type": "text",
+            "content": "今天完成了软件测试实验，虽然有点累但很有成就感",
+            "tags": ["学习", "实验"],
+            "emotion": {"label": "成就感", "score": 8, "emoji": "😊"},
+            "date": "2026-03-25",
+        }, headers=headers)
+        assert material_resp.status_code == 200
+
+        class FakeMiniMaxClient:
+            async def generate_diary(self, *args, **kwargs):
+                return {
+                    "title": "实验完成",
+                    "content": "今天完成了软件测试实验，过程不轻松，但最后很有成就感。",
+                    "emotion_summary": {
+                        "dominant": "成就感",
+                        "distribution": {"成就感": 1.0},
+                    },
+                    "ai_tags": ["学习", "成长"],
+                }
+
+            async def generate_diary_comment(self, user_prompt: str, system_prompt: str = ""):
+                assert "软件测试实验" in user_prompt
+                assert "AI 分身" in system_prompt
+                return "你今天的疲惫里藏着很扎实的推进感，值得好好记住。"
+
+        monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: FakeMiniMaxClient())
+
+        gen_resp = client.post("/api/diaries/generate", json={
+            "date": "2026-03-25",
+            "weather": "晴",
+        }, headers=headers)
+        assert gen_resp.status_code == 200
+        data = gen_resp.json()["data"]
+        assert data["aiComment"] == "你今天的疲惫里藏着很扎实的推进感，值得好好记住。"
+
+        diary = db.query(Diary).filter(Diary.id == data["id"]).first()
+        assert diary.ai_comment == data["aiComment"]
+
+    def test_generate_diary_ai_comment_endpoint_is_idempotent(self, client: TestClient, db, monkeypatch):
+        """旧日记可按需生成真实 AI 点评，已有点评不会重复调用模型。"""
+        auth = create_test_user(client, username="diary_ai_comment2")
+        headers = get_auth_header(auth["token"])
+        user_id = auth["user"]["id"]
+
+        diary = Diary(
+            id=str(uuid4()),
+            user_id=user_id,
+            title="安静的一天",
+            content="今天在图书馆复习，晚上散步时心情慢慢平静下来。",
+            images="[]",
+            emotion='{"label": "平静", "score": 5, "emoji": "😌"}',
+            tags="[]",
+            weather="多云",
+            date="2026-03-25",
+            material_ids="[]",
+            emotion_summary='{"dominant": "平静", "trend": []}',
+            status="draft",
+            edit_count=0,
+            max_edits=DIARY_MAX_EDITS,
+            created_at=1,
+            updated_at=1,
+        )
+        db.add(diary)
+        db.commit()
+
+        calls = {"count": 0}
+
+        class FakeMiniMaxClient:
+            async def generate_diary_comment(self, user_prompt: str, system_prompt: str = ""):
+                calls["count"] += 1
+                assert "图书馆复习" in user_prompt
+                return "这种慢慢平静下来的时刻，也是在帮你把一天稳稳收好。"
+
+        monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: FakeMiniMaxClient())
+
+        first = client.post(f"/api/diaries/{diary.id}/ai-comment", headers=headers)
+        assert first.status_code == 200
+        assert first.json()["data"]["aiComment"] == "这种慢慢平静下来的时刻，也是在帮你把一天稳稳收好。"
+        assert calls["count"] == 1
+
+        second = client.post(f"/api/diaries/{diary.id}/ai-comment", headers=headers)
+        assert second.status_code == 200
+        assert second.json()["data"]["aiComment"] == first.json()["data"]["aiComment"]
+        assert calls["count"] == 1
+
     def test_generate_diary_image_understand_enabled_uses_cache(self, client: TestClient, monkeypatch):
         """图片理解开启后：首轮识别、次轮命中缓存，避免重复识别。"""
         auth = create_test_user(client, username="img_understand_c")

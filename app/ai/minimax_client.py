@@ -1991,6 +1991,23 @@ class MiniMaxClient:
                 "ai_tags": ["日常记录", "生活片段", "今日随记"],
             }
 
+    async def generate_diary_comment(self, user_prompt: str, system_prompt: str = "") -> str:
+        """
+        生成日记 AI 分身点评，复用聊天同源 chat_completion 接口。
+
+        输出由调用方清洗并落库；这里不做本地模板兜底，失败时抛出异常。
+        """
+        if self.mock:
+            await asyncio.sleep(0.2)
+            return "我读到了你今天认真生活的痕迹，也看见了那些细小但真实的情绪起伏。"
+
+        return await self.chat_completion(
+            [{"role": "user", "content": user_prompt}],
+            system_prompt=system_prompt,
+            temperature=0.65,
+            max_tokens=180,
+        )
+
     async def extract_info(self, diary_content: str) -> dict:
         """
         从日记提取纪念日/人物/偏好，返回 {anniversaries, persons, preferences}
