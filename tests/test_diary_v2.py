@@ -380,6 +380,66 @@ class TestDiaryGeneration:
         assert second.json()["data"]["aiComment"] == first.json()["data"]["aiComment"]
         assert calls["count"] == 1
 
+    def test_stream_diary_ai_comment_persists_chunks(self, client: TestClient, db, monkeypatch):
+        """流式生成 AI 点评时逐段返回，结束后保存完整点评。"""
+        auth = create_test_user(client, username="diary_ai_stream")
+        headers = get_auth_header(auth["token"])
+        user_id = auth["user"]["id"]
+
+        diary = Diary(
+            id=str(uuid4()),
+            user_id=user_id,
+            title="完成实验",
+            content="今天终于把维护实验跑通了，虽然调试很久，但心里踏实了。",
+            images="[]",
+            emotion='{"label": "成就感", "score": 8, "emoji": "😊"}',
+            tags="[]",
+            weather="晴",
+            date="2026-03-25",
+            material_ids="[]",
+            emotion_summary='{"dominant": "成就感", "trend": []}',
+            status="draft",
+            edit_count=0,
+            max_edits=DIARY_MAX_EDITS,
+            created_at=1,
+            updated_at=1,
+        )
+        db.add(diary)
+        db.commit()
+
+        class FakeMiniMaxClient:
+            async def stream_chat(self, messages, system_prompt: str = ""):
+                assert "维护实验" in messages[0]["content"]
+                assert "AI 分身" in system_prompt
+                for chunk in ["这份", "踏实感", "很值得被记住。"]:
+                    yield chunk
+
+            async def generate_diary_comment(self, user_prompt: str, system_prompt: str = ""):
+                return "不会走到非流式兜底"
+
+        monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: FakeMiniMaxClient())
+
+        chunks = []
+        with client.stream(
+            "POST",
+            f"/api/diaries/{diary.id}/ai-comment/stream",
+            headers=headers,
+        ) as response:
+            assert response.status_code == 200
+            for line in response.iter_lines():
+                if line:
+                    chunks.append(line)
+
+        joined = "\n".join(chunks)
+        assert '"type": "start"' in joined
+        assert '"type": "chunk"' in joined
+        assert '"type": "done"' in joined
+        assert "这份踏实感很值得被记住。" in joined
+
+        db.expire_all()
+        saved = db.query(Diary).filter(Diary.id == diary.id).first()
+        assert saved.ai_comment == "这份踏实感很值得被记住。"
+
     def test_generate_diary_image_understand_enabled_uses_cache(self, client: TestClient, monkeypatch):
         """图片理解开启后：首轮识别、次轮命中缓存，避免重复识别。"""
         auth = create_test_user(client, username="img_understand_c")

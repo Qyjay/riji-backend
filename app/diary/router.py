@@ -3,6 +3,7 @@
 prefix="/api/diaries", tags=["日记管理"]
 """
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.dependencies import get_current_user, get_db
@@ -122,6 +123,24 @@ async def generate_diary_ai_comment(
     """为日记生成并保存真实 AI 分身点评；已存在时直接返回。"""
     result = await service.generate_diary_ai_comment(db, current_user.id, diary_id)
     return success(result)
+
+
+@router.post("/{diary_id}/ai-comment/stream", summary="流式生成日记 AI 点评")
+async def stream_diary_ai_comment(
+    diary_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """流式生成 AI 分身点评；前端可边生成边展示，完成后自动保存。"""
+    return StreamingResponse(
+        service.stream_diary_ai_comment(current_user.id, diary_id, bind=db.get_bind()),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/{diary_id}/extract", summary="AI 提取信息")

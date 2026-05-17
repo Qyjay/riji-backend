@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from sqlalchemy import func, or_, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
 from app.models.diary import Diary
@@ -269,6 +269,38 @@ def _sanitize_ai_comment(raw: str) -> str:
     if len(text_value) > 80:
         text_value = text_value[:80].rstrip("，。,. ") + "..."
     return text_value
+
+
+def _build_ai_comment_prompt_payload(
+    db: Session,
+    user_id: str,
+    diary: Diary,
+    materials: List[RawMaterial],
+    materials_text: str = "",
+) -> tuple[str, str]:
+    """构造日记 AI 点评的 system/user prompt。"""
+    material_context = materials_text or _build_materials_prompt_text(materials, diary.date or "")
+    emotion_summary = _decode(diary.emotion_summary, {})
+    query = _build_ai_comment_query(diary, material_context)
+    system_prompt = _build_ai_comment_system_prompt(db, user_id, query)
+    user_prompt = (
+        "请为下面这篇日记写一句 AI 分身点评。\n\n"
+        f"- 日期：{diary.date or '未知'}\n"
+        f"- 标题：{diary.title or '无标题'}\n"
+        f"- 天气：{diary.weather or '未记录'}\n"
+        f"- 主要情绪：{emotion_summary.get('dominant') or '未识别'}\n"
+        "- 情绪趋势：\n"
+        f"{_format_emotion_trend_for_comment(emotion_summary)}\n\n"
+        "- 当日素材摘要：\n"
+        f"{material_context[:1800] or '无'}\n\n"
+        "- 日记正文：\n"
+        f"{(diary.content or '')[:2600]}"
+    )
+    return system_prompt, user_prompt
+
+
+def _sse_event(event: dict) -> str:
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
 def _format_material_time(m: RawMaterial) -> str:
@@ -707,22 +739,12 @@ async def _generate_ai_comment_for_diary(
     if not hasattr(client, "generate_diary_comment"):
         return ""
 
-    material_context = materials_text or _build_materials_prompt_text(materials, diary.date or "")
-    emotion_summary = _decode(diary.emotion_summary, {})
-    query = _build_ai_comment_query(diary, material_context)
-    system_prompt = _build_ai_comment_system_prompt(db, user_id, query)
-    user_prompt = (
-        "请为下面这篇日记写一句 AI 分身点评。\n\n"
-        f"- 日期：{diary.date or '未知'}\n"
-        f"- 标题：{diary.title or '无标题'}\n"
-        f"- 天气：{diary.weather or '未记录'}\n"
-        f"- 主要情绪：{emotion_summary.get('dominant') or '未识别'}\n"
-        "- 情绪趋势：\n"
-        f"{_format_emotion_trend_for_comment(emotion_summary)}\n\n"
-        "- 当日素材摘要：\n"
-        f"{material_context[:1800] or '无'}\n\n"
-        "- 日记正文：\n"
-        f"{(diary.content or '')[:2600]}"
+    system_prompt, user_prompt = _build_ai_comment_prompt_payload(
+        db,
+        user_id,
+        diary,
+        materials,
+        materials_text=materials_text,
     )
     try:
         comment = await client.generate_diary_comment(
@@ -766,6 +788,81 @@ async def generate_diary_ai_comment(db: Session, user_id: str, diary_id: str) ->
     db.commit()
     db.refresh(diary)
     return {"aiComment": diary.ai_comment or ""}
+
+
+async def stream_diary_ai_comment(user_id: str, diary_id: str, bind=None):
+    """流式生成 AI 点评，结束后将完整内容保存到 diaries.ai_comment。"""
+    from app.ai.minimax_client import get_minimax_client
+    from app.database import SessionLocal
+
+    yield _sse_event({"type": "start"})
+    session_factory = sessionmaker(autocommit=False, autoflush=False, bind=bind) if bind is not None else SessionLocal
+    db = session_factory()
+    full_reply = ""
+    try:
+        diary = (
+            db.query(Diary)
+            .filter(Diary.id == diary_id, Diary.user_id == user_id)
+            .first()
+        )
+        if not diary:
+            yield _sse_event({"type": "error", "message": "日记不存在"})
+            return
+
+        if (diary.ai_comment or "").strip():
+            full_reply = _sanitize_ai_comment(diary.ai_comment or "")
+            yield _sse_event({"type": "chunk", "text": full_reply})
+            yield _sse_event({"type": "done", "aiComment": full_reply})
+            return
+
+        material_ids = _decode(diary.material_ids, [])
+        materials = []
+        if material_ids:
+            materials = (
+                db.query(RawMaterial)
+                .filter(RawMaterial.user_id == user_id, RawMaterial.id.in_(material_ids))
+                .order_by(RawMaterial.created_at)
+                .all()
+            )
+
+        system_prompt, user_prompt = _build_ai_comment_prompt_payload(
+            db,
+            user_id,
+            diary,
+            materials,
+        )
+        client = get_minimax_client()
+        messages = [{"role": "user", "content": user_prompt}]
+
+        try:
+            async for chunk in client.stream_chat(messages, system_prompt=system_prompt):
+                if not chunk:
+                    continue
+                full_reply += chunk
+                yield _sse_event({"type": "chunk", "text": chunk})
+        except Exception:
+            fallback_reply = await client.generate_diary_comment(
+                user_prompt,
+                system_prompt=system_prompt,
+            )
+            full_reply = fallback_reply or ""
+            if full_reply:
+                yield _sse_event({"type": "chunk", "text": full_reply})
+
+        comment = _sanitize_ai_comment(full_reply)
+        if not comment:
+            yield _sse_event({"type": "error", "message": "AI 点评生成失败，请稍后重试"})
+            return
+
+        diary.ai_comment = comment
+        diary.updated_at = _now_ms()
+        db.commit()
+        yield _sse_event({"type": "done", "aiComment": comment})
+    except Exception as exc:
+        db.rollback()
+        yield _sse_event({"type": "error", "message": str(exc)})
+    finally:
+        db.close()
 
 
 def list_diaries(db: Session, user_id: str, page: int = 1, page_size: int = 10) -> dict:
