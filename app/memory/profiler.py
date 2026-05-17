@@ -1,4 +1,4 @@
-﻿"""统一记忆画像生成。"""
+"""统一记忆画像生成。"""
 import json
 import time
 from uuid import uuid4
@@ -53,7 +53,7 @@ async def regenerate_memory_profile(db: Session, user_id: str, profile_type: str
 
     context = build_profile_context(db, user_id)
     system_prompt = (
-        "你是日迹 App 的用户画像生成器。根据长期记忆生成结构化画像。"
+        "你是 Avalin 的用户画像生成器。根据长期记忆生成结构化画像。"
         "只基于给定记忆，不要编造。输出严格 JSON，不要 markdown。"
     )
     user_prompt = (

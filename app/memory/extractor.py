@@ -1,4 +1,4 @@
-﻿"""结构化记忆抽取。"""
+"""结构化记忆抽取。"""
 import json
 import re
 import time
@@ -130,7 +130,7 @@ async def extract_facts_from_document(db: Session, document_id: str) -> list[Mem
     from app.ai.minimax_client import get_minimax_client
 
     system_prompt = (
-        "你是日迹 App 的长期记忆抽取器。请从用户原文中抽取稳定或近期有用的结构化记忆。"
+        "你是 Avalin 的长期记忆抽取器。请从用户原文中抽取稳定或近期有用的结构化记忆。"
         "只抽取有明确证据的信息，不要臆测。输出严格 JSON，不要 markdown。"
         "可用 category: identity, personality, interest, preference, habit, relation, need, boundary, writing_style, experience。"
         "confidence 范围 0-1；不确定的信息不要输出。"
