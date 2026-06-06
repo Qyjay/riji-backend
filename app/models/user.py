@@ -63,6 +63,23 @@ class UserSettings(Base):
     chat_silence_threshold = Column(Integer, default=30)        # 静默阈值（分钟）
     chat_material_toast = Column(Boolean, default=True)         # toast 提示开关
     chat_min_rounds = Column(Integer, default=3)                # 最小轮数（user 消息数）
+    chat_model_id = Column(String, default="")                  # 聊天默认模型 ID
+
+
+class UserLlmModel(Base):
+    """用户自定义聊天模型配置"""
+    __tablename__ = "user_llm_models"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    provider_type = Column(String, nullable=False)              # openai_compatible | anthropic_compatible
+    base_url = Column(String, nullable=False)
+    model = Column(String, nullable=False)
+    api_key_ciphertext = Column(Text, default="")
+    is_enabled = Column(Boolean, default=True, index=True)
+    created_at = Column(BigInteger, nullable=False)
+    updated_at = Column(BigInteger, nullable=False)
 
 
 class UserAchievement(Base):

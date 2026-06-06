@@ -1,7 +1,7 @@
 """
 models 包：导出所有数据模型
 """
-from app.models.user import User, UserSettings, UserAchievement
+from app.models.user import User, UserSettings, UserAchievement, UserLlmModel
 from app.models.diary import Diary
 from app.models.chat import ChatMessage, ChatSession
 from app.models.study import Pomodoro, Todo

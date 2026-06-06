@@ -116,6 +116,7 @@ def get_settings(db: Session, user_id: str) -> dict:
             "chat_silence_threshold": 30,
             "chat_material_toast": True,
             "chat_min_rounds": 3,
+            "chat_model_id": "",
         }
     return {
         "theme": settings.theme or "light",
@@ -127,6 +128,7 @@ def get_settings(db: Session, user_id: str) -> dict:
         "chat_silence_threshold": settings.chat_silence_threshold if settings.chat_silence_threshold is not None else 30,
         "chat_material_toast": settings.chat_material_toast if settings.chat_material_toast is not None else True,
         "chat_min_rounds": settings.chat_min_rounds if settings.chat_min_rounds is not None else 3,
+        "chat_model_id": settings.chat_model_id or "",
     }
 
 
@@ -159,6 +161,34 @@ def update_settings(db: Session, user_id: str, data: dict) -> dict:
         settings.chat_material_toast = data["chat_material_toast"]
     if "chat_min_rounds" in data and data["chat_min_rounds"] is not None:
         settings.chat_min_rounds = data["chat_min_rounds"]
+    if "chat_model_id" in data and data["chat_model_id"] is not None:
+        model_id = str(data["chat_model_id"] or "").strip()
+        if model_id:
+            from app.ai.model_service import (
+                BUILTIN_ARK_DEEPSEEK_V4_FLASH_ID,
+                BUILTIN_ARK_DEEPSEEK_V4_PRO_ID,
+                BUILTIN_MINIMAX_ID,
+                BUILTIN_VIVO_ID,
+            )
+            from app.models.user import UserLlmModel
+
+            builtin_ids = {
+                BUILTIN_VIVO_ID,
+                BUILTIN_MINIMAX_ID,
+                BUILTIN_ARK_DEEPSEEK_V4_FLASH_ID,
+                BUILTIN_ARK_DEEPSEEK_V4_PRO_ID,
+            }
+            if model_id not in builtin_ids:
+                exists = (
+                    db.query(UserLlmModel)
+                    .filter(UserLlmModel.id == model_id, UserLlmModel.user_id == user_id, UserLlmModel.is_enabled.is_(True))
+                    .first()
+                )
+                if not exists:
+                    from app.response import PARAM_ERROR
+
+                    raise ApiException(code=PARAM_ERROR, message="聊天默认模型不存在", status_code=400)
+        settings.chat_model_id = model_id
 
     db.commit()
     db.refresh(settings)

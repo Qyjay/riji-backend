@@ -27,6 +27,7 @@ class UpdateSettingsRequest(BaseModel):
     chat_silence_threshold: Optional[int] = Field(default=None, ge=15, le=120)
     chat_material_toast: Optional[bool] = None
     chat_min_rounds: Optional[int] = Field(default=None, ge=1, le=20)
+    chat_model_id: Optional[str] = None
 
 
 class UserProfileOut(CamelModel):
@@ -73,6 +74,7 @@ class SettingsOut(CamelModel):
     chat_silence_threshold: int = 30
     chat_material_toast: bool = True
     chat_min_rounds: int = 3
+    chat_model_id: str = ""
 
     model_config = {
         "populate_by_name": True,

@@ -190,6 +190,7 @@ def _get_settings(db: Session, user_id: str) -> UserSettings:
             chat_silence_threshold=30,
             chat_material_toast=True,
             chat_min_rounds=3,
+            chat_model_id="",
         )
     return settings
 
@@ -219,11 +220,12 @@ async def ai_chat(
         raise ApiException(code=PARAM_ERROR, message="message 不能为空", status_code=400)
 
     try:
-        from app.ai.minimax_client import get_minimax_client
+        from app.ai.model_service import resolve_chat_client
 
-        client = get_minimax_client()
         now = _now_ms()
         settings = _get_settings(db, current_user.id)
+        client, resolved_model_id = resolve_chat_client(db, current_user.id, body.model_id)
+        logger.info("[chat] using model_id=%s", resolved_model_id)
         silence_threshold = getattr(settings, "chat_silence_threshold", 30) or 30
         current_session, old_session = get_session_for_message(
             db, current_user.id, now, body.session_id, silence_threshold
@@ -313,18 +315,20 @@ async def stream_response_generator(
     web_context: str,
     web_search_requested: bool,
     memory_context: str,
+    model_id: Optional[str],
 ):
     """SSE 流式生成器 — 自行管理 db session，避免 Depends(get_db) 生命周期冲突"""
-    from app.ai.minimax_client import get_minimax_client
+    from app.ai.model_service import resolve_chat_client
     from app.database import SessionLocal
 
-    client = get_minimax_client()
     yield f"data: {json.dumps({'type': 'session', 'sessionId': session_id}, ensure_ascii=False)}\n\n"
     yield f"data: {json.dumps({'type': 'ack', 'clientMessageId': client_message_id, 'message': user_message_dict}, ensure_ascii=False)}\n\n"
 
     db = SessionLocal()
     full_reply = ""
     try:
+        client, resolved_model_id = resolve_chat_client(db, user_id, model_id)
+        logger.info("[chat/stream] using model_id=%s", resolved_model_id)
         if web_attachments:
             yield (
                 f"data: {json.dumps({'type': 'web_search', 'results': web_attachments}, ensure_ascii=False)}\n\n"
@@ -473,6 +477,7 @@ async def ai_chat_stream(
             web_context=web_context,
             web_search_requested=body.use_web_search,
             memory_context=memory_context,
+            model_id=body.model_id,
         ),
         media_type="text/event-stream",
         headers={

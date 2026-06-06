@@ -40,6 +40,7 @@ class ChatRequest(BaseModel):
     use_web_search: bool = Field(default=False, alias="useWebSearch")
     attachments: List[ChatAttachmentIn] = Field(default_factory=list)
     session_id: Optional[str] = Field(default=None, alias="sessionId")
+    model_id: Optional[str] = Field(default=None, alias="modelId")
 
     @field_validator("message", mode="before")
     @classmethod

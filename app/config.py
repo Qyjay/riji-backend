@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     JWT_EXPIRE_DAYS: int = 7
 
     # MiniMax AI（TokenPlan Plus）
-    LLM_PROVIDER: str = "vivo"  # minimax | vivo
+    LLM_PROVIDER: str = "vivo"  # minimax | vivo | ark
     MINIMAX_API_KEY: str = ""
     MINIMAX_API_BASE: str = "https://api.minimaxi.com"
     MINIMAX_MODEL: str = "MiniMax-M2.7-highspeed"
@@ -83,6 +83,9 @@ class Settings(BaseSettings):
     VIVO_VISION_TIMEOUT_SEC: int = 50
     VIVO_VISION_CACHE_TTL_SEC: int = 21600
 
+    # 联网搜索
+    WEB_SEARCH_PROVIDER: str = "exa"  # exa | volcengine
+
     # Exa 联网搜索
     EXA_API_KEY: str = ""
     EXA_API_BASE: str = "https://api.exa.ai"
@@ -90,6 +93,14 @@ class Settings(BaseSettings):
     EXA_SEARCH_TIMEOUT_SEC: int = 30
     EXA_SEARCH_NUM_RESULTS: int = 5
     EXA_SEARCH_HIGHLIGHTS_MAX_CHARACTERS: int = 1200
+
+    # 火山引擎联网搜索（API Key 接入）
+    VOLC_SEARCH_API_KEY: str = ""
+    VOLC_SEARCH_API_BASE: str = "https://open.feedcoopapi.com/search_api/web_search"
+    VOLC_SEARCH_ENABLED: bool = False
+    VOLC_SEARCH_TIMEOUT_SEC: int = 30
+    VOLC_SEARCH_NUM_RESULTS: int = 5
+    VOLC_SEARCH_TIME_RANGE: str = "OneYear"
 
     # 记忆系统
     MEMORY_ENABLED: bool = True
@@ -110,9 +121,14 @@ class Settings(BaseSettings):
     DASHSCOPE_EMBEDDING_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     DASHSCOPE_EMBEDDING_MODEL: str = "text-embedding-v4"
 
-    # 视觉理解模型（火山引擎 Ark）
+    # 火山引擎 Ark（OpenAI 兼容 chat/completions）
     ARK_API_KEY: str = ""
     ARK_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"
+    ARK_DEEPSEEK_V4_FLASH_MODEL: str = "ep-20260603141535-z2l7c"
+    ARK_DEEPSEEK_V4_PRO_MODEL: str = "ep-20260528104127-tn2f7"
+    ARK_TIMEOUT_SEC: int = 90
+
+    # 视觉理解模型（火山引擎 Ark）
     ARK_VISION_MODEL: str = "doubao-seed-2-0-mini-260215"
     ARK_VISION_ENABLED: bool = True
     ARK_VISION_PROMPT: str = "请识别并描述这张图片的可见内容，输出一段中文详实介绍。要求包含：主体对象、场景环境、人物动作或状态、关键细节、整体氛围；表述客观连贯，约80-150字，不要编造图片中看不见的信息。"

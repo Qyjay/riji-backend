@@ -6,7 +6,12 @@ from app.dependencies import get_current_user, get_db
 from app.models.user import User
 from app.response import success
 from app.ai import service as ai_service
+from app.ai import model_service
 from app.ai.schemas import (
+    LlmModelCreateRequest,
+    LlmModelListOut,
+    LlmModelOut,
+    LlmModelUpdateRequest,
     TtsRequest,
     FortuneOut,
 )   # 注意 FortuneOut 现在在 schemas 中
@@ -52,3 +57,52 @@ async def get_fortune(
     data = await ai_service.fortune_service()
     out = FortuneOut(**data)
     return success(out.model_dump(by_alias=True))
+
+
+@router.get("/models", summary="获取聊天模型列表")
+def get_llm_models(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    items = [LlmModelOut(**item) for item in model_service.list_models(db, current_user.id)]
+    out = LlmModelListOut(
+        items=items,
+        default_chat_model_id=model_service.get_default_chat_model_id(db, current_user.id),
+    )
+    return success(out.model_dump(by_alias=True))
+
+
+@router.post("/models", summary="新增自定义聊天模型")
+def create_llm_model(
+    req: LlmModelCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    item = model_service.create_model(db, current_user.id, req.model_dump(by_alias=False))
+    return success(LlmModelOut(**item).model_dump(by_alias=True))
+
+
+@router.put("/models/{model_id}", summary="更新自定义聊天模型")
+def update_llm_model(
+    model_id: str,
+    req: LlmModelUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    item = model_service.update_model(
+        db,
+        current_user.id,
+        model_id,
+        req.model_dump(by_alias=False, exclude_unset=True),
+    )
+    return success(LlmModelOut(**item).model_dump(by_alias=True))
+
+
+@router.delete("/models/{model_id}", summary="删除自定义聊天模型")
+def delete_llm_model(
+    model_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    model_service.delete_model(db, current_user.id, model_id)
+    return success(None)

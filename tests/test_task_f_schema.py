@@ -7,7 +7,7 @@ from sqlalchemy import create_engine, inspect
 from app.database import Base
 from app.models.chat import ChatMessage, ChatSession
 from app.models.material import RawMaterial
-from app.models.user import UserSettings
+from app.models.user import UserLlmModel, UserSettings
 
 
 def _column_names(model) -> set[str]:
@@ -45,7 +45,9 @@ def test_task_f_model_definitions_have_required_columns():
         "chat_silence_threshold",
         "chat_material_toast",
         "chat_min_rounds",
+        "chat_model_id",
     }.issubset(setting_columns)
+    assert {"provider_type", "base_url", "model", "api_key_ciphertext"}.issubset(_column_names(UserLlmModel))
 
     session_indexes = {index.name for index in ChatSession.__table__.indexes}
     assert "ix_chat_sessions_user_date" in session_indexes
@@ -94,7 +96,9 @@ def test_task_f_schema_exists_in_runtime_test_database(db):
         "chat_silence_threshold",
         "chat_material_toast",
         "chat_min_rounds",
+        "chat_model_id",
     }.issubset(user_settings_cols)
+    assert "user_llm_models" in tables
 
     chat_session_indexes = {idx["name"] for idx in inspector.get_indexes("chat_sessions")}
     assert "ix_chat_sessions_user_date" in chat_session_indexes
@@ -126,4 +130,6 @@ def test_task_f_schema_available_after_fresh_create_all(tmp_path):
         "chat_silence_threshold",
         "chat_material_toast",
         "chat_min_rounds",
+        "chat_model_id",
     }.issubset(user_settings_cols)
+    assert "user_llm_models" in tables

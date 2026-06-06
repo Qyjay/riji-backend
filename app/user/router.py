@@ -97,6 +97,7 @@ def get_settings(
         chat_silence_threshold=data["chat_silence_threshold"],
         chat_material_toast=data["chat_material_toast"],
         chat_min_rounds=data["chat_min_rounds"],
+        chat_model_id=data["chat_model_id"],
     )
     return success(out.model_dump(by_alias=True))
 
@@ -119,6 +120,7 @@ def update_settings(
         chat_silence_threshold=result["chat_silence_threshold"],
         chat_material_toast=result["chat_material_toast"],
         chat_min_rounds=result["chat_min_rounds"],
+        chat_model_id=result["chat_model_id"],
     )
     return success(out.model_dump(by_alias=True))
 
