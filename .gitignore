@@ -24,6 +24,7 @@ ENV/
 # Runtime data
 data.db
 data.db.*
+data.db-*
 *.sqlite
 *.sqlite3
 runtime/
