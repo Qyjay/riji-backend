@@ -167,6 +167,8 @@ def update_settings(db: Session, user_id: str, data: dict) -> dict:
             from app.ai.model_service import (
                 BUILTIN_ARK_DEEPSEEK_V4_FLASH_ID,
                 BUILTIN_ARK_DEEPSEEK_V4_PRO_ID,
+                BUILTIN_ARK_DOUBAO_MINI_ID,
+                BUILTIN_ARK_GLM_4_7_ID,
                 BUILTIN_MINIMAX_ID,
                 BUILTIN_VIVO_ID,
             )
@@ -177,6 +179,8 @@ def update_settings(db: Session, user_id: str, data: dict) -> dict:
                 BUILTIN_MINIMAX_ID,
                 BUILTIN_ARK_DEEPSEEK_V4_FLASH_ID,
                 BUILTIN_ARK_DEEPSEEK_V4_PRO_ID,
+                BUILTIN_ARK_DOUBAO_MINI_ID,
+                BUILTIN_ARK_GLM_4_7_ID,
             }
             if model_id not in builtin_ids:
                 exists = (

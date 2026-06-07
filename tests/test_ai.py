@@ -10,6 +10,22 @@ from tests.conftest import create_test_user, get_auth_header
 from app.ai.minimax_client import MiniMaxClient
 
 
+@pytest.fixture(autouse=True)
+def mock_chat_route_model(monkeypatch):
+    class FakeChatClient:
+        async def chat_completion(self, *_args, **_kwargs):
+            return "测试回复"
+
+        async def stream_chat(self, *_args, **_kwargs):
+            for chunk in ["这", "是", "流式", "回复"]:
+                yield chunk
+
+    def fake_resolve_chat_client(*_args, **_kwargs):
+        return FakeChatClient(), "test-auto-model"
+
+    monkeypatch.setattr("app.ai.model_service.resolve_chat_client", fake_resolve_chat_client)
+
+
 def test_chat_returns_text_contract(client):
     user_data = create_test_user(client)
     headers = get_auth_header(user_data["token"])

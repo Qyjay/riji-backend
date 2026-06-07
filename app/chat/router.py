@@ -42,6 +42,7 @@ from app.chat.service import (
     serialize_message,
     serialize_session,
 )
+from app.chat.ai_queue import acquire_chat_model_slot, get_chat_queue_status
 from app.chat.web_search import search_web_for_chat
 from app.config import settings
 from app.dependencies import get_current_user, get_db
@@ -71,6 +72,26 @@ CHAT_RAG_SOURCE_TYPES = [
     "social_message",
     "chat_session",
 ]
+
+
+def _has_image_attachments(attachments) -> bool:
+    return any(str(getattr(item, "type", "") or "").lower() == "image" for item in attachments or [])
+
+
+def _skip_model_ids_for_request(*, has_image_attachments: bool) -> Optional[set[str]]:
+    if not has_image_attachments:
+        return None
+    from app.ai.model_service import BUILTIN_ARK_DEEPSEEK_V4_FLASH_ID
+
+    return {BUILTIN_ARK_DEEPSEEK_V4_FLASH_ID}
+
+
+@router.get("/queue-status", summary="获取 AI 聊天队列状态")
+async def chat_queue_status(
+    current_user: User = Depends(get_current_user),
+):
+    _ = current_user
+    return success(await get_chat_queue_status())
 
 
 def _now_ms() -> int:
@@ -224,8 +245,6 @@ async def ai_chat(
 
         now = _now_ms()
         settings = _get_settings(db, current_user.id)
-        client, resolved_model_id = resolve_chat_client(db, current_user.id, body.model_id)
-        logger.info("[chat] using model_id=%s", resolved_model_id)
         silence_threshold = getattr(settings, "chat_silence_threshold", 30) or 30
         current_session, old_session = get_session_for_message(
             db, current_user.id, now, body.session_id, silence_threshold
@@ -271,10 +290,21 @@ async def ai_chat(
             query=body.message,
             base_prompt=base_system_prompt,
         )
-        reply = await client.chat_completion(
-            messages,
-            system_prompt=system_prompt,
+        has_image_attachments = _has_image_attachments(body.attachments)
+        lease = await acquire_chat_model_slot(
+            skip_model_ids=_skip_model_ids_for_request(has_image_attachments=has_image_attachments)
         )
+        async with lease as routed_model_id:
+            client, resolved_model_id = resolve_chat_client(db, current_user.id, routed_model_id)
+            logger.info(
+                "[chat] auto routed model_id=%s has_image_attachments=%s",
+                resolved_model_id,
+                has_image_attachments,
+            )
+            reply = await client.chat_completion(
+                messages,
+                system_prompt=system_prompt,
+            )
         reply = _sanitize_web_capability_claim(reply, web_search_requested=body.use_web_search)
 
         ai_now = _now_ms()
@@ -316,6 +346,7 @@ async def stream_response_generator(
     web_search_requested: bool,
     memory_context: str,
     model_id: Optional[str],
+    has_image_attachments: bool,
 ):
     """SSE 流式生成器 — 自行管理 db session，避免 Depends(get_db) 生命周期冲突"""
     from app.ai.model_service import resolve_chat_client
@@ -327,8 +358,6 @@ async def stream_response_generator(
     db = SessionLocal()
     full_reply = ""
     try:
-        client, resolved_model_id = resolve_chat_client(db, user_id, model_id)
-        logger.info("[chat/stream] using model_id=%s", resolved_model_id)
         if web_attachments:
             yield (
                 f"data: {json.dumps({'type': 'web_search', 'results': web_attachments}, ensure_ascii=False)}\n\n"
@@ -349,21 +378,41 @@ async def stream_response_generator(
             )
 
         try:
-            async for chunk in client.stream_chat(
-                messages,
-                system_prompt=stream_system_prompt,
-            ):
-                full_reply += chunk
-                yield f"data: {json.dumps({'type': 'chunk', 'text': chunk}, ensure_ascii=False)}\n\n"
+            lease = await acquire_chat_model_slot(
+                skip_model_ids=_skip_model_ids_for_request(has_image_attachments=has_image_attachments)
+            )
+            async with lease as routed_model_id:
+                client, resolved_model_id = resolve_chat_client(db, user_id, routed_model_id)
+                logger.info(
+                    "[chat/stream] auto routed model_id=%s has_image_attachments=%s",
+                    resolved_model_id,
+                    has_image_attachments,
+                )
+                async for chunk in client.stream_chat(
+                    messages,
+                    system_prompt=stream_system_prompt,
+                ):
+                    full_reply += chunk
+                    yield f"data: {json.dumps({'type': 'chunk', 'text': chunk}, ensure_ascii=False)}\n\n"
         except Exception as stream_exc:
             logger.warning("[chat/stream] stream failed, fallback to non-stream: %s", str(stream_exc))
-            fallback_reply = await client.chat_completion(
-                messages,
-                system_prompt=stream_system_prompt,
+            lease = await acquire_chat_model_slot(
+                skip_model_ids=_skip_model_ids_for_request(has_image_attachments=has_image_attachments)
             )
-            full_reply = fallback_reply
-            if fallback_reply:
-                yield f"data: {json.dumps({'type': 'chunk', 'text': fallback_reply}, ensure_ascii=False)}\n\n"
+            async with lease as routed_model_id:
+                client, resolved_model_id = resolve_chat_client(db, user_id, routed_model_id)
+                logger.info(
+                    "[chat/stream:fallback] auto routed model_id=%s has_image_attachments=%s",
+                    resolved_model_id,
+                    has_image_attachments,
+                )
+                fallback_reply = await client.chat_completion(
+                    messages,
+                    system_prompt=stream_system_prompt,
+                )
+                full_reply = fallback_reply
+                if fallback_reply:
+                    yield f"data: {json.dumps({'type': 'chunk', 'text': fallback_reply}, ensure_ascii=False)}\n\n"
 
         full_reply = _sanitize_web_capability_claim(
             full_reply,
@@ -478,6 +527,7 @@ async def ai_chat_stream(
             web_search_requested=body.use_web_search,
             memory_context=memory_context,
             model_id=body.model_id,
+            has_image_attachments=_has_image_attachments(body.attachments),
         ),
         media_type="text/event-stream",
         headers={

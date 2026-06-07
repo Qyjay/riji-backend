@@ -105,8 +105,54 @@ def _attachment_prompt_text(attachment: dict) -> str:
     return f"[用户上传了文件：{name}]"
 
 
-def message_to_ai_payload(message: ChatMessage) -> dict:
+def _image_content_part(attachment: dict) -> Optional[dict]:
+    image_url = str(attachment.get("url") or "").strip()
+    if not image_url:
+        return None
+    try:
+        from app.ai.service import _resolve_ark_image_input
+
+        resolved_url = _resolve_ark_image_input(image_url)
+    except Exception as exc:
+        logger.warning("[chat] resolve image attachment failed url=%s error=%s", image_url, str(exc))
+        resolved_url = image_url
+    if not resolved_url:
+        return None
+    return {
+        "type": "image_url",
+        "image_url": {
+            "url": resolved_url,
+        },
+    }
+
+
+def message_to_ai_payload(message: ChatMessage, *, multimodal: bool = False) -> dict:
     attachments = decode_attachments(message.attachments)
+    if (
+        multimodal
+        and message.role == "user"
+        and any(str(item.get("type") or "").lower() == "image" for item in attachments)
+    ):
+        content_parts = []
+        text_parts = []
+        for item in attachments:
+            if str(item.get("type") or "").lower() == "image":
+                image_part = _image_content_part(item)
+                if image_part:
+                    content_parts.append(image_part)
+                else:
+                    text_parts.append(_attachment_prompt_text(item))
+            else:
+                text_parts.append(_attachment_prompt_text(item))
+        if message.content:
+            text_parts.append(message.content.strip())
+        text = "\n".join(part for part in text_parts if part).strip() or "请根据用户上传的图片进行回应。"
+        content_parts.append({"type": "text", "text": text})
+        return {
+            "role": message.role,
+            "content": content_parts,
+        }
+
     parts = []
     if message.role == "user" and attachments:
         parts.append("\n".join(_attachment_prompt_text(item) for item in attachments))
@@ -128,7 +174,7 @@ def list_session_messages(db: Session, session_id: str) -> list[ChatMessage]:
 
 
 def list_session_messages_for_ai(db: Session, session_id: str) -> list[dict]:
-    return [message_to_ai_payload(message) for message in list_session_messages(db, session_id)]
+    return [message_to_ai_payload(message, multimodal=True) for message in list_session_messages(db, session_id)]
 
 
 def create_chat_message(

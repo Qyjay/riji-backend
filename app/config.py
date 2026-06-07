@@ -126,7 +126,15 @@ class Settings(BaseSettings):
     ARK_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"
     ARK_DEEPSEEK_V4_FLASH_MODEL: str = "ep-20260603141535-z2l7c"
     ARK_DEEPSEEK_V4_PRO_MODEL: str = "ep-20260528104127-tn2f7"
+    ARK_DOUBAO_MINI_MODEL: str = "ep-20260607122404-2m67p"
+    ARK_GLM_4_7_MODEL: str = "ep-20260607122957-8jtq2"
     ARK_TIMEOUT_SEC: int = 90
+
+    # AI 聊天后台自动路由与队列容量（Flash -> Doubao Mini -> GLM 4.7）
+    CHAT_AI_GLOBAL_CONCURRENCY: int = 20
+    CHAT_AI_FLASH_CONCURRENCY: int = 5
+    CHAT_AI_DOUBAO_MINI_CONCURRENCY: int = 10
+    CHAT_AI_GLM_4_7_CONCURRENCY: int = 5
 
     # 视觉理解模型（火山引擎 Ark）
     ARK_VISION_MODEL: str = "doubao-seed-2-0-mini-260215"

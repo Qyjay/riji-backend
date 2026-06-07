@@ -20,6 +20,8 @@ BUILTIN_VIVO_ID = "builtin:vivo"
 BUILTIN_MINIMAX_ID = "builtin:minimax"
 BUILTIN_ARK_DEEPSEEK_V4_FLASH_ID = "builtin:ark:deepseekv4-flash"
 BUILTIN_ARK_DEEPSEEK_V4_PRO_ID = "builtin:ark:deepseekv4-pro"
+BUILTIN_ARK_DOUBAO_MINI_ID = "builtin:ark:doubao-mini"
+BUILTIN_ARK_GLM_4_7_ID = "builtin:ark:glm-4.7"
 PROVIDER_OPENAI = "openai_compatible"
 PROVIDER_ANTHROPIC = "anthropic_compatible"
 SUPPORTED_PROVIDERS = {PROVIDER_OPENAI, PROVIDER_ANTHROPIC}
@@ -102,6 +104,26 @@ def builtin_models() -> list[dict]:
             "provider_type": "builtin_ark",
             "base_url": settings.ARK_BASE_URL,
             "model": settings.ARK_DEEPSEEK_V4_PRO_MODEL,
+            "is_builtin": True,
+            "is_enabled": True,
+            "has_api_key": bool(settings.ARK_API_KEY),
+        },
+        {
+            "id": BUILTIN_ARK_DOUBAO_MINI_ID,
+            "name": "Doubao Mini",
+            "provider_type": "builtin_ark",
+            "base_url": settings.ARK_BASE_URL,
+            "model": settings.ARK_DOUBAO_MINI_MODEL,
+            "is_builtin": True,
+            "is_enabled": True,
+            "has_api_key": bool(settings.ARK_API_KEY),
+        },
+        {
+            "id": BUILTIN_ARK_GLM_4_7_ID,
+            "name": "GLM 4.7",
+            "provider_type": "builtin_ark",
+            "base_url": settings.ARK_BASE_URL,
+            "model": settings.ARK_GLM_4_7_MODEL,
             "is_builtin": True,
             "is_enabled": True,
             "has_api_key": bool(settings.ARK_API_KEY),
@@ -448,6 +470,22 @@ def _builtin_client(model_id: str):
             provider_type=PROVIDER_OPENAI,
             base_url=settings.ARK_BASE_URL,
             model=settings.ARK_DEEPSEEK_V4_PRO_MODEL,
+            api_key=settings.ARK_API_KEY,
+            timeout_sec=settings.ARK_TIMEOUT_SEC,
+        )
+    if model_id == BUILTIN_ARK_DOUBAO_MINI_ID:
+        return CustomChatModelClient(
+            provider_type=PROVIDER_OPENAI,
+            base_url=settings.ARK_BASE_URL,
+            model=settings.ARK_DOUBAO_MINI_MODEL,
+            api_key=settings.ARK_API_KEY,
+            timeout_sec=settings.ARK_TIMEOUT_SEC,
+        )
+    if model_id == BUILTIN_ARK_GLM_4_7_ID:
+        return CustomChatModelClient(
+            provider_type=PROVIDER_OPENAI,
+            base_url=settings.ARK_BASE_URL,
+            model=settings.ARK_GLM_4_7_MODEL,
             api_key=settings.ARK_API_KEY,
             timeout_sec=settings.ARK_TIMEOUT_SEC,
         )
