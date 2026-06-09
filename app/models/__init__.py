@@ -10,6 +10,7 @@ from app.models.material import RawMaterial
 from app.models.anniversary import Anniversary
 from app.models.user_profile import UserProfile
 from app.models.derivative import DiaryDerivative
+from app.models.biography import BiographyChapter
 from app.models.plaza import PlazaPost, PlazaComment, PostLike
 from app.models.avatar import (
     AvatarMemory,
@@ -43,6 +44,7 @@ __all__ = [
     "Anniversary",
     "UserProfile",
     "DiaryDerivative",
+    "BiographyChapter",
     "PlazaPost",
     "PlazaComment",
     "PostLike",
