@@ -125,6 +125,7 @@ from app.study.router import router as study_router
 from app.plaza.router import router as plaza_router
 from app.avatar.router import router as avatar_router
 from app.memory.router import router as memory_router
+from app.location.router import router as location_router
 
 app.include_router(auth_router, prefix="/api")
 app.include_router(upload_router, prefix="/api")
@@ -140,6 +141,7 @@ app.include_router(study_router, prefix="/api")
 app.include_router(plaza_router, prefix="/api")
 app.include_router(avatar_router, prefix="/api")
 app.include_router(memory_router, prefix="/api")
+app.include_router(location_router, prefix="/api")
 app.include_router(chat_ws_router)  # WebSocket 路由（/ws/chat）
 
 

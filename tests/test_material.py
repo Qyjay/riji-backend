@@ -34,6 +34,7 @@ def test_create_material_text(client):
     assert "createdAt" in m
     assert m["type"] == "text"
     assert m["content"] == "今天天气很好，心情愉快！"
+    assert m["emotion"] is None
 
 
 def test_create_material_id_and_date_generation_rule(client):
@@ -538,8 +539,8 @@ def test_emotion_extraction_mock_format(client, db, monkeypatch):
     assert json.loads(m.emotion) == data
 
 
-def test_create_material_auto_emotion_cry_keyword_not_calm(client, monkeypatch):
-    """创建素材自动情绪提取：'想哭' 应优先识别为难过。"""
+def test_create_material_keeps_emotion_pending_until_extract(client, db, monkeypatch):
+    """创建素材不默认写平静；调用情绪接口后再写回数据库。"""
     user_data = create_test_user(client, username="mat_auto_emotion_cry")
     headers = get_auth_header(user_data["token"])
 
@@ -558,8 +559,21 @@ def test_create_material_auto_emotion_cry_keyword_not_calm(client, monkeypatch):
 
     assert resp.status_code == 200
     data = resp.json()["data"]
-    assert data["emotion"]["label"] == "难过"
-    assert data["emotion"]["emoji"] == "😢"
+    assert data["emotion"] is None
+
+    material_id = data["id"]
+    m = db.query(RawMaterial).filter(RawMaterial.id == material_id).first()
+    assert m is not None
+    assert json.loads(m.emotion) is None
+
+    emotion_resp = client.post(f"/api/materials/{material_id}/emotion", headers=headers)
+    assert emotion_resp.status_code == 200
+    emotion = emotion_resp.json()["data"]
+    assert emotion["label"] == "难过"
+    assert emotion["emoji"] == "😢"
+
+    db.refresh(m)
+    assert json.loads(m.emotion) == emotion
 
 
 @pytest.mark.parametrize("style", POLISH_STYLES)

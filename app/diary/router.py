@@ -2,7 +2,7 @@
 日记模块路由 v2
 prefix="/api/diaries", tags=["日记管理"]
 """
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -37,6 +37,7 @@ async def generate_diary(
         current_user.id,
         body.date,
         body.weather or "",
+        body.weather_periods,
         body.allow_fallback,
     )
     return success(result)
@@ -176,3 +177,19 @@ async def generate_derivative_alias(
     """兼容旧版前端复数路径：/diaries/{id}/derivatives。"""
     result = await service.generate_derivative(db, current_user.id, diary_id, body.type)
     return success(result)
+
+
+@router.post("/{diary_id}/derivative-task", summary="创建异步衍生内容任务")
+async def create_derivative_task(
+    diary_id: str,
+    body: schemas.DerivativeRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """创建异步衍生内容任务，当前用于漫画生成。"""
+    result = service.start_derivative_task(db, current_user.id, diary_id, body.type)
+    background_tasks.add_task(service.run_derivative_task, result["task_id"])
+    out = schemas.DerivativeTaskOut(**result)
+    return success(out.model_dump(by_alias=True))
+

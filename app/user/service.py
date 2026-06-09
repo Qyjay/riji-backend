@@ -4,6 +4,8 @@
 import json
 import time
 from collections import Counter
+from collections import defaultdict
+from datetime import datetime, timedelta
 from typing import List
 
 from sqlalchemy.orm import Session
@@ -23,6 +25,91 @@ def _decode(s, default=None):
         return json.loads(s) if s else default
     except Exception:
         return default
+
+
+def _date_from_ms(ts: int) -> str:
+    try:
+        return datetime.fromtimestamp(int(ts or 0) / 1000).strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+
+def _short_date(date: str) -> str:
+    try:
+        d = datetime.strptime(date, "%Y-%m-%d")
+        return f"{d.month}月{d.day}日"
+    except Exception:
+        return date or ""
+
+
+def _level_threshold(level: int) -> int:
+    if level <= 1:
+        return 0
+    return int(100 * (level - 1) ** 1.45)
+
+
+def _level_from_xp(total_xp: int) -> dict:
+    level = 1
+    while _level_threshold(level + 1) <= total_xp:
+        level += 1
+    current = _level_threshold(level)
+    next_level = _level_threshold(level + 1)
+    span = max(1, next_level - current)
+    in_level = max(0, total_xp - current)
+    return {
+        "level": level,
+        "title": _growth_title(level),
+        "total_xp": total_xp,
+        "current_level_xp": current,
+        "next_level_xp": next_level,
+        "xp_in_current_level": in_level,
+        "xp_to_next_level": max(0, next_level - total_xp),
+        "progress_percent": min(100, max(0, round(in_level / span * 100))),
+    }
+
+
+def _growth_title(level: int) -> str:
+    if level >= 20:
+        return "生活策展人"
+    if level >= 15:
+        return "成长记录家"
+    if level >= 10:
+        return "日记创作者"
+    if level >= 5:
+        return "稳定探索者"
+    return "探索者"
+
+
+def _calc_streaks(dates: set[str]) -> tuple[int, int]:
+    if not dates:
+        return 0, 0
+    parsed = sorted(datetime.strptime(d, "%Y-%m-%d").date() for d in dates if d)
+    longest = 1
+    current_run = 1
+    for prev, cur in zip(parsed, parsed[1:]):
+        if (cur - prev).days == 1:
+            current_run += 1
+        elif cur != prev:
+            longest = max(longest, current_run)
+            current_run = 1
+    longest = max(longest, current_run)
+
+    today = datetime.now().date()
+    current = 0
+    day = today
+    while day.strftime("%Y-%m-%d") in dates:
+        current += 1
+        day -= timedelta(days=1)
+    return current, longest
+
+
+def _add_daily_xp(daily: dict, date: str, amount: int) -> None:
+    if date and amount:
+        daily[date] += amount
+
+
+def _percent(value: int, target: int) -> int:
+    return min(100, max(0, round((value / max(1, target)) * 100)))
 
 
 # 成就定义（硬编码）
@@ -200,68 +287,363 @@ def update_settings(db: Session, user_id: str, data: dict) -> dict:
 
 
 def get_achievements(db: Session, user_id: str) -> List[dict]:
-    """获取成就列表"""
-    unlocked = {
+    """获取成就列表：基于用户真实数据动态判定解锁状态。"""
+    from app.models.diary import Diary
+    from app.models.material import RawMaterial
+    from app.models.study import Pomodoro
+    from app.models.chat import ChatMessage
+    from app.models.derivative import DiaryDerivative
+    from app.models.anniversary import Anniversary
+    from app.models.avatar import AvatarProfile
+    from app.models.social import Match
+
+    diaries = db.query(Diary).filter(Diary.user_id == user_id).all()
+    materials = db.query(RawMaterial).filter(RawMaterial.user_id == user_id).all()
+    pomodoros = db.query(Pomodoro).filter(
+        Pomodoro.user_id == user_id, Pomodoro.completed_at.isnot(None)
+    ).all()
+    user_chat_count = db.query(ChatMessage).filter(
+        ChatMessage.user_id == user_id, ChatMessage.role == "user"
+    ).count()
+    derivatives = (
+        db.query(DiaryDerivative)
+        .join(Diary, DiaryDerivative.diary_id == Diary.id)
+        .filter(Diary.user_id == user_id)
+        .all()
+    )
+    anniversary_count = db.query(Anniversary).filter(Anniversary.user_id == user_id).count()
+    avatar_profile = db.query(AvatarProfile).filter(AvatarProfile.user_id == user_id).first()
+    accepted_match_count = db.query(Match).filter(
+        ((Match.user_id == user_id) | (Match.target_id == user_id)),
+        Match.status == "accepted",
+    ).count()
+
+    diary_count = len(diaries)
+    diary_dates = {d.date for d in diaries if d.date}
+    _, longest_streak = _calc_streaks(diary_dates)
+    material_count = len(materials)
+    pomodoro_count = len(pomodoros)
+    comic_count = sum(1 for x in derivatives if x.type == "comic")
+    novel_count = sum(1 for x in derivatives if x.type == "novel")
+    shared_count = sum(1 for x in derivatives if (x.share_scope or "private") != "private")
+    styles_used = {(d.style or "").strip() for d in diaries if (d.style or "").strip()}
+
+    happy_emotion_count = 0
+    night_owl_count = 0
+    early_bird_count = 0
+    for d in diaries:
+        em = _decode(d.emotion_summary, {})
+        dominant = em.get("dominant", "")
+        if dominant in ("开心", "快乐", "高兴", "愉快", "满足"):
+            happy_emotion_count += 1
+        hour = datetime.fromtimestamp(d.created_at / 1000).hour if d.created_at else -1
+        if hour >= 23 or hour < 4:
+            night_owl_count += 1
+        if 5 <= hour < 9:
+            early_bird_count += 1
+
+    # 已查看学期报告 / 信息提取无独立持久化记录，沿用旧表（如果存在解锁记录则尊重之）
+    legacy_unlocked = {
         ua.achievement_id: ua.unlocked_at
         for ua in db.query(UserAchievement).filter(UserAchievement.user_id == user_id).all()
     }
+
+    conditions = {
+        "first_diary": diary_count >= 1,
+        "diary_7": longest_streak >= 7,
+        "diary_30": diary_count >= 30,
+        "diary_100": diary_count >= 100,
+        "first_material": material_count >= 1,
+        "material_50": material_count >= 50,
+        "first_pomodoro": pomodoro_count >= 1,
+        "pomodoro_10": pomodoro_count >= 10,
+        "pomodoro_50": pomodoro_count >= 50,
+        "first_anniversary": anniversary_count >= 1,
+        "ai_chat_10": user_chat_count >= 10,
+        "first_comic": comic_count >= 1,
+        "first_novel": novel_count >= 1,
+        "first_share": shared_count >= 1,
+        "emotion_happy": happy_emotion_count >= 10,
+        "style_variety": len(styles_used) >= 3,
+        "night_owl": night_owl_count >= 5,
+        "early_bird": early_bird_count >= 5,
+        "social_match": accepted_match_count >= 1,
+        "portrait_complete": avatar_profile is not None and bool((avatar_profile.summary or "").strip()),
+        "streak_14": longest_streak >= 14,
+        "streak_30": longest_streak >= 30,
+        "first_extract": False,
+        "semester_report": "semester_report" in legacy_unlocked,
+    }
+
+    # first_extract 没有专用统计字段，沿用历史解锁记录
+    conditions["first_extract"] = "first_extract" in legacy_unlocked
+
     result = []
     for ach in ACHIEVEMENTS:
-        unlocked_at = unlocked.get(ach["id"])
+        unlocked = bool(conditions.get(ach["id"], False))
         result.append({
             "id": ach["id"],
             "title": ach["title"],
             "description": ach["description"],
             "icon": ach["icon"],
-            "unlocked": ach["id"] in unlocked,
-            "unlocked_at": unlocked_at,
+            "unlocked": unlocked,
+            "unlocked_at": legacy_unlocked.get(ach["id"]),
         })
     return result
+
 
 
 def get_growth_data(db: Session, user_id: str) -> dict:
     """获取成长数据"""
     from app.models.diary import Diary
-    from app.models.study import Pomodoro
-    from collections import defaultdict
+    from app.models.material import RawMaterial
+    from app.models.study import Pomodoro, Todo
+    from app.models.chat import ChatMessage
+    from app.models.derivative import DiaryDerivative
+    from app.models.plaza import PlazaPost, PlazaComment
+    from app.models.social import Match, SocialMessage
 
-    # 日记按日期统计
     diaries = db.query(Diary).filter(Diary.user_id == user_id).all()
+    materials = db.query(RawMaterial).filter(RawMaterial.user_id == user_id).all()
+    pomodoros = db.query(Pomodoro).filter(
+        Pomodoro.user_id == user_id, Pomodoro.completed_at.isnot(None)
+    ).all()
+    todos = db.query(Todo).filter(Todo.user_id == user_id).all()
+    chat_messages = db.query(ChatMessage).filter(ChatMessage.user_id == user_id).all()
+    derivatives = (
+        db.query(DiaryDerivative)
+        .join(Diary, DiaryDerivative.diary_id == Diary.id)
+        .filter(Diary.user_id == user_id)
+        .all()
+    )
+    plaza_posts = db.query(PlazaPost).filter(PlazaPost.user_id == user_id).all()
+    plaza_comments = db.query(PlazaComment).filter(PlazaComment.user_id == user_id).all()
+    matches = db.query(Match).filter(
+        (Match.user_id == user_id) | (Match.target_id == user_id)
+    ).all()
+    social_messages = db.query(SocialMessage).filter(SocialMessage.from_uid == user_id).all()
+    unlocked_achievements = db.query(UserAchievement).filter(UserAchievement.user_id == user_id).all()
+
     diary_by_date = defaultdict(int)
+    material_by_date = defaultdict(int)
+    pomo_by_date = defaultdict(int)
+    xp_by_date = defaultdict(int)
     emotion_counts = Counter()
     tag_counts = Counter()
+    timeline = []
+
     for d in diaries:
         if d.date:
             diary_by_date[d.date] += 1
-        # 情绪统计
         em = _decode(d.emotion_summary, {})
         dominant = em.get("dominant", "")
         if dominant:
             emotion_counts[dominant] += 1
-        # 标签统计
         tags = _decode(d.tags, [])
         for tag in tags:
             tag_counts[tag] += 1
+        word_bonus = min(20, (len(d.content or "") // 100) * 2)
+        xp = 30 + word_bonus
+        _add_daily_xp(xp_by_date, d.date, xp)
+        timeline.append({
+            "date": d.date or _date_from_ms(d.created_at),
+            "type": "diary",
+            "title": "生成日记",
+            "description": f"{d.title or '无标题'} · {len(d.content or '')} 字",
+            "xp": xp,
+            "source_id": d.id,
+        })
 
-    # 番茄钟按日期统计
-    pomodoros = db.query(Pomodoro).filter(
-        Pomodoro.user_id == user_id, Pomodoro.completed_at.isnot(None)
-    ).all()
-    pomo_by_date = defaultdict(int)
+    for m in materials:
+        day = m.date or _date_from_ms(m.created_at)
+        material_by_date[day] += 1
+        xp = 5
+        if m.emotion:
+            xp += 3
+        _add_daily_xp(xp_by_date, day, xp)
+
     for p in pomodoros:
-        import datetime
-        day = datetime.datetime.fromtimestamp(p.completed_at / 1000).strftime("%Y-%m-%d")
+        day = _date_from_ms(p.completed_at)
         pomo_by_date[day] += 1
+        _add_daily_xp(xp_by_date, day, 15)
 
-    # 计算连续天数数组
-    streak_list = list(range(1, (db.query(User).filter(User.id == user_id).first().streak_days or 0) + 1))
+    for todo in todos:
+        day = _date_from_ms(todo.created_at)
+        _add_daily_xp(xp_by_date, day, 10 if todo.completed else 3)
+
+    user_chat_messages = [msg for msg in chat_messages if msg.role == "user"]
+    chat_by_date = defaultdict(int)
+    for msg in user_chat_messages:
+        day = _date_from_ms(msg.timestamp)
+        chat_by_date[day] += 1
+    for day, count in chat_by_date.items():
+        _add_daily_xp(xp_by_date, day, min(40, count * 2))
+
+    for derivative in derivatives:
+        day = _date_from_ms(derivative.created_at)
+        _add_daily_xp(xp_by_date, day, 20)
+        if derivative.type == "comic":
+            title = "生成漫画"
+        elif derivative.type == "novel":
+            title = "生成小说"
+        else:
+            title = "生成分享卡片"
+        timeline.append({
+            "date": day,
+            "type": f"derivative_{derivative.type}",
+            "title": title,
+            "description": "完成一次日记二次创作",
+            "xp": 20,
+            "source_id": derivative.id,
+        })
+
+    for post in plaza_posts:
+        _add_daily_xp(xp_by_date, _date_from_ms(post.created_at), 15)
+
+    comment_by_date = defaultdict(int)
+    for comment in plaza_comments:
+        comment_by_date[_date_from_ms(comment.created_at)] += 1
+    for day, count in comment_by_date.items():
+        _add_daily_xp(xp_by_date, day, min(50, count * 5))
+
+    for match in matches:
+        if match.status == "accepted":
+            _add_daily_xp(xp_by_date, _date_from_ms(match.created_at), 20)
+
+    social_by_date = defaultdict(int)
+    for msg in social_messages:
+        social_by_date[_date_from_ms(msg.timestamp)] += 1
+    for day, count in social_by_date.items():
+        _add_daily_xp(xp_by_date, day, min(40, count * 2))
+
+    for ach in unlocked_achievements:
+        _add_daily_xp(xp_by_date, _date_from_ms(ach.unlocked_at), 20)
+
+    diary_dates = {d.date for d in diaries if d.date}
+    streak_days, longest_streak = _calc_streaks(diary_dates)
+    for threshold, xp in [(7, 50), (14, 100), (30, 250)]:
+        if longest_streak >= threshold:
+            last_date = max(diary_dates) if diary_dates else ""
+            _add_daily_xp(xp_by_date, last_date, xp)
+
+    total_xp = sum(xp_by_date.values())
+    level_payload = _level_from_xp(total_xp)
+    today = datetime.now().strftime("%Y-%m-%d")
+    start_day = datetime.now().date() - timedelta(days=29)
+    chart = []
+    for i in range(30):
+        day = (start_day + timedelta(days=i)).strftime("%Y-%m-%d")
+        chart.append({
+            "date": day,
+            "label": f"{(start_day + timedelta(days=i)).month}/{(start_day + timedelta(days=i)).day}",
+            "xp": xp_by_date.get(day, 0),
+            "diaries": diary_by_date.get(day, 0),
+            "materials": material_by_date.get(day, 0),
+            "pomodoros": pomo_by_date.get(day, 0),
+        })
+
+    total_words = sum(len(d.content or "") for d in diaries)
+    completed_todos = sum(1 for todo in todos if todo.completed)
+    comic_count = sum(1 for derivative in derivatives if derivative.type == "comic")
+    novel_count = sum(1 for derivative in derivatives if derivative.type == "novel")
+    share_count = sum(1 for derivative in derivatives if derivative.type == "share_card")
+    accepted_matches = sum(1 for match in matches if match.status == "accepted")
+    emotion_material_count = sum(1 for m in materials if m.emotion)
+
+    stats = {
+        "diaryCount": len(diaries),
+        "materialCount": len(materials),
+        "wordCount": total_words,
+        "streakDays": streak_days,
+        "longestStreak": longest_streak,
+        "pomodoroCount": len(pomodoros),
+        "todoCount": len(todos),
+        "completedTodoCount": completed_todos,
+        "chatRounds": len(user_chat_messages),
+        "derivativeCount": len(derivatives),
+        "comicCount": comic_count,
+        "achievementCount": len(unlocked_achievements),
+        "plazaPostCount": len(plaza_posts),
+        "plazaCommentCount": len(plaza_comments),
+        "acceptedMatchCount": accepted_matches,
+    }
+
+    skills = [
+        {"key": "writing", "name": "写作", "value": _percent(len(diaries) * 6 + total_words // 250, 100), "basis": "日记篇数与字数"},
+        {"key": "recording", "name": "记录", "value": _percent(len(materials) * 2 + longest_streak * 5, 100), "basis": "素材数量与连续记录"},
+        {"key": "focus", "name": "专注", "value": _percent(len(pomodoros) * 8 + completed_todos * 4, 100), "basis": "番茄钟与待办完成"},
+        {"key": "creation", "name": "创作", "value": _percent(len(derivatives) * 15, 100), "basis": "漫画、小说、分享卡片"},
+        {"key": "social", "name": "社交", "value": _percent(len(plaza_posts) * 12 + len(plaza_comments) * 3 + accepted_matches * 20, 100), "basis": "广场互动与搭子匹配"},
+        {"key": "selfInsight", "name": "自我理解", "value": _percent(emotion_material_count * 3 + len(emotion_counts) * 10, 100), "basis": "情绪识别与情绪多样性"},
+    ]
+
+    milestone_defs = [
+        ("first_diary", "第 1 篇日记", len(diaries) >= 1, min((d.date for d in diaries if d.date), default="")),
+        ("diary_7", "累计 7 篇日记", len(diaries) >= 7, ""),
+        ("streak_7", "连续记录 7 天", longest_streak >= 7, ""),
+        ("material_50", "收集 50 条素材", len(materials) >= 50, ""),
+        ("first_comic", "生成第一幅漫画", comic_count >= 1, ""),
+        ("pomodoro_10", "完成 10 个番茄钟", len(pomodoros) >= 10, ""),
+        ("chat_50", "与 AI 对话 50 轮", len(user_chat_messages) >= 50, ""),
+        ("level_10", "达到 Lv.10", level_payload["level"] >= 10, ""),
+    ]
+    milestones = [
+        {
+            "id": key,
+            "name": name,
+            "done": done,
+            "date": _short_date(date) if date else ("已完成" if done else ""),
+        }
+        for key, name, done, date in milestone_defs
+    ]
+
+    if len(diaries) >= 1:
+        first = min(diaries, key=lambda d: d.created_at or 0)
+        timeline.append({
+            "date": first.date or _date_from_ms(first.created_at),
+            "type": "milestone",
+            "title": "写下第一篇日记",
+            "description": first.title or "开始记录生活",
+            "xp": 30,
+            "source_id": first.id,
+        })
+    if len(materials) >= 1:
+        first_material = min(materials, key=lambda m: m.created_at or 0)
+        timeline.append({
+            "date": first_material.date or _date_from_ms(first_material.created_at),
+            "type": "material",
+            "title": "收集第一条素材",
+            "description": "开始把生活片段放进 Avalin",
+            "xp": 5,
+            "source_id": first_material.id,
+        })
+
+    timeline = sorted(timeline, key=lambda item: item.get("date") or "", reverse=True)[:30]
+
+    xp_breakdown = [
+        {"label": "日记", "xp": sum(30 + min(20, (len(d.content or "") // 100) * 2) for d in diaries)},
+        {"label": "素材", "xp": len(materials) * 5 + emotion_material_count * 3},
+        {"label": "学习", "xp": len(pomodoros) * 15 + completed_todos * 10 + (len(todos) - completed_todos) * 3},
+        {"label": "AI 对话", "xp": sum(min(40, count * 2) for count in chat_by_date.values())},
+        {"label": "创作", "xp": len(derivatives) * 20},
+        {"label": "社交", "xp": len(plaza_posts) * 15 + sum(min(50, count * 5) for count in comment_by_date.values()) + accepted_matches * 20},
+        {"label": "成就", "xp": len(unlocked_achievements) * 20},
+    ]
 
     return {
+        **level_payload,
+        "stats": stats,
+        "skills": skills,
+        "chart": chart,
+        "milestones": milestones,
+        "timeline": timeline,
+        "today_xp": xp_by_date.get(today, 0),
+        "xp_breakdown": xp_breakdown,
         "diaries": [{"date": k, "count": v} for k, v in sorted(diary_by_date.items())],
         "emotions": [{"label": k, "count": v} for k, v in emotion_counts.most_common(10)],
         "tags": [{"label": k, "count": v} for k, v in tag_counts.most_common(20)],
         "pomodoros": [{"date": k, "count": v} for k, v in sorted(pomo_by_date.items())],
-        "streak": streak_list,
+        "streak": list(range(1, streak_days + 1)),
     }
 
 

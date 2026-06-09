@@ -144,6 +144,15 @@ class Settings(BaseSettings):
     ARK_VISION_TIMEOUT_SEC: int = 50
     ARK_VISION_CACHE_TTL_SEC: int = 21600
 
+    # 高德地图 Web 服务 API（服务端代理使用，禁止写入前端）
+    AMAP_WEB_SERVICE_KEY: str = ""
+    AMAP_BASE_URL: str = "https://restapi.amap.com/v3"
+    AMAP_TIMEOUT_SEC: int = 8
+    AMAP_REVERSE_GEOCODE_MONTHLY_LIMIT: int = 150000
+    AMAP_IP_LOCATION_MONTHLY_LIMIT: int = 150000
+    AMAP_WEATHER_MONTHLY_LIMIT: int = 5000
+    AMAP_LOCATION_CACHE_TTL_SEC: int = 1800
+
     # 文件上传
     UPLOAD_DIR: str = "./uploads"
     MAX_FILE_SIZE: int = 10485760  # 10MB

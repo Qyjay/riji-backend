@@ -16,6 +16,7 @@ class GenerateDiaryRequest(BaseModel):
     """AI 生成日记请求"""
     date: str
     weather: Optional[str] = ""
+    weather_periods: List[Dict[str, Any]] = Field(default_factory=list, alias="weatherPeriods")
     allow_fallback: bool = False
 
 
@@ -80,6 +81,18 @@ class DerivativeOut(CamelModel):
     media_url: str
     share_scope: str
     created_at: int
+
+
+class DerivativeTaskOut(CamelModel):
+    """异步衍生内容任务响应"""
+    task_id: str
+    diary_id: str
+    type: str
+    status: str
+    derivative_id: Optional[str] = None
+    error: str = ""
+    created_at: int
+    updated_at: int
 
 
 class TodaySummaryOut(CamelModel):

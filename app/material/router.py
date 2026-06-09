@@ -40,19 +40,10 @@ async def create_material(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """创建一条素材记录，自动触发 AI 情绪提取"""
+    """创建一条素材记录，情绪由前端随后异步触发提取。"""
     data = body.model_dump()
-    if not data.get("emotion"):
-        data["emotion"] = {"label": "平静", "score": 0, "emoji": "😐"}
-
     result = service.create_material(db, current_user.id, data, index_memory=False)
     background_tasks.add_task(service.ingest_material_by_id, result["id"], current_user.id)
-    if data.get("content") and not body.emotion.get("label"):
-        try:
-            emotion = await service.extract_emotion(db, current_user.id, result["id"])
-            result["emotion"] = emotion
-        except Exception:
-            pass
     return success(_serialize(result))
 
 

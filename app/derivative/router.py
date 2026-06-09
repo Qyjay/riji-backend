@@ -10,6 +10,8 @@ from app.models.user import User
 from app.response import success
 from app.derivative import service
 from app.derivative.schemas import ShareRequest, DerivativeOut
+from app.diary import schemas as diary_schemas
+from app.diary import service as diary_service
 
 router = APIRouter(prefix="/derivatives", tags=["衍生内容"])
 
@@ -41,4 +43,15 @@ def set_share_scope(
     """
     result = service.update_share_scope(db, current_user.id, deriv_id, body.scope)
     out = DerivativeOut(**result)
+    return success(out.model_dump(by_alias=True))
+
+
+@router.get("/tasks/{task_id}", summary="查询异步衍生内容任务")
+def get_derivative_task(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """查询异步衍生内容任务状态。"""
+    result = diary_service.get_derivative_task(current_user.id, task_id)
+    out = diary_schemas.DerivativeTaskOut(**result)
     return success(out.model_dump(by_alias=True))

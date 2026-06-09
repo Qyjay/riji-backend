@@ -56,6 +56,22 @@ class AchievementOut(CamelModel):
 
 class GrowthDataOut(CamelModel):
     """成长数据响应"""
+    level: int
+    title: str
+    total_xp: int
+    current_level_xp: int
+    next_level_xp: int
+    xp_in_current_level: int
+    xp_to_next_level: int
+    progress_percent: int
+    stats: dict
+    skills: list
+    chart: list
+    milestones: list
+    timeline: list
+    today_xp: int
+    xp_breakdown: list
+    # legacy 兼容字段
     diaries: list
     emotions: list
     tags: list

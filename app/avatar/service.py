@@ -59,6 +59,13 @@ def _decode(s: str, default=None):
         return default
 
 
+def _clip_text(text: str, limit: int) -> str:
+    raw = str(text or "").strip()
+    if len(raw) <= limit:
+        return raw
+    return raw[:limit].rstrip() + "\n...[已截断]"
+
+
 def _memory_to_dict(m: AvatarMemory) -> dict:
     """AvatarMemory ORM → 响应字典"""
     return {
@@ -2739,6 +2746,7 @@ async def regenerate_profile(db: Session, user_id: str) -> dict:
     memory_text = "\n".join([
         f"- [{m.category}] {m.content}" for m in memories
     ]) if memories else "暂无记忆"
+    memory_text = _clip_text(memory_text, 2500)
 
     # 统一记忆系统中的相关原文证据，优先作为新侧写依据。
     try:
@@ -2753,7 +2761,10 @@ async def regenerate_profile(db: Session, user_id: str) -> dict:
             top_k=30,
             source_types=["diary", "chat_session", "plaza_post", "plaza_comment", "social_message", "material"],
         )
-        retrieved_memory_text = format_memory_context(retrieved_memories, scenario="profile_generation")
+        retrieved_memory_text = _clip_text(
+            format_memory_context(retrieved_memories, scenario="profile_generation"),
+            4000,
+        )
     except Exception:
         retrieved_memory_text = ""
 
@@ -2769,6 +2780,7 @@ async def regenerate_profile(db: Session, user_id: str) -> dict:
     diary_text = "\n".join([
         f"- {d.title or '无标题'}: {(d.content or '')[:100]}" for d in diaries
     ]) if diaries else "暂无日记"
+    diary_text = _clip_text(diary_text, 2000)
 
     # 收集近期聊天（最近 30 条）
     messages = (
@@ -2782,6 +2794,7 @@ async def regenerate_profile(db: Session, user_id: str) -> dict:
     chat_text = "\n".join([
         f"- {msg.content[:80]}" for msg in messages
     ]) if messages else "暂无对话"
+    chat_text = _clip_text(chat_text, 2500)
     memory_doc_count = (
         db.query(MemoryDocument)
         .filter(MemoryDocument.user_id == user_id, MemoryDocument.is_deleted == False)  # noqa: E712
@@ -2807,6 +2820,7 @@ async def regenerate_profile(db: Session, user_id: str) -> dict:
         messages=[{"role": "user", "content": user_prompt}],
         system_prompt=system_prompt,
         temperature=0.7,
+        max_tokens=700,
     )
 
     # 写入/更新 avatar_profiles 表

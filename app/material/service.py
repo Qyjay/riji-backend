@@ -149,14 +149,14 @@ def _same_payload(last: RawMaterial, payload: dict) -> bool:
 
 
 def _normalize_create_payload(data: dict) -> dict:
-    default_emotion = {"label": "平静", "score": 0, "emoji": "😐"}
+    emotion = data.get("emotion") if isinstance(data.get("emotion"), dict) else None
     payload = {
         "type": data["type"],
         "content": data.get("content", "") or "",
         "media_url": _normalize_media_urls(data.get("media_url")),
         "thumbnail_url": _normalize_thumbnail_urls(data.get("thumbnail_url")),
         "location": data.get("location", {}) or {},
-        "emotion": data.get("emotion") or default_emotion,
+        "emotion": emotion if emotion and emotion.get("label") else None,
         "tags": data.get("tags", []) or [],
     }
 
@@ -199,6 +199,9 @@ def _apply_material_date_filter(query, date: Optional[str]):
 
 def material_to_dict(m: RawMaterial) -> dict:
     """素材模型转响应字典"""
+    emotion = _decode(m.emotion, None)
+    if not emotion:
+        emotion = None
     return {
         "id": m.id,
         "user_id": m.user_id,
@@ -207,7 +210,7 @@ def material_to_dict(m: RawMaterial) -> dict:
         "media_url": _decode_media_urls(m.media_url or ""),
         "thumbnail_url": _decode_thumbnail_urls(m.thumbnail_url or ""),
         "location": _decode(m.location, {}),
-        "emotion": _decode(m.emotion, {"label": "平静", "score": 0, "emoji": "😐"}),
+        "emotion": emotion,
         "tags": _decode(m.tags, []),
         "date": m.date or "",
         "created_at": m.created_at,

@@ -100,6 +100,69 @@ def test_growth_data(client):
     assert "tags" in growth
     assert "pomodoros" in growth
     assert "streak" in growth
+    assert growth["level"] == 1
+    assert growth["totalXp"] == 0
+    assert growth["progressPercent"] == 0
+    assert "stats" in growth
+    assert "skills" in growth
+    assert "chart" in growth
+    assert "milestones" in growth
+    assert "timeline" in growth
+    assert "todayXp" in growth
+    assert "xpBreakdown" in growth
+
+
+def test_growth_data_uses_real_activity(client, db):
+    from app.models.diary import Diary
+    from app.models.material import RawMaterial
+    from app.models.study import Pomodoro
+
+    user_data = create_test_user(client, username="growth_real_user")
+    headers = get_auth_header(user_data["token"])
+    user_id = user_data["user"]["id"]
+    now = 1780913000000
+
+    db.add(Diary(
+        id="growth-diary-1",
+        user_id=user_id,
+        title="真实成长日记",
+        content="今天完成了成长系统真实数据测试。" * 10,
+        emotion_summary='{"dominant":"开心"}',
+        tags='["学习","测试"]',
+        date="2026-06-08",
+        created_at=now,
+        updated_at=now,
+        status="published",
+    ))
+    db.add(RawMaterial(
+        id="growth-material-1",
+        user_id=user_id,
+        type="text",
+        content="测试素材",
+        emotion='{"label":"开心","score":0.8,"emoji":"😊"}',
+        date="2026-06-08",
+        created_at=now,
+    ))
+    db.add(Pomodoro(
+        id="growth-pomo-1",
+        user_id=user_id,
+        task="实现成长系统",
+        duration=25,
+        completed_at=now,
+        created_at=now,
+    ))
+    db.commit()
+
+    resp = client.get("/api/user/growth", headers=headers)
+    assert resp.status_code == 200
+    growth = resp.json()["data"]
+    assert growth["totalXp"] > 0
+    assert growth["stats"]["diaryCount"] == 1
+    assert growth["stats"]["materialCount"] == 1
+    assert growth["stats"]["pomodoroCount"] == 1
+    assert growth["emotions"][0]["label"] == "开心"
+    assert any(item["title"] == "生成日记" for item in growth["timeline"])
+    assert any(item["label"] == "日记" and item["xp"] > 0 for item in growth["xpBreakdown"])
 
 
 def test_semester_report(client):

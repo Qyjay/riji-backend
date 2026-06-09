@@ -9,7 +9,7 @@ import os
 import re
 import time
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 from uuid import uuid4
 
 from sqlalchemy import func, or_, text
@@ -48,6 +48,8 @@ def _resolve_derivative_ai_timeout_sec() -> int:
 
 DERIVATIVE_AI_TIMEOUT_SEC = _resolve_derivative_ai_timeout_sec()
 DERIVATIVE_COMIC_FALLBACK_IMAGE = "https://placehold.co/1024x1024/EEE/31343C?text=Diary+Comic&font=roboto"
+DERIVATIVE_TASK_TTL_MS = 60 * 60 * 1000
+_DERIVATIVE_TASKS: dict[str, dict] = {}
 AI_COMMENT_RAG_SOURCE_TYPES = [
     "diary",
     "material",
@@ -78,6 +80,30 @@ def _uuid() -> str:
     return str(uuid4())
 
 
+def _prune_derivative_tasks(now: Optional[int] = None) -> None:
+    current = now or _now_ms()
+    expired = [
+        task_id
+        for task_id, task in _DERIVATIVE_TASKS.items()
+        if current - int(task.get("updated_at") or task.get("created_at") or 0) > DERIVATIVE_TASK_TTL_MS
+    ]
+    for task_id in expired:
+        _DERIVATIVE_TASKS.pop(task_id, None)
+
+
+def _derivative_task_to_dict(task: dict) -> dict:
+    return {
+        "task_id": task.get("task_id", ""),
+        "diary_id": task.get("diary_id", ""),
+        "type": task.get("type", ""),
+        "status": task.get("status", "running"),
+        "derivative_id": task.get("derivative_id") or None,
+        "error": task.get("error", ""),
+        "created_at": int(task.get("created_at") or 0),
+        "updated_at": int(task.get("updated_at") or task.get("created_at") or 0),
+    }
+
+
 def _encode(obj) -> str:
     return json.dumps(obj, ensure_ascii=False)
 
@@ -89,6 +115,11 @@ def _decode(s: str, default=None):
         return json.loads(s) if s else default
     except Exception:
         return default
+
+
+def _decode_dict(s: str) -> dict:
+    decoded = _decode(s, {})
+    return decoded if isinstance(decoded, dict) else {}
 
 
 def _apply_material_date_filter(query, date: str):
@@ -140,7 +171,7 @@ def _build_emotion_trend_from_materials(materials: List[RawMaterial]) -> dict:
         return int(material.created_at or material.start_time or material.end_time or 0)
 
     for m in sorted(materials, key=material_ts):
-        em = _decode(m.emotion, {})
+        em = _decode_dict(m.emotion)
         label = (em.get("label") or "").strip()
         if not label:
             continue
@@ -183,7 +214,7 @@ def _build_legacy_emotion_payload(emotion_summary: dict, materials: List[RawMate
 
     emoji = ""
     for m in materials:
-        em = _decode(m.emotion, {})
+        em = _decode_dict(m.emotion)
         if em.get("label") == dominant and em.get("emoji"):
             emoji = em.get("emoji")
             break
@@ -231,6 +262,7 @@ def _build_ai_comment_system_prompt(db: Session, user_id: str, query: str) -> st
     """使用聊天同源人格，并注入长期记忆/RAG 上下文。"""
     base_prompt = (
         "你是 Avalin 的 AI 伙伴，是用户长期相处并逐渐孵化出的专属数字分身。"
+        "你也是用户的 AI 分身，能基于日记和素材给出贴近本人生活脉络的回应。"
         "你了解用户的日记、素材、聊天和长期记忆，负责在每天日记生成后给出一句真实、具体、温暖的点评。\n\n"
         "【角色要求】\n"
         "1. 你不是旁观者，而是熟悉用户生活脉络的 AI 伙伴。\n"
@@ -280,7 +312,7 @@ def _build_ai_comment_prompt_payload(
 ) -> tuple[str, str]:
     """构造日记 AI 点评的 system/user prompt。"""
     material_context = materials_text or _build_materials_prompt_text(materials, diary.date or "")
-    emotion_summary = _decode(diary.emotion_summary, {})
+    emotion_summary = _decode_dict(diary.emotion_summary)
     query = _build_ai_comment_query(diary, material_context)
     system_prompt = _build_ai_comment_system_prompt(db, user_id, query)
     user_prompt = (
@@ -625,6 +657,42 @@ def _normalize_weather_text(weather: str) -> str:
     return normalized or raw
 
 
+def _normalize_weather_periods(periods: Optional[List[dict]]) -> List[dict]:
+    if not isinstance(periods, list):
+        return []
+
+    allowed = {
+        "morning": "上午",
+        "afternoon": "下午",
+        "evening": "晚上",
+    }
+    result = []
+    for item in periods:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        if key not in allowed:
+            continue
+        weather_text = str(item.get("weatherText") or item.get("weather") or "").strip()
+        if not weather_text:
+            continue
+        result.append({
+            "key": key,
+            "label": str(item.get("label") or allowed[key]).strip() or allowed[key],
+            "weatherText": weather_text,
+        })
+    return result
+
+
+def _weather_from_periods(periods: List[dict]) -> str:
+    parts = [
+        f"{item['label']}{item['weatherText']}"
+        for item in periods
+        if item.get("label") and item.get("weatherText")
+    ]
+    return "；".join(parts)
+
+
 def _parse_weather_values(raw: str) -> List[str]:
     """解析并规范化 weather 参数，支持逗号分隔。"""
     values = _parse_csv_values(raw)
@@ -677,7 +745,7 @@ def _matches_any_tag(diary: Diary, expected_tags: List[str]) -> bool:
 
 def diary_to_dict(d: Diary) -> dict:
     """日记模型转响应字典（全字段，camelCase 由 schema 处理）"""
-    emotion_summary = _decode(d.emotion_summary, {})
+    emotion_summary = _decode_dict(d.emotion_summary)
     # 从 emotion_summary 提取 legacy emotion 字段
     dominant = emotion_summary.get("dominant", "")
     trend = emotion_summary.get("trend", [])
@@ -687,6 +755,12 @@ def diary_to_dict(d: Diary) -> dict:
         "label": dominant or "平静",
         "score": legacy_score,
     })
+    if not isinstance(emotion, dict):
+        emotion = {
+            "emoji": "😐",
+            "label": dominant or "平静",
+            "score": legacy_score,
+        }
     if dominant and not emotion.get("label"):
         emotion["label"] = dominant
 
@@ -1001,10 +1075,12 @@ async def generate_diary(
     user_id: str,
     date: str,
     weather: str = "",
+    weather_periods: Optional[List[dict]] = None,
     allow_fallback: bool = False,
 ) -> dict:
     """AI 生成当日日记"""
-    normalized_weather = _normalize_weather_text(weather)
+    normalized_weather_periods = _normalize_weather_periods(weather_periods)
+    normalized_weather = _weather_from_periods(normalized_weather_periods) or _normalize_weather_text(weather)
 
     existing = (
         db.query(Diary)
@@ -1029,6 +1105,8 @@ async def generate_diary(
         )
 
     emotion_summary_for_prompt = _build_emotion_trend_from_materials(materials)
+    if normalized_weather_periods:
+        emotion_summary_for_prompt["weatherPeriods"] = normalized_weather_periods
 
     user = db.query(User).filter(User.id == user_id).first()
     user_style = ""
@@ -1108,6 +1186,8 @@ async def generate_diary(
 
     # 通过“当日情绪趋势”逻辑再次聚合，作为最终 emotion/emotion_summary。
     trend_summary = get_emotion_trend(db, user_id, d.id)
+    if normalized_weather_periods:
+        trend_summary["weatherPeriods"] = normalized_weather_periods
     d.emotion_summary = _encode(trend_summary)
     d.emotion = _encode(_build_legacy_emotion_payload(trend_summary, materials))
     d.updated_at = _now_ms()
@@ -1203,9 +1283,17 @@ def get_emotion_trend(db: Session, user_id: str, diary_id: str) -> dict:
     if not d:
         raise ApiException(code=NOT_FOUND, message="日记不存在", status_code=404)
 
+    saved_summary = _decode(d.emotion_summary, {})
+    weather_periods = saved_summary.get("weatherPeriods") if isinstance(saved_summary, dict) else []
+    if not isinstance(weather_periods, list):
+        weather_periods = []
+
     material_ids = _decode(d.material_ids, [])
     if not material_ids:
-        return {"dominant": "", "trend": []}
+        result = {"dominant": "", "trend": []}
+        if weather_periods:
+            result["weatherPeriods"] = weather_periods
+        return result
 
     materials = (
         db.query(RawMaterial)
@@ -1213,7 +1301,10 @@ def get_emotion_trend(db: Session, user_id: str, diary_id: str) -> dict:
         .order_by(RawMaterial.created_at)
         .all()
     )
-    return _build_emotion_trend_from_materials(materials)
+    result = _build_emotion_trend_from_materials(materials)
+    if weather_periods:
+        result["weatherPeriods"] = weather_periods
+    return result
 
 
 async def extract_diary_info(db: Session, user_id: str, diary_id: str) -> dict:
@@ -1346,7 +1437,7 @@ async def generate_derivative(db: Session, user_id: str, diary_id: str, dtype: s
     media_url = ""
     now = _now_ms()
 
-    emotion_ctx = _decode(d.emotion_summary, {}).get("dominant", "") or "平静"
+    emotion_ctx = _decode_dict(d.emotion_summary).get("dominant", "") or "平静"
     weather_ctx = d.weather or "未记录天气"
     diary_excerpt = (d.content or "").strip()
 
@@ -1469,6 +1560,88 @@ async def generate_derivative(db: Session, user_id: str, diary_id: str, dtype: s
         share_scope="private",
         created_at=now,
     ).model_dump(by_alias=True)
+
+
+def start_derivative_task(db: Session, user_id: str, diary_id: str, dtype: str) -> dict:
+    """创建异步衍生内容任务，当前用于漫画生成。"""
+    allowed_types = {"comic"}
+    if dtype not in allowed_types:
+        raise ApiException(
+            code=PARAM_ERROR,
+            message=f"异步衍生任务暂仅支持 comic，当前为: {dtype}",
+            status_code=400,
+        )
+
+    d = db.query(Diary).filter(Diary.id == diary_id, Diary.user_id == user_id).first()
+    if not d and str(diary_id).strip() == "1":
+        d = (
+            db.query(Diary)
+            .filter(Diary.user_id == user_id)
+            .order_by(Diary.created_at.desc())
+            .first()
+        )
+    if not d:
+        raise ApiException(code=NOT_FOUND, message="日记不存在", status_code=404)
+
+    _prune_derivative_tasks()
+    for task in _DERIVATIVE_TASKS.values():
+        if (
+            task.get("user_id") == user_id
+            and task.get("diary_id") == d.id
+            and task.get("type") == dtype
+            and task.get("status") == "running"
+        ):
+            return _derivative_task_to_dict(task)
+
+    now = _now_ms()
+    task = {
+        "task_id": _uuid(),
+        "user_id": user_id,
+        "diary_id": d.id,
+        "type": dtype,
+        "status": "running",
+        "derivative_id": None,
+        "error": "",
+        "created_at": now,
+        "updated_at": now,
+    }
+    _DERIVATIVE_TASKS[task["task_id"]] = task
+    return _derivative_task_to_dict(task)
+
+
+def get_derivative_task(user_id: str, task_id: str) -> dict:
+    _prune_derivative_tasks()
+    task = _DERIVATIVE_TASKS.get(task_id)
+    if not task or task.get("user_id") != user_id:
+        raise ApiException(code=NOT_FOUND, message="衍生任务不存在", status_code=404)
+    return _derivative_task_to_dict(task)
+
+
+async def run_derivative_task(task_id: str) -> None:
+    """后台执行衍生内容生成任务。"""
+    from app.database import SessionLocal
+
+    task = _DERIVATIVE_TASKS.get(task_id)
+    if not task:
+        return
+
+    db = SessionLocal()
+    try:
+        result = await generate_derivative(
+            db,
+            str(task.get("user_id") or ""),
+            str(task.get("diary_id") or ""),
+            str(task.get("type") or ""),
+        )
+        task["status"] = "done"
+        task["derivative_id"] = result.get("id")
+        task["error"] = ""
+    except Exception as exc:
+        task["status"] = "failed"
+        task["error"] = str(exc)[:200] or "生成失败"
+    finally:
+        task["updated_at"] = _now_ms()
+        db.close()
 
 
 def get_today_summary(db: Session, user_id: str, date: str) -> dict:

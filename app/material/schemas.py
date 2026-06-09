@@ -55,7 +55,7 @@ class MaterialCreate(BaseModel):
     media_url: List[str] = Field(default_factory=list, alias="mediaUrl")
     thumbnail_url: List[str] = Field(default_factory=list, alias="thumbnailUrl")
     location: Dict[str, Any] = {}
-    emotion: Dict[str, Any] = {}
+    emotion: Optional[Dict[str, Any]] = None
     tags: List[str] = []
     date: str = ""                     # 可选：传 YYYY-MM-DD，入库时补齐为 YYYY-MM-DD HH:MM:SS
 
@@ -112,7 +112,7 @@ class MaterialOut(CamelModel):
     media_url: List[str]
     thumbnail_url: List[str]
     location: Dict[str, Any]
-    emotion: Dict[str, Any]
+    emotion: Optional[Dict[str, Any]] = None
     tags: List[str]
     date: str                           # YYYY-MM-DD HH:MM:SS
     created_at: int
