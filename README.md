@@ -1,206 +1,219 @@
-# 日迹 App — 后端 API
+# 日迹（Avalin）后端
 
-大学生 AI 生活伙伴 App 后端服务。FastAPI + SQLite + SQLAlchemy。
+日迹是一款面向大学生的 AI 生活伙伴应用。本仓库提供认证、素材、日记、AI 对话、记忆、校园广场、AI 分身、社交、学习与小传等后端能力。
 
-## 快速开始（3 分钟）
+[前端仓库](https://github.com/Qyjay/riji-frontend) · [接口文档](docs/API-DOCS.md) · [开发入门](docs/ONBOARDING.md)
+
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)
+![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0-D71F00)
+![MySQL](https://img.shields.io/badge/MySQL-8.4-4479A1?logo=mysql&logoColor=white)
+
+## 当前规模
+
+- 134 个 HTTP 路由、1 个 WebSocket 路由
+- 17 个业务模块、33 个数据模型
+- 17 个 Alembic 迁移、25 个测试文件
+- 开发环境支持 SQLite，生产编排使用 MySQL 8.4
+- 支持 MiniMax、vivo、火山方舟、Exa、火山联网搜索、高德地图等外部能力
+
+## 架构
+
+```mermaid
+flowchart LR
+    Client["UniApp / H5 / App"] --> Nginx["Nginx"]
+    Nginx -->|"/"| Static["H5 静态资源"]
+    Nginx -->|"/api/*"| API["FastAPI"]
+    Nginx -->|"/uploads/*"| Uploads["上传文件"]
+    Nginx -->|"/ws/chat"| WS["WebSocket 对话"]
+
+    API --> Router["Router + Pydantic Schema"]
+    Router --> Service["业务 Service"]
+    Service --> ORM["SQLAlchemy ORM"]
+    ORM --> DB[("MySQL / SQLite")]
+
+    Service --> AI["LLM / 视觉 / TTS / ASR"]
+    Service --> Search["联网搜索 / 地图天气"]
+    Service --> Memory["结构化记忆 + 向量索引"]
+```
+
+后端采用模块化单体架构。每个业务模块通常由 `router.py`、`schemas.py` 和 `service.py` 组成：
+
+| 层 | 主要职责 |
+|---|---|
+| `app/main.py` | 应用生命周期、中间件、异常处理、静态目录和路由注册 |
+| `router.py` | HTTP/WebSocket 边界、认证依赖、参数与响应编排 |
+| `schemas.py` | Pydantic 请求与响应契约 |
+| `service.py` | 业务规则、跨模型编排和外部服务调用 |
+| `app/models/` | SQLAlchemy 数据模型 |
+| `app/database.py` | 同步数据库引擎、会话和 SQLite 兼容配置 |
+| `app/response.py` | 统一响应体与业务错误码 |
+| `alembic/` | 数据库版本迁移 |
+
+### 业务模块
+
+| 模块 | 路径前缀 | 能力 |
+|---|---|---|
+| 认证 | `/api/auth` | 注册、登录、登出、健康检查 |
+| 用户 | `/api/user` | 资料、设置、成长、画像、学期报告 |
+| 素材与上传 | `/api/materials`、`/api/upload` | 文字、图片、语音、文件与 AI 处理 |
+| 日记与衍生 | `/api/diaries`、`/api/derivatives` | 日记生成、点评、情绪、漫画/小说等衍生内容 |
+| AI 与对话 | `/api/ai`、`/api/chat`、`/ws/chat` | 模型管理、TTS/ASR、对话、SSE 与 WebSocket |
+| 记忆系统 | `/api/memory` | 文档、事实、检索、画像、权限和维护 |
+| 广场与分身 | `/api/plaza`、`/api/avatar` | 帖子、评论、分身冲浪、A2A 匹配和行动审批 |
+| 社交 | `/api/social` | 匹配、搭子、消息与匹配报告 |
+| 学习与纪念日 | `/api/study`、`/api/anniversaries` | 番茄钟、待办、纪念日和那年今日 |
+| 位置与小传 | `/api/location`、`/api/biography` | 地址天气、自传目录与章节生成 |
+
+## 本地开发
+
+### 环境要求
+
+- Python 3.11
+- Git
+- 可选：MySQL 8.x、Docker 及 Docker Compose
+- AI、搜索和地图功能所需的服务端密钥
+
+### 启动
 
 ```bash
-# 1. 克隆仓库 & 进入后端目录
-cd backend
+git clone https://github.com/Qyjay/riji-backend.git
+cd riji-backend
 
-# 2. 创建虚拟环境 & 安装依赖
-python -m venv venv
-source venv/bin/activate      # Windows: venv\Scripts\activate
+python3.11 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 
-# 3. 配置环境变量
 cp .env.example .env
-# 编辑 .env，填入 JWT_SECRET（随便写一串字符串即可）
+# 至少修改 JWT_SECRET；按需填写 AI、搜索和地图配置
 
-# 4. 初始化数据库 & 灌入测试数据
-python scripts/seed.py
+alembic upgrade head
+python scripts/seed.py          # 可选：仅用于本地开发数据
 
-# 5. 启动服务
-uvicorn app.main:app --reload --port 8000 --log-level info
-uvicorn app.main:app --reload --host 127.0.0.1 --log-level info #指定日志
-# 6. 打开浏览器测试
-# Swagger 文档：http://localhost:8000/docs
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-## 测试账号
+启动后可访问：
 
-| 用户名 | 密码 | 学校 |
-|--------|------|------|
-| kylin | 123456 | 南开大学 |
-| xiaolu | 123456 | 天津大学 |
-| test | 123456 | 测试大学 |
+- API 根地址：`http://127.0.0.1:8000`
+- Swagger：`http://127.0.0.1:8000/docs`
+- OpenAPI：`http://127.0.0.1:8000/openapi.json`
+- 健康检查：`http://127.0.0.1:8000/api/auth/health`
 
-### 广场+分身模块测试账号
+开发种子账号及扩展种子脚本见 [开发入门](docs/ONBOARDING.md)。不要在生产环境执行种子脚本或使用示例密码。
 
-运行 `python scripts/seed_plaza_avatar.py` 创建以下账号（统一密码 `test123456`）：
+## 配置
 
-| 用户名 | 姓名 | 学校 |
-|--------|------|------|
-| linxiaohan | 林晓涵 | 南开大学 |
-| zhoucheng | 周澄 | 天津大学 |
-| summer_z | 张诗涵 | 北京大学 |
-| wangfuai | 王FU艾 | 清华大学 |
-| liuyang_c | 刘洋 | 复旦大学 |
-| chenmo | 陈墨 | 上海交通大学 |
-| yuxin_r | 于欣怡 | 浙江大学 |
-| leomao | 李茂 | 南京大学 |
-| zhouqian | 周谦 | 中山大学 |
-| hanxiao | 韩笑 | 武汉大学 |
+配置由 `app/config.py` 通过 `.env` 加载。常用配置分组如下：
 
-该脚本还会创建 15 条广场帖子、28 条评论、39 条点赞、41 条分身记忆、10 条分身状态、20 条推荐匹配、10 条分身侧写。
+| 分组 | 关键变量 |
+|---|---|
+| 数据库 | `DATABASE_URL` |
+| 认证 | `JWT_SECRET`、`JWT_EXPIRE_DAYS` |
+| AI 提供商 | `LLM_PROVIDER`、`MINIMAX_*`、`VIVO_*`、`ARK_*` |
+| 搜索 | `WEB_SEARCH_PROVIDER`、`EXA_*`、`VOLC_SEARCH_*` |
+| 记忆 | `MEMORY_*`、`DASHSCOPE_*` |
+| 地图天气 | `AMAP_*` |
+| 上传与服务 | `UPLOAD_DIR`、`MAX_FILE_SIZE`、`HOST`、`PORT` |
 
-## 项目结构
+仓库仅跟踪 `.env.example` 和 `.env.production.example`。真实密钥必须保存在未跟踪的 `.env` / `.env.production` 或专用密钥管理系统中。
 
-```
-backend/
-├── app/
-│   ├── main.py           # 入口：路由注册 + CORS + 异常处理
-│   ├── config.py          # 配置（读 .env）
-│   ├── database.py        # 数据库连接
-│   ├── dependencies.py    # get_current_user / get_db
-│   ├── response.py        # 统一响应格式 + 错误码
-│   │
-│   ├── models/            # ⚠️ 数据模型（不要改）
-│   ├── auth/              # ⚠️ 认证模块（不要改）
-│   ├── upload/            # ⚠️ 文件上传（不要改）
-│   │
-│   ├── ai/                # AI 功能 → 组员 C + D
-│   │   ├── minimax_client.py  # MiniMax SDK（直接调用）
-│   │   ├── router.py      # 路由（填 TODO）
-│   │   ├── service.py     # 业务逻辑
-│   │   └── schemas.py     # 请求/响应模型
-│   │
-│   ├── user/              # 用户模块 → 组员 A
-│   ├── diary/             # 日记模块 → 组员 B + C
-│   ├── study/             # 学习模块 → 组员 A
-│   ├── social/            # 社交模块 → 组员 D
-│   ├── plaza/             # 🏫 广场模块 → 组员 E
-│   └── avatar/            # 🤖 AI分身模块 → 组员 E
-│
-├── tests/                 # 测试
-├── scripts/
-│   ├── seed.py                   # 种子数据（基础测试账号）
-│   └── seed_plaza_avatar.py      # 广场+分身种子数据（10用户/15帖/全模块）
-├── requirements.txt
-└── .env.example
-```
+### 统一响应与认证
 
-## 组员开发指南
-
-### 你只需要改自己的目录
-
-每个模块目录下有 3 个文件：
-- `router.py` — 路由（接口定义，里面有 TODO 注释告诉你要做什么）
-- `service.py` — 业务逻辑
-- `schemas.py` — 请求/响应 Pydantic 模型（已预定义，可按需扩展）
-
-### 开发流程
-
-1. 打开你负责的 `router.py`
-2. 找到 TODO 注释，照着写
-3. 保存 → 服务自动热更新（`--reload`）
-4. 打开 `http://localhost:8000/docs` 测试
-
-### 统一响应格式
-
-所有接口必须返回统一格式：
+大多数 HTTP 接口返回：
 
 ```json
 {
   "code": 0,
-  "data": { ... },
+  "data": {},
   "message": "ok"
 }
 ```
 
-使用 `response.py` 提供的工具函数：
+受保护接口使用 JWT：
 
-```python
-from app.response import success, ApiException, NOT_FOUND
-
-# 成功
-return success(data={"name": "kylin"}, message="获取成功")
-
-# 错误
-raise ApiException(code=NOT_FOUND, message="日记不存在", status_code=404)
+```http
+Authorization: Bearer <token>
 ```
 
-### 认证
+个别历史接口为保持前端兼容会直接返回数组；以 Swagger、`docs/API-DOCS.md` 和实际路由实现为准。
 
-需要登录的接口加 `Depends(get_current_user)`：
-
-```python
-from app.dependencies import get_current_user, get_db
-
-@router.get("/profile")
-def get_profile(
-    current_user = Depends(get_current_user),  # 自动从 JWT 获取用户
-    db = Depends(get_db),                       # 数据库 session
-):
-    # current_user 就是 User 对象
-    return success(data={"name": current_user.name})
-```
-
-### 调用 AI（5 个模态，一个 Key）
-
-```python
-from app.ai.minimax_client import get_minimax_client
-
-client = get_minimax_client()
-
-# 1. 非流式对话（M2.7）
-text = await client.chat_completion(
-    messages=[{"role": "user", "content": "你好"}],
-    system_prompt="你是一个友好的 AI 助手"
-)
-
-# 2. 流式对话 SSE（M2.7）
-async for chunk in client.stream_chat(messages, system_prompt):
-    yield f"data: {chunk}\n\n"
-
-# 3. 文生图（image-01）
-url = await client.generate_image("一只可爱的猫咪", aspect_ratio="1:1")
-
-# 4. TTS（speech-2.8-hd）
-audio_bytes = await client.text_to_speech("你好世界", voice_id="male-qn-qingse")
-
-# 5. 音乐生成（music-2.5+）
-music_url = await client.generate_music(
-    prompt="流行音乐, 开心, 校园生活",
-    lyrics="[verse]\n阳光洒在操场上\n青春的风轻轻吹",
-)
-# 纯音乐（无人声）
-bgm_url = await client.generate_music(
-    prompt="轻柔钢琴曲, 温暖, 日记背景",
-    is_instrumental=True,
-)
-```
-
-## 运行测试
+## 测试与迁移
 
 ```bash
-python -m pytest tests/ -v
-```
+# 测试
+python -m pytest tests -v
 
-## 数据库迁移
+# 生成迁移
+alembic revision --autogenerate -m "describe change"
 
-```bash
-# 生成新的迁移
-alembic revision --autogenerate -m "描述"
-
-# 执行迁移
+# 应用迁移
 alembic upgrade head
 ```
 
-## ⚠️ 注意事项
+模型变更必须附带 Alembic 迁移。生产容器启动时会先执行 `alembic upgrade head`。
 
-1. **不要修改** `models/`、`auth/`、`upload/`、`main.py`、`dependencies.py`、`response.py`
-2. **只修改你自己负责的模块目录**
-3. JSON 字段（images/emotion/tags）存储为 Text，读取时用 `json.loads()`，写入时用 `json.dumps()`
-4. 所有时间戳用**毫秒**（`int(time.time() * 1000)`）
-5. Git 分支：在自己的 feature branch 上开发，完成后发 PR
+## 生产部署
+
+当前服务器地址：`115.190.218.167`。仓库内的生产拓扑由 `docker-compose.yml` 定义：
+
+```text
+Internet -> Nginx :80 -> H5 静态文件
+                    ├-> /api/*     -> FastAPI :8000
+                    ├-> /uploads/* -> FastAPI :8000
+                    └-> /ws/*      -> FastAPI :8000
+FastAPI -> MySQL :3306（仅绑定 127.0.0.1）
+```
+
+部署前：
+
+1. 将前端 H5 构建产物放入 `deploy/frontend/`。
+2. 从 `.env.production.example` 创建 `.env.production`，替换数据库密码、JWT 密钥和外部服务密钥。
+3. 确认 `DATABASE_URL` 使用 Compose 中的 MySQL 服务名。
+4. 启动服务并检查迁移与健康状态。
+
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose logs --tail=200 backend
+curl http://115.190.218.167/api/auth/health
+```
+
+仓库中的 Nginx 配置只监听 80 端口；HTTPS 证书与 443 终止需要由服务器外层代理、负载均衡或额外 Nginx 配置负责。当前配置也不会把 `/docs` 和 `/openapi.json` 代理到后端，生产环境应通过内网访问文档，或显式增加受保护的代理规则。
+
+## 目录结构
+
+```text
+riji-backend/
+├── app/
+│   ├── main.py
+│   ├── config.py
+│   ├── database.py
+│   ├── dependencies.py
+│   ├── response.py
+│   ├── models/
+│   ├── auth/ ai/ chat/ diary/ material/
+│   ├── memory/ plaza/ avatar/ social/
+│   └── study/ anniversary/ location/ biography/
+├── alembic/
+├── tests/
+├── scripts/
+├── docs/
+├── deploy/nginx/default.conf
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+└── requirements.prod.txt
+```
+
+## 架构边界
+
+- 数据库访问使用同步 SQLAlchemy；长耗时 AI 调用应保持异步，避免阻塞请求线程。
+- 自动日记任务运行在 API 进程生命周期内，生产配置固定为单 worker。若扩展为多副本，应迁移到独立任务队列或调度器，避免重复执行。
+- `app/main.py` 当前允许任意 CORS 来源。正式公网环境应收紧到可信前端域名。
+- SQLite 适合本地开发；多用户生产环境使用 MySQL，并以 Alembic 作为唯一迁移依据。
+- 上传文件和本地向量目录通过 Docker volume 持久化；扩容到多实例前需要迁移到共享对象存储与共享向量服务。
+
+## License
+
+本仓库暂未声明独立许可证。若计划公开分发或接受外部贡献，请先补充明确的 License。
