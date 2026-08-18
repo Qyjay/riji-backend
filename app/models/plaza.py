@@ -35,11 +35,29 @@ class PlazaPost(Base):
     school_only = Column(Boolean, default=False)        # 仅本校可见
     created_at = Column(BigInteger, nullable=False)     # 毫秒时间戳
 
+    # 找人任务结构化机会字段
+    mission_id = Column(String, ForeignKey("social_missions.id"), nullable=True)
+    opportunity_mode = Column(String, nullable=True)    # short_term / long_term
+    category = Column(String, nullable=True)            # movie / murder_mystery / friendship...
+    start_at = Column(BigInteger, nullable=True)
+    end_at = Column(BigInteger, nullable=True)
+    apply_deadline = Column(BigInteger, nullable=True)
+    location_precision = Column(String, default="district")
+    slots_total = Column(Integer, nullable=True)
+    slots_remaining = Column(Integer, nullable=True)
+    allow_waitlist = Column(Boolean, default=False)
+    budget = Column(Text, default="{}")
+    requirements = Column(Text, default="[]")
+    opportunity_status = Column(String, default="open")
+    agent_probe_enabled = Column(Boolean, default=True)
+
     __table_args__ = (
         # 按类型查询索引
         Index("ix_plaza_posts_type", "type"),
         # 按用户查询索引
         Index("ix_plaza_posts_user_id", "user_id"),
+        Index("ix_plaza_posts_opportunity", "opportunity_mode", "opportunity_status"),
+        Index("ix_plaza_posts_start_at", "start_at"),
     )
 
 

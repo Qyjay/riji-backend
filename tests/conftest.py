@@ -77,10 +77,21 @@ _ensure_upload_router_registered_for_tests()
 # ==================== Fixtures ====================
 
 @pytest.fixture(autouse=True)
-def setup_database():
+def setup_database(monkeypatch):
     """每个测试前重建所有表，测试后删除（自动隔离）"""
     original_vector_enabled = settings.MEMORY_VECTOR_ENABLED
     settings.MEMORY_VECTOR_ENABLED = False
+    monkeypatch.setattr(settings, "MINIMAX_MOCK", True)
+    from app.ai import minimax_client, model_service
+
+    monkeypatch.setattr(
+        model_service,
+        "resolve_chat_client",
+        lambda _db, _user_id, model_id: (
+            minimax_client.get_minimax_client(),
+            str(model_id or "builtin:minimax"),
+        ),
+    )
     # 导入所有模型确保 Base 知道它们
     from app.models import user, diary, chat, study, social  # noqa
     from app.models import material, anniversary, user_profile, derivative  # noqa

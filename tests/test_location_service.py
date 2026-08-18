@@ -77,7 +77,13 @@ def test_location_context_queries_amap_and_uses_cache(monkeypatch, tmp_path):
     assert calls == [
         (
             "/geocode/regeo",
-            {"location": "117.200120,39.100120", "extensions": "base", "radius": 1000},
+            {
+                "location": "117.200120,39.100120",
+                "extensions": "all",
+                "radius": 500,
+                "roadlevel": 0,
+                "poitype": "",
+            },
         ),
         ("/weather/weatherInfo", {"city": "120104", "extensions": "all"}),
     ]

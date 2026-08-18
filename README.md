@@ -187,6 +187,41 @@ bgm_url = await client.generate_music(
 python -m pytest tests/ -v
 ```
 
+## 豆包实时语音分身
+
+实时语音由后端代理连接豆包全双工模型，前端不会接触火山 API Key。
+
+本地配置：
+
+```bash
+VOLC_REALTIME_VOICE_ENABLED=true
+VOLC_REALTIME_VOICE_API_KEY=<server-only-key>
+REALTIME_VOICE_PROVIDER=volcengine_duplex
+REALTIME_VOICE_MAX_GLOBAL_SESSIONS=5
+REALTIME_VOICE_MAX_INPUT_FRAMES=100
+REALTIME_VOICE_MAX_RECONNECTS=2
+```
+
+启动后验证：
+
+```bash
+curl http://127.0.0.1:8000/api/realtime-voice/health
+```
+
+`enabled` 和 `configured` 均为 `true` 后，已登录客户端可先请求
+`POST /api/realtime-voice/tickets`，再连接 `/ws/realtime-avatar`。
+
+部署约束：
+
+- H5 麦克风只允许 `localhost` 或 HTTPS，生产必须提供 HTTPS/WSS。
+- 当前 Ticket 防重放、全局并发和单用户会话限制是进程内实现，后端固定使用一个 Uvicorn Worker。
+- 扩展到多个后端 Worker 前，必须把 Ticket 和会话注册表迁移到 Redis。
+- Nginx `/ws/` 必须关闭代理缓冲，并将读写超时设置为 900 秒。
+- TLS 证书分别放置在 `deploy/nginx/ssl/avalin.cn.pem` 和
+  `deploy/nginx/ssl/avalin.cn.key`；该目录内容已被 Git 和 Docker 构建上下文排除。
+- 后端容器需要能访问 `openspeech.bytedance.com:443`。
+- 原始 PCM、Ticket、JWT、API Key 和完整私密记忆不会写入日志。
+
 ## 数据库迁移
 
 ```bash

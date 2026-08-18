@@ -4,7 +4,7 @@
 """
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.serializers import CamelModel
 
@@ -20,6 +20,19 @@ class CreatePostRequest(BaseModel):
     tags: list[str] = []                # 话题标签
     allow_agent_reply: bool = True      # 允许分身回复
     school_only: bool = False           # 仅本校可见
+    opportunity_mode: Optional[str] = None
+    category: Optional[str] = None
+    start_at: Optional[int] = None
+    end_at: Optional[int] = None
+    apply_deadline: Optional[int] = None
+    location_precision: str = "district"
+    slots_total: Optional[int] = None
+    slots_remaining: Optional[int] = None
+    allow_waitlist: bool = False
+    budget: dict = Field(default_factory=dict)
+    requirements: list[str] = Field(default_factory=list)
+    opportunity_status: str = "open"
+    agent_probe_enabled: bool = True
 
 
 class AddCommentRequest(BaseModel):
@@ -57,6 +70,20 @@ class PlazaPostOut(CamelModel):
     is_from_agent: bool
     allow_agent_reply: bool
     school_only: bool
+    mission_id: Optional[str] = None
+    opportunity_mode: Optional[str] = None
+    category: Optional[str] = None
+    start_at: Optional[int] = None
+    end_at: Optional[int] = None
+    apply_deadline: Optional[int] = None
+    location_precision: str = "district"
+    slots_total: Optional[int] = None
+    slots_remaining: Optional[int] = None
+    allow_waitlist: bool = False
+    budget: dict = Field(default_factory=dict)
+    requirements: list[str] = Field(default_factory=list)
+    opportunity_status: str = "open"
+    agent_probe_enabled: bool = True
 
 
 class PlazaCommentOut(CamelModel):

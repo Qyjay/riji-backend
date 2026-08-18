@@ -20,6 +20,73 @@ class GenerateDiaryRequest(BaseModel):
     allow_fallback: bool = False
 
 
+class BackfillPhoto(BaseModel):
+    """补写日记单张照片素材"""
+    model_config = ConfigDict(populate_by_name=True)
+
+    url: str                                                    # /upload 返回的图片 URL
+    taken_at: int = Field(alias="takenAt")                      # 拍摄时间毫秒时间戳
+    user_note: str = Field(default="", alias="userNote")        # 用户对该照片的文字/语音转写
+    location: Optional[str] = None                              # EXIF GPS 解析地址（可选）
+
+
+class BackfillDiaryRequest(BaseModel):
+    """补写历史日记请求（批量照片 + 用户素材 + 可选分身访谈）"""
+    model_config = ConfigDict(populate_by_name=True)
+
+    date: str                                                   # YYYY-MM-DD，受 (user_id, date) 唯一约束
+    photos: List[BackfillPhoto] = Field(default_factory=list)   # 至少 1 张，至多 9 张
+    interview_transcript: str = Field(default="", alias="interviewTranscript")
+    weather: Optional[str] = None                               # 用户手选或留空
+
+
+class BackfillInterviewMessage(BaseModel):
+    """AI 分身追问对话单条消息"""
+    role: str                                                   # "user" | "assistant"
+    content: str = ""
+
+
+class BackfillInterviewRequest(BaseModel):
+    """AI 分身追问素材扩展请求"""
+    model_config = ConfigDict(populate_by_name=True)
+
+    date: str
+    photos: List[BackfillPhoto] = Field(default_factory=list)
+    messages: List[BackfillInterviewMessage] = Field(default_factory=list)
+
+
+class BackfillQuestionsRequest(BaseModel):
+    """预生成访谈问题请求（基于已上传照片与回忆）"""
+    model_config = ConfigDict(populate_by_name=True)
+
+    date: str = ""
+    photos: List[BackfillPhoto] = Field(default_factory=list)
+
+
+class BackfillQuestionsOut(CamelModel):
+    """预生成访谈问题响应"""
+    questions: List[str] = []
+
+
+class BackfillResultItem(CamelModel):
+    """补写结果单条（对应一天的一篇日记）"""
+    date: str
+    diary_id: str
+    merged: bool = False        # 是否合并到已有日记
+
+
+class BackfillTaskOut(CamelModel):
+    """异步补写日记任务响应"""
+    task_id: str
+    date: str
+    status: str
+    diary_id: Optional[str] = None          # 主日记 ID（首篇，兼容旧前端）
+    results: List[BackfillResultItem] = []  # 多日期补写结果
+    error: str = ""
+    created_at: int
+    updated_at: int
+
+
 class DerivativeRequest(BaseModel):
     """生成衍生内容请求"""
     type: str = "share_card"    # "comic" | "novel" | "share_card"

@@ -158,6 +158,7 @@ class DecideAtoaResultOut(CamelModel):
     """POST /api/avatar/atoa/{id}/decide 响应"""
     outcome: str                              # "blocked" | "connected"
     social_match_id: Optional[str] = None    # connect 成功时
+    replacement_interaction_id: Optional[str] = None
 
 class AvatarMemoryOut(CamelModel):
     """记忆响应（camelCase 输出）"""
@@ -285,3 +286,17 @@ class TriggerSurfResultOut(CamelModel):
     surf_report: str = ""
     top10_session_id: Optional[str] = None
     skipped_reason: str = ""
+
+
+class SurfJobOut(CamelModel):
+    """异步冲浪任务状态。"""
+    id: str
+    status: str
+    trigger: str
+    attempts: int
+    result: dict
+    error_message: str = ""
+    created_at: int
+    started_at: Optional[int] = None
+    finished_at: Optional[int] = None
+    updated_at: int

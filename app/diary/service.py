@@ -1644,6 +1644,539 @@ async def run_derivative_task(task_id: str) -> None:
         db.close()
 
 
+# ==================== 补写日记（历史日记） ====================
+
+BACKFILL_TASK_TTL_MS = 60 * 60 * 1000
+_BACKFILL_TASKS: dict[str, dict] = {}
+BACKFILL_MAX_PHOTOS = 9
+BACKFILL_VISION_PROMPT = (
+    "请客观描述这张照片的画面内容：场景、人物、动作、物品、氛围与可见的时间或天气线索，"
+    "用一两句中文概括，不要臆造照片以外的信息。"
+)
+
+
+def _prune_backfill_tasks(now: Optional[int] = None) -> None:
+    current = now or _now_ms()
+    expired = [
+        task_id
+        for task_id, task in _BACKFILL_TASKS.items()
+        if current - int(task.get("updated_at") or task.get("created_at") or 0) > BACKFILL_TASK_TTL_MS
+    ]
+    for task_id in expired:
+        _BACKFILL_TASKS.pop(task_id, None)
+
+
+def _backfill_task_to_dict(task: dict) -> dict:
+    results = task.get("results") or []
+    primary = results[0]["diary_id"] if results else task.get("diary_id")
+    return {
+        "task_id": task.get("task_id"),
+        "date": task.get("date"),
+        "status": task.get("status"),
+        "diary_id": primary,
+        "results": results,
+        "error": task.get("error") or "",
+        "created_at": int(task.get("created_at") or 0),
+        "updated_at": int(task.get("updated_at") or task.get("created_at") or 0),
+    }
+
+
+def _backfill_period_label(ts: int) -> str:
+    """根据毫秒时间戳推断时间段标签。"""
+    try:
+        hour = datetime.fromtimestamp(ts / 1000).hour
+    except Exception:
+        return "某个时刻"
+    if 5 <= hour < 9:
+        return "清晨"
+    if 9 <= hour < 12:
+        return "上午"
+    if 12 <= hour < 14:
+        return "中午"
+    if 14 <= hour < 18:
+        return "下午"
+    if 18 <= hour < 20:
+        return "傍晚"
+    if 20 <= hour < 24:
+        return "夜晚"
+    return "深夜"
+
+
+def _normalize_backfill_payload(payload) -> dict:
+    """统一补写请求结构为内部 dict，兼容 pydantic 模型与 dict。"""
+    if hasattr(payload, "model_dump"):
+        data = payload.model_dump()
+    elif isinstance(payload, dict):
+        data = dict(payload)
+    else:
+        data = {}
+
+    date = str(data.get("date") or "").strip()
+    raw_photos = data.get("photos") or []
+    photos = []
+    for item in raw_photos:
+        if hasattr(item, "model_dump"):
+            item = item.model_dump()
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url:
+            continue
+        try:
+            taken_at = int(item.get("taken_at") or item.get("takenAt") or 0)
+        except Exception:
+            taken_at = 0
+        photos.append({
+            "url": url,
+            "taken_at": taken_at,
+            "user_note": str(item.get("user_note") or item.get("userNote") or "").strip(),
+            "location": str(item.get("location") or "").strip(),
+        })
+
+    return {
+        "date": date,
+        "photos": photos[:BACKFILL_MAX_PHOTOS],
+        "interview_transcript": str(data.get("interview_transcript") or data.get("interviewTranscript") or "").strip(),
+        "weather": str(data.get("weather") or "").strip(),
+    }
+
+
+def _build_backfill_materials_text(date: str, photos: List[dict], vision_hints: List[str], interview: str) -> str:
+    """把照片视觉理解、用户回忆与分身访谈拼装成 generate_diary 可用的素材文本。"""
+    lines: List[str] = [f"这是一篇{date}的补写日记，请基于以下回忆素材还原当天的真实经历。"]
+    for idx, photo in enumerate(photos):
+        ts = photo.get("taken_at") or 0
+        try:
+            time_label = datetime.fromtimestamp(ts / 1000).strftime("%H:%M") if ts else "时间未知"
+        except Exception:
+            time_label = "时间未知"
+        period = _backfill_period_label(ts) if ts else ""
+        vision = (vision_hints[idx] if idx < len(vision_hints) else "") or ""
+        note = photo.get("user_note") or ""
+        location = photo.get("location") or ""
+        parts = [f"{time_label}（{period}）照片{idx + 1}"]
+        if vision.strip():
+            parts.append(f"画面：{vision.strip()}")
+        if note.strip():
+            parts.append(f"我的回忆：{note.strip()}")
+        if location.strip():
+            parts.append(f"地点：{location.strip()}")
+        lines.append("- " + "；".join(parts))
+
+    if interview.strip():
+        lines.append("")
+        lines.append("【与 AI 分身回忆这一天的补充对话】")
+        lines.append(interview.strip())
+
+    return "\n".join(lines)
+
+
+def _date_from_ts(ts: int) -> str:
+    """毫秒时间戳 → YYYY-MM-DD。"""
+    try:
+        return datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+
+def _group_photos_by_date(photos: List[dict], fallback_date: str) -> dict:
+    """按拍摄日期分组照片；缺失拍摄时间的归入 fallback_date。"""
+    groups: dict = {}
+    for photo in photos:
+        ts = photo.get("taken_at") or 0
+        date = _date_from_ts(ts) if ts > 0 else (fallback_date or "")
+        if not date:
+            continue
+        groups.setdefault(date, []).append(photo)
+    return groups
+
+
+def validate_backfill_request(db: Session, user_id: str, payload) -> dict:
+    """校验补写请求并返回归一化数据。已有日记的日期将走合并逻辑，不再拒绝。"""
+    data = _normalize_backfill_payload(payload)
+    if not data["photos"]:
+        raise ApiException(code=PARAM_ERROR, message="请至少上传一张照片", status_code=400)
+    # date 缺省时由照片拍摄时间推导，最终在任务里按天分组。
+    if not data["date"]:
+        first_ts = next((p.get("taken_at") for p in data["photos"] if p.get("taken_at")), 0)
+        data["date"] = _date_from_ts(first_ts) if first_ts else datetime.now().strftime("%Y-%m-%d")
+    return data
+
+
+def start_backfill_task(db: Session, user_id: str, payload) -> dict:
+    """创建异步补写日记任务。"""
+    data = validate_backfill_request(db, user_id, payload)
+
+    _prune_backfill_tasks()
+    now = _now_ms()
+    task = {
+        "task_id": _uuid(),
+        "user_id": user_id,
+        "date": data["date"],
+        "payload": data,
+        "status": "running",
+        "diary_id": None,
+        "error": "",
+        "created_at": now,
+        "updated_at": now,
+    }
+    _BACKFILL_TASKS[task["task_id"]] = task
+    return _backfill_task_to_dict(task)
+
+
+def get_backfill_task(user_id: str, task_id: str) -> dict:
+    _prune_backfill_tasks()
+    task = _BACKFILL_TASKS.get(task_id)
+    if not task or task.get("user_id") != user_id:
+        raise ApiException(code=NOT_FOUND, message="补写任务不存在", status_code=404)
+    return _backfill_task_to_dict(task)
+
+
+async def _create_backfill_diary(
+    db: Session,
+    user_id: str,
+    date: str,
+    photos: List[dict],
+    interview_transcript: str = "",
+    weather: str = "",
+) -> dict:
+    """为指定日期执行补写：vision 批量理解 → 文本生成 → 写库/合并。
+
+    返回 {"date", "diary_id", "merged"}。
+    若该日期已存在日记，则把新内容追加到原日记（合并），并补充图片。
+    """
+    photos = sorted(photos, key=lambda p: p.get("taken_at") or 0)
+    image_urls = [p["url"] for p in photos]
+
+    from app.ai import service as ai_service
+
+    vision_hints: List[str] = []
+    try:
+        vision_hints = await ai_service.understand_images_batch(image_urls, prompt=BACKFILL_VISION_PROMPT)
+    except Exception:
+        vision_hints = []
+
+    materials_text = _build_backfill_materials_text(
+        date, photos, vision_hints, interview_transcript
+    )
+
+    user = db.query(User).filter(User.id == user_id).first()
+    user_style = ""
+    if user and user.style_tags:
+        try:
+            tags = json.loads(user.style_tags)
+            user_style = "、".join(tags) if tags else ""
+        except Exception:
+            pass
+
+    image_understandings = [str(h or "").strip() for h in vision_hints][: len(image_urls)]
+
+    # 历史时间：取当天最后一张照片的拍摄时间；若缺失则落到当天 23:59。
+    last_taken = max((p.get("taken_at") or 0) for p in photos) if photos else 0
+    if last_taken <= 0:
+        try:
+            day_dt = datetime.strptime(date, "%Y-%m-%d").replace(hour=23, minute=59)
+            last_taken = int(day_dt.timestamp() * 1000)
+        except Exception:
+            last_taken = _now_ms()
+
+    locations = [p.get("location") for p in photos if p.get("location")]
+    diary_location = locations[0] if locations else ""
+
+    # ── 合并分支：该日期已有日记，追加内容与图片 ──
+    existing = (
+        db.query(Diary)
+        .filter(Diary.user_id == user_id, Diary.date == date)
+        .first()
+    )
+    if existing:
+        from app.ai.minimax_client import get_minimax_client
+        client = get_minimax_client()
+        merge_materials = (
+            f"以下是这一天已有的日记正文：\n{existing.content or '（无）'}\n\n"
+            f"现在补充了这一天的更多照片与回忆，请把它们自然地融合进原日记，"
+            f"保持时间顺序与真实事实，输出整合后的完整日记：\n{materials_text}"
+        )
+        result = await client.generate_diary(
+            merge_materials,
+            weather=weather or existing.weather or "",
+            user_style=user_style,
+        )
+        merged_images = _decode(existing.images, []) + [u for u in image_urls if u not in _decode(existing.images, [])]
+        merged_understandings = _decode(existing.image_understandings, []) + image_understandings
+        existing.content = result.get("content", existing.content) or existing.content
+        existing.images = _encode(merged_images)
+        existing.image_understandings = _encode(merged_understandings)
+        if not existing.location and diary_location:
+            existing.location = diary_location
+        new_tags = result.get("ai_tags") or []
+        if isinstance(new_tags, list) and new_tags:
+            merged_tags = _decode(existing.tags, []) + [t for t in new_tags if t not in _decode(existing.tags, [])]
+            existing.tags = _encode(merged_tags)
+        existing.updated_at = _now_ms()
+        db.commit()
+        db.refresh(existing)
+        try:
+            from app.memory.ingestion import ingest_diary
+            ingest_diary(db, existing)
+        except Exception:
+            pass
+        return {"date": date, "diary_id": existing.id, "merged": True}
+
+    # ── 新建分支 ──
+    from app.ai.minimax_client import get_minimax_client
+    client = get_minimax_client()
+    result = await client.generate_diary(
+        materials_text,
+        weather=weather or "",
+        user_style=user_style,
+    )
+
+    emotion_summary = result.get("emotion_summary") or {}
+    if not isinstance(emotion_summary, dict):
+        emotion_summary = {}
+    dominant = str(emotion_summary.get("dominant") or "平静").strip() or "平静"
+    emotion_payload = {
+        "emoji": DEFAULT_EMOTION_EMOJI.get(dominant, "😐"),
+        "label": dominant,
+        "score": 0,
+    }
+    ai_tags = result.get("ai_tags") or []
+    if not isinstance(ai_tags, list):
+        ai_tags = []
+
+    d = Diary(
+        id=_uuid(),
+        user_id=user_id,
+        content=result.get("content", ""),
+        title=result.get("title", "补写日记"),
+        images=_encode(image_urls),
+        image_understandings=_encode(image_understandings),
+        emotion=_encode(emotion_payload),
+        tags=_encode(ai_tags),
+        weather=weather or "",
+        location=diary_location,
+        date=date,
+        material_ids=_encode([]),
+        emotion_summary=_encode(emotion_summary),
+        status="draft",
+        edit_count=0,
+        max_edits=DIARY_MAX_EDITS,
+        created_at=last_taken,
+        updated_at=_now_ms(),
+    )
+    db.add(d)
+    if user:
+        user.diary_count = (user.diary_count or 0) + 1
+    try:
+        db.commit()
+    except IntegrityError:
+        # 并发兜底：写库前被其它请求抢先创建，退回合并。
+        db.rollback()
+        existing = (
+            db.query(Diary)
+            .filter(Diary.user_id == user_id, Diary.date == date)
+            .first()
+        )
+        if existing:
+            return {"date": date, "diary_id": existing.id, "merged": True}
+        raise
+
+    db.refresh(d)
+
+    # AI 分身点评（与正常日记一致），失败不阻断。
+    try:
+        ai_comment = await _generate_ai_comment_for_diary(
+            db, user_id, d, [], materials_text=materials_text
+        )
+        if ai_comment:
+            d.ai_comment = ai_comment
+            d.updated_at = _now_ms()
+            db.commit()
+            db.refresh(d)
+    except Exception:
+        pass
+
+    try:
+        from app.memory.ingestion import ingest_diary
+        ingest_diary(db, d)
+    except Exception:
+        pass
+
+    return {"date": date, "diary_id": d.id, "merged": False}
+
+
+async def run_backfill_task(task_id: str) -> None:
+    """后台执行补写日记任务：按拍摄日期分组，逐日创建或合并。"""
+    from app.database import SessionLocal
+
+    task = _BACKFILL_TASKS.get(task_id)
+    if not task:
+        return
+
+    db = SessionLocal()
+    try:
+        data = task.get("payload") or {}
+        user_id = str(task.get("user_id") or "")
+        groups = _group_photos_by_date(data.get("photos") or [], data.get("date") or "")
+        if not groups:
+            raise ApiException(code=PARAM_ERROR, message="无有效照片", status_code=400)
+
+        results: List[dict] = []
+        # 访谈素材整体附加到第一天（按日期升序）。
+        interview = data.get("interview_transcript") or ""
+        for idx, date in enumerate(sorted(groups.keys())):
+            res = await _create_backfill_diary(
+                db,
+                user_id,
+                date,
+                groups[date],
+                interview_transcript=interview if idx == 0 else "",
+                weather=data.get("weather") or "",
+            )
+            results.append(res)
+
+        task["results"] = results
+        task["status"] = "done"
+        task["error"] = ""
+    except ApiException as exc:
+        task["status"] = "failed"
+        task["error"] = (exc.message or "补写失败")[:200]
+    except Exception as exc:
+        task["status"] = "failed"
+        task["error"] = str(exc)[:200] or "补写失败"
+    finally:
+        task["updated_at"] = _now_ms()
+        db.close()
+
+
+def _build_backfill_interview_prompt(data: dict) -> str:
+    """把照片素材整理成给分身访谈用的上下文。"""
+    photos = sorted(data["photos"], key=lambda p: p.get("taken_at") or 0)
+    lines = [f"用户正在补写 {data['date']} 的日记，已上传以下照片与回忆："]
+    for idx, photo in enumerate(photos):
+        note = photo.get("user_note") or "（暂无描述）"
+        lines.append(f"{idx + 1}. {note}")
+    return "\n".join(lines)
+
+
+BACKFILL_INTERVIEW_SYSTEM = (
+    "你是用户的 AI 分身，正在像老朋友一样帮 TA 回忆过去某一天的细节，以便补写日记。\n"
+    "你会看到：用户上传的照片对应的简单回忆。\n"
+    "你的任务：\n"
+    "1. 用温和、好奇、亲切的语气，针对模糊或缺失的细节追问，一次只问一个问题；\n"
+    "2. 优先问：在场的人、心情变化、关键对话、印象最深的瞬间、感官细节（声音/味道/天气）；\n"
+    "3. 收到回答后，先用一句话简短回应，再自然地问下一个问题，不要说教；\n"
+    "4. 当已经问满 5 个问题，或用户表示“够了/可以了/没有了”，输出一句温暖的收束语，并在末尾追加标记 [INTERVIEW_DONE]。"
+)
+
+
+async def stream_backfill_interview(user_id: str, payload):
+    """AI 分身追问素材扩展，SSE 流式返回分身的下一句话。"""
+    from app.ai.minimax_client import get_minimax_client
+
+    yield _sse_event({"type": "start"})
+
+    if hasattr(payload, "model_dump"):
+        data = payload.model_dump()
+    else:
+        data = dict(payload or {})
+
+    norm = _normalize_backfill_payload({
+        "date": data.get("date"),
+        "photos": data.get("photos") or [],
+    })
+    raw_messages = data.get("messages") or []
+    history = []
+    for msg in raw_messages:
+        if hasattr(msg, "model_dump"):
+            msg = msg.model_dump()
+        role = str((msg or {}).get("role") or "").strip()
+        content = str((msg or {}).get("content") or "").strip()
+        if role in {"user", "assistant"} and content:
+            history.append({"role": role, "content": content})
+
+    context = _build_backfill_interview_prompt(norm)
+    messages = [{"role": "user", "content": context}]
+    messages.extend(history)
+    if not history or history[-1]["role"] == "assistant":
+        # 首轮或需要分身继续提问时，补一句引导。
+        messages.append({"role": "user", "content": "请基于以上信息，向我提出下一个帮助回忆的问题。"})
+
+    client = get_minimax_client()
+    full_reply = ""
+    try:
+        try:
+            async for chunk in client.stream_chat(messages, system_prompt=BACKFILL_INTERVIEW_SYSTEM):
+                if not chunk:
+                    continue
+                full_reply += chunk
+                yield _sse_event({"type": "chunk", "text": chunk})
+        except Exception:
+            fallback = await client.chat_completion(messages, system_prompt=BACKFILL_INTERVIEW_SYSTEM)
+            full_reply = fallback or ""
+            if full_reply:
+                yield _sse_event({"type": "chunk", "text": full_reply})
+
+        done = "[INTERVIEW_DONE]" in full_reply
+        clean_reply = full_reply.replace("[INTERVIEW_DONE]", "").strip()
+        yield _sse_event({"type": "done", "text": clean_reply, "finished": done})
+    except Exception as exc:
+        yield _sse_event({"type": "error", "message": str(exc)})
+
+
+BACKFILL_QUESTIONS_SYSTEM = (
+    "你是用户的 AI 分身，正在帮 TA 回忆过去某一天的细节，以便补写日记。\n"
+    "请根据用户上传的照片与简单回忆，一次性设计 3~5 个温和、具体、便于回答的问题，"
+    "帮助 TA 把这一天回忆得更完整。\n"
+    "要求：\n"
+    "1. 问题要具体、贴合照片内容，避免空泛（如不要只问“当时心情如何”）；\n"
+    "2. 覆盖：在场的人、关键事件、心情变化、印象最深的瞬间、感官细节（声音/味道/天气）；\n"
+    "3. 每个问题一句话，口语化、亲切；\n"
+    "4. 严格只输出 JSON 数组，形如 [\"问题1\",\"问题2\",\"问题3\"]，不要输出任何解释或 markdown。"
+)
+
+BACKFILL_DEFAULT_QUESTIONS = [
+    "这一天你主要和谁在一起？当时的氛围是怎样的？",
+    "照片里发生的事，让你印象最深的瞬间是什么？",
+    "那天你的心情有什么变化吗？是什么让你有这种感觉？",
+    "有没有什么细节（一句话、一种味道、一段声音）现在还记得？",
+]
+
+
+async def generate_backfill_questions(user_id: str, payload) -> dict:
+    """根据照片与回忆，一次性预生成 3~5 个访谈问题，供前端问卷式收集。"""
+    from app.ai.minimax_client import get_minimax_client
+
+    norm = _normalize_backfill_payload(payload)
+    if not norm["photos"]:
+        return {"questions": BACKFILL_DEFAULT_QUESTIONS[:3]}
+
+    context = _build_backfill_interview_prompt(norm)
+    messages = [{"role": "user", "content": context + "\n\n请为我设计帮助回忆这一天的问题。"}]
+    client = get_minimax_client()
+    try:
+        resp = await client.chat_completion(
+            messages, system_prompt=BACKFILL_QUESTIONS_SYSTEM, temperature=0.7
+        )
+        raw = (resp or "").strip()
+        questions: List[str] = []
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            match = re.search(r"\[[\s\S]*\]", raw)
+            parsed = json.loads(match.group(0)) if match else []
+        if isinstance(parsed, list):
+            questions = [str(q).strip() for q in parsed if str(q).strip()]
+        questions = questions[:5]
+        if not questions:
+            questions = BACKFILL_DEFAULT_QUESTIONS[:4]
+        return {"questions": questions}
+    except Exception:
+        return {"questions": BACKFILL_DEFAULT_QUESTIONS[:4]}
+
+
+
 def get_today_summary(db: Session, user_id: str, date: str) -> dict:
     """今日概要：素材数 + 素材列表 + 是否已生成日记"""
     materials_query = db.query(RawMaterial).filter(RawMaterial.user_id == user_id)

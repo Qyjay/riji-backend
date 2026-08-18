@@ -127,6 +127,8 @@ from app.avatar.router import router as avatar_router
 from app.memory.router import router as memory_router
 from app.location.router import router as location_router
 from app.biography.router import router as biography_router
+from app.realtime_voice.router import api_router as realtime_voice_api_router
+from app.realtime_voice.router import ws_router as realtime_voice_ws_router
 
 app.include_router(auth_router, prefix="/api")
 app.include_router(upload_router, prefix="/api")
@@ -144,7 +146,9 @@ app.include_router(avatar_router, prefix="/api")
 app.include_router(memory_router, prefix="/api")
 app.include_router(location_router, prefix="/api")
 app.include_router(biography_router, prefix="/api")
+app.include_router(realtime_voice_api_router, prefix="/api")
 app.include_router(chat_ws_router)  # WebSocket 路由（/ws/chat）
+app.include_router(realtime_voice_ws_router)
 
 
 @app.get("/")

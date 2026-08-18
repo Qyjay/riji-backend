@@ -35,6 +35,31 @@ def get_other_user_id(match: Match, current_user_id: str) -> str:
     return match.target_id if match.user_id == current_user_id else match.user_id
 
 
+def _match_reason(raw_report: str) -> str:
+    """将历史 JSON 匹配报告转换为列表可展示的摘要。"""
+    text = str(raw_report or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return text
+    if isinstance(parsed, str):
+        return parsed.strip()
+    if not isinstance(parsed, dict):
+        return text
+
+    analysis = str(parsed.get("analysis") or "").strip()
+    if analysis:
+        return analysis
+    common_points = parsed.get("common_points", parsed.get("commonPoints", []))
+    if isinstance(common_points, list):
+        points = [str(item).strip() for item in common_points if str(item).strip()]
+        if points:
+            return f"共同点：{'、'.join(points[:3])}"
+    return ""
+
+
 def match_to_out(match: Match, current_user_id: str, db: Session) -> dict:
     """匹配记录转前端格式（需要 JOIN 用户信息）"""
     other_id = get_other_user_id(match, current_user_id)
@@ -49,6 +74,8 @@ def match_to_out(match: Match, current_user_id: str, db: Session) -> dict:
         "matched_at": match.created_at,
         "status": match.status or "pending",
         "match_type": match.match_type or "long_term",
+        "request_direction": "outgoing" if match.user_id == current_user_id else "incoming",
+        "reason": _match_reason(match.match_report or ""),
     }
 
 
@@ -337,3 +364,74 @@ def respond_buddy(db: Session, user_id: str, request_id: str, accept: bool) -> N
         pass  # 不影响主流程
 
     db.commit()
+
+
+def _activity_participant(user: Optional[User], *, organizer_id: str) -> dict:
+    if not user:
+        return {
+            "id": "",
+            "name": "用户",
+            "avatar": "",
+            "school": "",
+            "is_organizer": False,
+        }
+    return {
+        "id": user.id,
+        "name": user.name or user.username,
+        "avatar": user.avatar or "",
+        "school": user.school or "",
+        "is_organizer": user.id == organizer_id,
+    }
+
+
+def get_activity_room(db: Session, user_id: str, match_id: str) -> dict:
+    """返回已由双方确认的短期任务房间。"""
+    from app.models.social import SocialMission
+
+    match = _get_match_for_user(db, match_id, user_id)
+    if match.status != "accepted":
+        raise ApiException(code=PARAM_ERROR, message="双方确认后才能进入活动房间", status_code=400)
+    if not match.mission_id:
+        raise ApiException(code=NOT_FOUND, message="该关系未关联活动任务", status_code=404)
+
+    mission = db.query(SocialMission).filter(SocialMission.id == match.mission_id).first()
+    if not mission or mission.mode != "short_term":
+        raise ApiException(code=NOT_FOUND, message="活动任务不存在", status_code=404)
+
+    organizer_id = mission.user_id
+    user_a = db.query(User).filter(User.id == match.user_id).first()
+    user_b = db.query(User).filter(User.id == match.target_id).first()
+    status = "completed" if mission.status == "completed" else "active"
+    return {
+        "match_id": match.id,
+        "mission_id": mission.id,
+        "title": mission.title,
+        "status": status,
+        "time_window": _decode(mission.time_window, {}),
+        "location": _decode(mission.location, {}),
+        "budget": _decode(mission.budget, {}),
+        "linked_post_id": mission.linked_post_id,
+        "participants": [
+            _activity_participant(user_a, organizer_id=organizer_id),
+            _activity_participant(user_b, organizer_id=organizer_id),
+        ],
+        "created_at": match.created_at,
+        "completed_at": mission.updated_at if status == "completed" else None,
+    }
+
+
+def complete_activity_room(db: Session, user_id: str, match_id: str) -> dict:
+    """由任一参与者确认活动结束，并停止任务继续推荐。"""
+    from app.models.social import SocialMission
+
+    match = _get_match_for_user(db, match_id, user_id)
+    if match.status != "accepted" or not match.mission_id:
+        raise ApiException(code=PARAM_ERROR, message="当前活动不能标记为完成", status_code=400)
+    mission = db.query(SocialMission).filter(SocialMission.id == match.mission_id).first()
+    if not mission or mission.mode != "short_term":
+        raise ApiException(code=NOT_FOUND, message="活动任务不存在", status_code=404)
+
+    mission.status = "completed"
+    mission.updated_at = _now_ms()
+    db.commit()
+    return get_activity_room(db, user_id, match_id)

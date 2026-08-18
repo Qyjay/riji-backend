@@ -39,6 +39,12 @@ memory_store/
 # Build artifacts
 build/
 dist/
+deploy/frontend/
+deploy/frontend.next-*/
+
+# Deployment certificates
+deploy/nginx/ssl/*
+!deploy/nginx/ssl/.gitignore
 
 # Editor / OS noise
 .DS_Store

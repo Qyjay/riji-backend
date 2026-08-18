@@ -8,11 +8,17 @@ __pycache__
 *.pyd
 *.db
 .env
+.env.*
+!.env.example
+!.env.production.example
 .runlogs
 ._*
 **/._*
 uploads
 memory_store
 runtime
+deploy/frontend
+deploy/frontend.next-*
+deploy/nginx/ssl
 tests
 docs
