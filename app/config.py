@@ -116,6 +116,32 @@ class Settings(BaseSettings):
     MEMORY_CHUNK_OVERLAP: int = 100
     MEMORY_FAIL_OPEN: bool = True
 
+    # AtoA 决赛链路：限制真实模型调用并由独立 worker 串行处理冲浪任务
+    ATOA_LIVE_CANDIDATES: int = 3
+    ATOA_AI_MAX_RETRIES: int = 2
+    ATOA_AI_RETRY_BASE_SEC: float = 1.0
+    ATOA_WORKER_POLL_SEC: float = 2.0
+    ATOA_JOB_MAX_ATTEMPTS: int = 3
+
+    # 豆包实时语音模型 3.0（全双工）
+    VOLC_REALTIME_VOICE_ENABLED: bool = False
+    VOLC_REALTIME_VOICE_API_KEY: str = ""
+    VOLC_REALTIME_VOICE_URL: str = "wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue"
+    VOLC_REALTIME_VOICE_MODEL: str = "1.2.6.1"
+    VOLC_REALTIME_VOICE_DEFAULT_VOICE: str = "zh_female_xiaohe_jupiter_bigtts"
+    REALTIME_VOICE_MAX_GLOBAL_SESSIONS: int = 5
+    REALTIME_VOICE_MAX_SESSION_SEC: int = 1200
+    REALTIME_VOICE_IDLE_CLOSE_SEC: int = 540
+    REALTIME_VOICE_TOOL_TIMEOUT_SEC: int = 8
+    REALTIME_VOICE_CONFIRM_TTL_SEC: int = 120
+    REALTIME_VOICE_TICKET_TTL_SEC: int = 60
+    REALTIME_VOICE_STORE_TRANSCRIPT: bool = True
+    REALTIME_VOICE_STORE_AUDIO: bool = False
+    REALTIME_VOICE_MAX_TOOL_RESULT_CHARS: int = 4000
+    REALTIME_VOICE_MAX_INPUT_FRAMES: int = 100
+    REALTIME_VOICE_MAX_RECONNECTS: int = 2
+    REALTIME_VOICE_PROVIDER: str = "volcengine_duplex"
+
     # 阿里云百炼 / 通义千问 Embedding
     DASHSCOPE_API_KEY: str = ""
     DASHSCOPE_EMBEDDING_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
