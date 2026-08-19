@@ -201,6 +201,10 @@ def _normalize_address_component(component: Any) -> dict:
             value = value[0] if value else ""
         return str(value or "").strip()
 
+    street_info = component.get("streetNumber")
+    if not isinstance(street_info, dict):
+        street_info = {}
+
     return {
         "province": first_text(component.get("province")),
         "city": first_text(component.get("city")),
@@ -208,7 +212,56 @@ def _normalize_address_component(component: Any) -> dict:
         "township": first_text(component.get("township")),
         "adcode": first_text(component.get("adcode")),
         "citycode": first_text(component.get("citycode")),
+        "street": first_text(street_info.get("street")),
+        "streetNumber": first_text(street_info.get("number")),
     }
+
+
+def _extract_poi_name(regeocode: Any) -> str:
+    if not isinstance(regeocode, dict):
+        return ""
+    pois = regeocode.get("pois")
+    if isinstance(pois, list):
+        for item in pois:
+            if isinstance(item, dict):
+                name = str(item.get("name") or "").strip()
+                if name:
+                    return name
+    return ""
+
+
+def _extract_aoi_name(regeocode: Any) -> str:
+    if not isinstance(regeocode, dict):
+        return ""
+    aois = regeocode.get("aois")
+    if isinstance(aois, list):
+        for item in aois:
+            if isinstance(item, dict):
+                name = str(item.get("name") or "").strip()
+                if name:
+                    return name
+    return ""
+
+
+def _build_detailed_address(component: dict, poi: str, aoi: str, formatted: str) -> str:
+    district = component.get("district") or ""
+    township = component.get("township") or ""
+    street = component.get("street") or ""
+    street_number = component.get("streetNumber") or ""
+    street_part = f"{street}{street_number}" if street else ""
+
+    landmark = poi or aoi
+    if landmark:
+        prefix = " · ".join(part for part in [district, township] if part)
+        if prefix:
+            return f"{prefix} · {landmark}"
+        return landmark
+    if street_part:
+        prefix = " · ".join(part for part in [district, township] if part)
+        if prefix:
+            return f"{prefix} · {street_part}"
+        return street_part
+    return formatted
 
 
 async def _request_amap(path: str, params: dict) -> dict:
@@ -247,8 +300,10 @@ async def _reverse_geocode(lat: float, lng: float) -> dict:
         "/geocode/regeo",
         {
             "location": f"{lng:.6f},{lat:.6f}",
-            "extensions": "base",
-            "radius": 1000,
+            "extensions": "all",
+            "radius": 500,
+            "roadlevel": 0,
+            "poitype": "",
         },
     )
     regeocode = data.get("regeocode") if isinstance(data, dict) else None
@@ -257,10 +312,16 @@ async def _reverse_geocode(lat: float, lng: float) -> dict:
 
     component = _normalize_address_component(regeocode.get("addressComponent"))
     address = str(regeocode.get("formatted_address") or "").strip()
+    poi = _extract_poi_name(regeocode)
+    aoi = _extract_aoi_name(regeocode)
+    detailed = _build_detailed_address(component, poi, aoi, address)
     return {
         "visible": bool(address or component.get("adcode")),
         "limited": False,
         "address": address,
+        "detailedAddress": detailed,
+        "poi": poi,
+        "aoi": aoi,
         **component,
     }
 
@@ -363,6 +424,11 @@ async def get_location_context(lat: Any, lng: Any) -> dict:
         "locationVisible": bool(location.get("visible")),
         "weatherVisible": bool(weather.get("visible")),
         "address": str(location.get("address") or ""),
+        "detailedAddress": str(location.get("detailedAddress") or ""),
+        "poi": str(location.get("poi") or ""),
+        "aoi": str(location.get("aoi") or ""),
+        "street": str(location.get("street") or ""),
+        "streetNumber": str(location.get("streetNumber") or ""),
         "province": str(location.get("province") or ""),
         "city": str(location.get("city") or ""),
         "district": str(location.get("district") or ""),
@@ -412,6 +478,11 @@ async def get_ip_location_context(ip: str) -> dict:
         "locationVisible": bool(location.get("visible")),
         "weatherVisible": bool(weather.get("visible")),
         "address": str(location.get("address") or ""),
+        "detailedAddress": str(location.get("address") or ""),
+        "poi": "",
+        "aoi": "",
+        "street": "",
+        "streetNumber": "",
         "province": str(location.get("province") or ""),
         "city": str(location.get("city") or ""),
         "district": str(location.get("district") or ""),

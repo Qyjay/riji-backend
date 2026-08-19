@@ -7,8 +7,13 @@ import sys
 import os
 from logging.config import fileConfig
 
+import sqlalchemy as sa
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.schema import CreateColumn
 from alembic import context
+from alembic.ddl import base as alembic_ddl
+from alembic.ddl.base import AddColumn
 
 # 将项目根目录加入 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -33,6 +38,75 @@ if config.config_file_name is not None:
 
 # 目标 metadata（用于 autogenerate）
 target_metadata = Base.metadata
+
+
+@compiles(CreateColumn, "mysql")
+def compile_mysql_text_default(element, compiler, **kwargs):
+    """MySQL 的 TEXT/JSON 默认值必须使用表达式默认值语法。"""
+    column = element.element
+    server_default = column.server_default
+    text_like = isinstance(
+        column.type,
+        (sa.Text, sa.JSON, sa.LargeBinary),
+    )
+    if not text_like or server_default is None:
+        return compiler.visit_create_column(element, **kwargs)
+
+    raw_default = str(server_default.arg)
+    if raw_default.startswith("(") and raw_default.endswith(")"):
+        return compiler.visit_create_column(element, **kwargs)
+
+    literal = compiler.sql_compiler.render_literal_value(raw_default, sa.String())
+    column.server_default = sa.DefaultClause(sa.text(f"({literal})"))
+    try:
+        return compiler.visit_create_column(element, **kwargs)
+    finally:
+        column.server_default = server_default
+
+
+@compiles(AddColumn, "mysql")
+def compile_mysql_add_text_column(element, compiler, **kwargs):
+    """ALTER TABLE ADD COLUMN 同样使用 MySQL 文本表达式默认值。"""
+    column = element.column
+    server_default = column.server_default
+    text_like = isinstance(
+        column.type,
+        (sa.Text, sa.JSON, sa.LargeBinary),
+    )
+    if not text_like or server_default is None:
+        return "%s %s" % (
+            alembic_ddl.alter_table(
+                compiler,
+                element.table_name,
+                element.schema,
+            ),
+            alembic_ddl.add_column(compiler, column, **kwargs),
+        )
+
+    raw_default = str(server_default.arg)
+    if raw_default.startswith("(") and raw_default.endswith(")"):
+        return "%s %s" % (
+            alembic_ddl.alter_table(
+                compiler,
+                element.table_name,
+                element.schema,
+            ),
+            alembic_ddl.add_column(compiler, column, **kwargs),
+        )
+
+    literal = compiler.sql_compiler.render_literal_value(raw_default, sa.String())
+    column.server_default = sa.DefaultClause(sa.text(f"({literal})"))
+    try:
+        return "%s %s" % (
+            alembic_ddl.alter_table(
+                compiler,
+                element.table_name,
+                element.schema,
+            ),
+            alembic_ddl.add_column(compiler, column, **kwargs),
+        )
+    finally:
+        column.server_default = server_default
 
 
 def run_migrations_offline() -> None:

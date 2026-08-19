@@ -43,11 +43,64 @@ async def generate_diary(
     return success(result)
 
 
+@router.post("/backfill-task", summary="创建异步补写日记任务")
+async def create_backfill_task(
+    body: schemas.BackfillDiaryRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """根据批量照片素材异步补写一篇历史日记，返回任务 ID 供前端轮询。"""
+    result = service.start_backfill_task(db, current_user.id, body)
+    background_tasks.add_task(service.run_backfill_task, result["task_id"])
+    out = schemas.BackfillTaskOut(**result)
+    return success(out.model_dump(by_alias=True))
+
+
+@router.get("/backfill-task/{task_id}", summary="查询补写日记任务")
+async def get_backfill_task(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """查询异步补写日记任务状态。"""
+    result = service.get_backfill_task(current_user.id, task_id)
+    out = schemas.BackfillTaskOut(**result)
+    return success(out.model_dump(by_alias=True))
+
+
+@router.post("/backfill-interview/stream", summary="AI 分身追问扩展补写素材")
+async def stream_backfill_interview(
+    body: schemas.BackfillInterviewRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """AI 分身基于已上传照片与回忆，流式追问帮助用户补充细节。"""
+    return StreamingResponse(
+        service.stream_backfill_interview(current_user.id, body),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/backfill-questions", summary="预生成补写访谈问题")
+async def generate_backfill_questions(
+    body: schemas.BackfillQuestionsRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """根据已上传照片与回忆，一次性预生成 3~5 个访谈问题，供问卷式收集。"""
+    result = await service.generate_backfill_questions(current_user.id, body)
+    out = schemas.BackfillQuestionsOut(**result)
+    return success(out.model_dump(by_alias=True))
+
+
 @router.get("", summary="日记列表")
 def list_diaries(
     page: int = Query(1, ge=1, description="页码"),
-    page_size: int = Query(10, ge=1, le=50, description="每页条数（snake_case）"),
-    pageSize: int = Query(None, ge=1, le=50, description="每页条数（camelCase）"),
+    page_size: int = Query(10, ge=1, le=366, description="每页条数（snake_case）"),
+    pageSize: int = Query(None, ge=1, le=366, description="每页条数（camelCase）"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
