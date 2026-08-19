@@ -269,7 +269,8 @@ def _build_ai_comment_system_prompt(db: Session, user_id: str, query: str) -> st
         "2. 可以自然利用相关长期记忆，但不要暴露“我检索到记忆”等系统过程。\n"
         "3. 点评必须贴合当天日记内容，关注用户的感受、成长、关系或选择。\n"
         "4. 语气克制、亲近、真诚，不说教，不夸张治愈，不给空泛鸡汤。\n"
-        "5. 不虚构日记没有出现的事实，不做医学、心理诊断。\n\n"
+        "5. 不虚构日记没有出现的事实，不做医学、心理诊断。\n"
+        "6. 不得编造具体年月日、星期或节日；如需提及日期，只能使用上下文给出的日记日期。\n\n"
         "【输出要求】\n"
         "只输出一句中文点评，20 到 60 字；不要 JSON；不要引号；不要 Markdown；不要换行。"
     )
@@ -317,7 +318,7 @@ def _build_ai_comment_prompt_payload(
     system_prompt = _build_ai_comment_system_prompt(db, user_id, query)
     user_prompt = (
         "请为下面这篇日记写一句 AI 分身点评。\n\n"
-        f"- 日期：{diary.date or '未知'}\n"
+        f"- 日期：{diary.date or '未提供（不要提及任何具体日期）'}\n"
         f"- 标题：{diary.title or '无标题'}\n"
         f"- 天气：{diary.weather or '未记录'}\n"
         f"- 主要情绪：{emotion_summary.get('dominant') or '未识别'}\n"
@@ -1128,6 +1129,7 @@ async def generate_diary(
         weather=normalized_weather,
         user_style=user_style,
         daily_emotion_summary=emotion_summary_for_prompt,
+        diary_date=date,
     )
 
     now = _now_ms()
@@ -1901,6 +1903,7 @@ async def _create_backfill_diary(
             merge_materials,
             weather=weather or existing.weather or "",
             user_style=user_style,
+            diary_date=date,
         )
         merged_images = _decode(existing.images, []) + [u for u in image_urls if u not in _decode(existing.images, [])]
         merged_understandings = _decode(existing.image_understandings, []) + image_understandings
@@ -1930,6 +1933,7 @@ async def _create_backfill_diary(
         materials_text,
         weather=weather or "",
         user_style=user_style,
+        diary_date=date,
     )
 
     emotion_summary = result.get("emotion_summary") or {}

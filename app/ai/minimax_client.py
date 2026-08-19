@@ -17,6 +17,7 @@ API 文档：https://platform.minimaxi.com/docs/guides/models-intro
 import asyncio
 import base64
 from contextlib import asynccontextmanager
+from datetime import datetime
 import hashlib
 import io
 import inspect
@@ -1847,6 +1848,21 @@ class MiniMaxClient:
             "这段交流帮我把重点想法重新排了序，也让我更清楚下一步该怎么推进。"
         )
 
+    @staticmethod
+    def _build_diary_date_context(diary_date: str) -> str:
+        """把日记归属日期整理成提示词上下文，避免模型自行推断年月日。"""
+        raw = str(diary_date or "").strip()
+        if not raw:
+            return "未提供日记日期（严禁在正文出现任何具体年月日、星期或节日）"
+
+        try:
+            day = datetime.strptime(raw[:10], "%Y-%m-%d")
+        except Exception:
+            return f"{raw}（正文如需提及日期，只能使用该日期）"
+
+        weekday = "星期" + "一二三四五六日"[day.weekday()]
+        return f"{day.strftime('%Y年%m月%d日')} {weekday}（正文如需提及日期，只能使用该日期）"
+
     async def generate_diary(
         self,
         materials_text: str,
@@ -1854,6 +1870,7 @@ class MiniMaxClient:
         special_date: str = "",
         user_style: str = "",
         daily_emotion_summary: Optional[dict] = None,
+        diary_date: str = "",
     ) -> dict:
         """
         根据素材生成日记，返回 {title, content, emotion_summary, ai_tags}
@@ -1918,6 +1935,7 @@ class MiniMaxClient:
         weather_context = weather_hint if weather_hint else "未提供天气信息（严禁臆造具体天气）"
         special_context = special_hint if special_hint else "无"
         dominant_context = dominant if dominant else "未识别"
+        date_context = self._build_diary_date_context(diary_date)
 
         system = (
             "你是“日迹”应用的日记整理助手，负责把用户当天素材整理成一篇完整、真实、连贯的中文日记。\n\n"
@@ -1931,8 +1949,12 @@ class MiniMaxClient:
             "2. 不得虚构素材中不存在的人、事、地点、时间、结论。\n"
             "3. 不得遗漏核心素材；每条素材都要被合理吸收进叙事。\n"
             "4. 语言要自然，有画面感，但保持事实忠实。\n"
-            "5. 正文不少于 300 字。\n\n"
-            "6. 若素材中包含“对话记录”，必须改写成第一人称经历（我和AI聊了什么、我怎么想），"
+            "5. 严禁编造任何具体年月日、星期、节日或纪念日；素材里的 [HH:MM] 只是当天时刻，"
+            "不能据此推断是哪一天。\n"
+            "6. 正文如需提及日期或星期，只能使用上下文给出的“日记日期”；日期未提供时，"
+            "只用“今天/早上/傍晚”等相对时间表述。\n"
+            "7. 正文不少于 300 字。\n\n"
+            "8. 若素材中包含“对话记录”，必须改写成第一人称经历（我和AI聊了什么、我怎么想），"
             "不得直接复制“用户: / AI:”对话原文。\n\n"
             "【输出格式】\n"
             "仅输出合法 JSON，不要输出 markdown 代码块，不要输出任何解释文字。\n"
@@ -1942,6 +1964,7 @@ class MiniMaxClient:
 
         user_prompt = (
             "请根据以下上下文生成今日日记：\n\n"
+            f"- 日记日期：{date_context}\n"
             f"- 用户偏好风格：{style_hint}\n"
             f"- 天气信息：{weather_context}\n"
             f"- 特殊日期：{special_context}\n"
