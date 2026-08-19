@@ -245,4 +245,3 @@ async def create_derivative_task(
     background_tasks.add_task(service.run_derivative_task, result["task_id"])
     out = schemas.DerivativeTaskOut(**result)
     return success(out.model_dump(by_alias=True))
-

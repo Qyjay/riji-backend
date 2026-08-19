@@ -83,4 +83,3 @@ class RealtimeVoiceMetrics:
 
 
 voice_metrics = RealtimeVoiceMetrics()
-

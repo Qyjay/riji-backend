@@ -37,4 +37,3 @@ class RealtimeSessionRegistry:
 
 
 session_registry = RealtimeSessionRegistry()
-

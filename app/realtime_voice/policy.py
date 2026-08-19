@@ -20,4 +20,3 @@ def ensure_tool_can_be_exposed(risk: ToolRisk) -> None:
 
 def tool_requires_confirmation(risk: ToolRisk) -> bool:
     return risk == ToolRisk.R2
-

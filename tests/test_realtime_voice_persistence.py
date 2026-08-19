@@ -62,4 +62,3 @@ def test_voice_transcript_is_idempotent_and_audio_is_not_stored(client, db):
     assert refreshed.status == "closed"
     assert refreshed.close_reason == "user"
     assert chat.status == "closed"
-

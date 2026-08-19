@@ -49,4 +49,3 @@ def test_tool_call_is_idempotent_by_provider_call_id(client, db):
     assert len(rows) == 1
     assert rows[0].status == "succeeded"
     assert rows[0].finished_at is not None
-

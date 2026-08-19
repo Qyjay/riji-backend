@@ -106,4 +106,3 @@ def consume_ticket(token: str) -> dict:
     normalize_voice(str(payload.get("voice") or ""))
     ticket_store.consume(jti, exp)
     return payload
-

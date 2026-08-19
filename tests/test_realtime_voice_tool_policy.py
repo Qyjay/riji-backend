@@ -92,4 +92,3 @@ def test_tool_arguments_are_strict_and_unknown_tools_are_rejected(client, db):
     rows = db.query(RealtimeToolCall).order_by(RealtimeToolCall.created_at).all()
     assert [row.status for row in rows] == ["failed", "rejected"]
     assert rows[1].risk_level == "R3"
-

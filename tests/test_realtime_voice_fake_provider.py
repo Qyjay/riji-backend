@@ -37,4 +37,3 @@ def test_fake_provider_records_client_events_and_streams_script():
         assert provider.tool_results[0].call_id == "call-1"
 
     asyncio.run(run())
-

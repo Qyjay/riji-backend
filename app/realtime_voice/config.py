@@ -112,4 +112,3 @@ def create_provider() -> RealtimeVoiceProvider:
         api_key=settings.VOLC_REALTIME_VOICE_API_KEY,
         url=settings.VOLC_REALTIME_VOICE_URL,
     )
-

@@ -196,4 +196,3 @@ class ConfirmationManager:
         record.decision = decision
         record.channel = channel
         return record, decision == "approve"
-

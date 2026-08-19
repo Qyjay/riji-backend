@@ -68,4 +68,3 @@ def test_server_event_has_stable_envelope():
         recoverable=True,
     )
     assert err["recoverable"] is True
-

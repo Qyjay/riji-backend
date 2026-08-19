@@ -1,7 +1,7 @@
 # Avalin 实时语音分身后端技术规格
 
-> 状态：Draft v1.0  
-> 范围：豆包实时语音模型 3.0 全双工接入、记忆 RAG、找人任务、工具确认与审计  
+> 状态：Draft v1.0
+> 范围：豆包实时语音模型 3.0 全双工接入、记忆 RAG、找人任务、工具确认与审计
 > 依赖文档：
 > - [豆包实时语音模型 3.0 全双工 API](https://docs.volcengine.com/docs/6561/2549778?lang=zh)
 > - [全双工接入必读](https://docs.volcengine.com/docs/6561/2549732?lang=zh)

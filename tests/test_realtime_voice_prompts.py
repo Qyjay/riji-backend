@@ -86,4 +86,3 @@ def test_provider_config_injects_profile_boundaries_and_six_paired_rounds(client
         "user",
         "assistant",
     ] * 6
-

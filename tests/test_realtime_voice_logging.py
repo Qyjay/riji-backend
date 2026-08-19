@@ -36,4 +36,3 @@ def test_structured_voice_log_redacts_secrets_audio_and_private_content(caplog):
         )
     assert "voice-log" in caplog.text
     assert "Bearer secret" not in caplog.text
-

@@ -1,7 +1,7 @@
 # Avalin 实时语音分身实施 Todo
 
-> 使用方式：每次只把一个 Task Card 交给 AI 实现。  
-> 后端规格：`docs/REALTIME_VOICE_AVATAR_SPEC.md`  
+> 使用方式：每次只把一个 Task Card 交给 AI 实现。
+> 后端规格：`docs/REALTIME_VOICE_AVATAR_SPEC.md`
 > 前端规格：`../../riji-frontend/docs/REALTIME_VOICE_AVATAR_FRONTEND_SPEC.md`
 
 ---
@@ -64,9 +64,9 @@ cd riji-frontend && npm run type-check && npm test && npm run build:h5
 
 ## BE-001 配置与 Health API
 
-**优先级**：P0  
-**依赖**：无  
-**Spec**：后端 §6、§18  
+**优先级**：P0
+**依赖**：无
+**Spec**：后端 §6、§18
 
 - [x] 在 `app/config.py` 增加全部实时语音配置。
 - [x] 更新 `.env.example` 和 `.env.production.example`。
@@ -118,9 +118,9 @@ Health 响应至少包含：
 
 ## BE-002 数据模型与迁移
 
-**优先级**：P0  
-**依赖**：BE-001  
-**Spec**：后端 §13  
+**优先级**：P0
+**依赖**：BE-001
+**Spec**：后端 §13
 
 - [x] 新增 `RealtimeVoiceSession`。
 - [x] 新增 `RealtimeToolCall`。
@@ -153,9 +153,9 @@ tests/test_realtime_voice_models.py
 
 ## BE-003 短期 Ticket
 
-**优先级**：P0  
-**依赖**：BE-001  
-**Spec**：后端 §5  
+**优先级**：P0
+**依赖**：BE-001
+**Spec**：后端 §5
 
 - [x] 实现 `POST /api/realtime-voice/tickets`。
 - [x] Ticket 包含 `aud/sub/jti/exp/platform/audio format`。
@@ -187,9 +187,9 @@ tests/test_realtime_voice_tickets.py
 
 ## BE-004 Avalin WebSocket 协议类型
 
-**优先级**：P0  
-**依赖**：BE-001  
-**Spec**：后端 §8  
+**优先级**：P0
+**依赖**：BE-001
+**Spec**：后端 §8
 
 - [x] 定义所有客户端上行事件。
 - [x] 定义所有服务端下行事件构造器。
@@ -223,9 +223,9 @@ tests/test_realtime_voice_protocol.py
 
 ## BE-005 Provider 抽象与 Fake Provider
 
-**优先级**：P0  
-**依赖**：BE-004  
-**Spec**：后端 §4、§19.2  
+**优先级**：P0
+**依赖**：BE-004
+**Spec**：后端 §4、§19.2
 
 - [x] 定义 `RealtimeVoiceProvider` Protocol。
 - [x] 定义 Provider Session Config 与标准化 Event。
@@ -252,9 +252,9 @@ tests/test_realtime_voice_fake_provider.py
 
 ## BE-006 豆包全双工 Provider
 
-**优先级**：P0  
-**依赖**：BE-005  
-**Spec**：后端 §7、§9  
+**优先级**：P0
+**依赖**：BE-005
+**Spec**：后端 §7、§9
 
 - [x] 使用 `wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue`。
 - [x] 请求头使用 `X-Api-Key`。
@@ -289,9 +289,9 @@ tests/test_volcengine_realtime_provider.py
 
 ## BE-007 会话持久化
 
-**优先级**：P0  
-**依赖**：BE-002、BE-005  
-**Spec**：后端 §13  
+**优先级**：P0
+**依赖**：BE-002、BE-005
+**Spec**：后端 §13
 
 - [x] 实现 Voice Session 创建、更新、关闭。
 - [x] 复用或创建 `ChatSession`。
@@ -318,9 +318,9 @@ tests/test_realtime_voice_persistence.py
 
 ## BE-008 WebSocket Gateway 基础转发
 
-**优先级**：P0  
-**依赖**：BE-003、BE-004、BE-005、BE-007  
-**Spec**：后端 §3、§8、§14  
+**优先级**：P0
+**依赖**：BE-003、BE-004、BE-005、BE-007
+**Spec**：后端 §3、§8、§14
 
 - [x] 实现 `/ws/realtime-avatar?ticket=...`。
 - [x] 消费一次性 Ticket。
@@ -354,9 +354,9 @@ tests/test_realtime_voice_websocket.py
 
 ## BE-009 Prompt 与基础会话上下文
 
-**优先级**：P0  
-**依赖**：BE-008  
-**Spec**：后端 §10  
+**优先级**：P0
+**依赖**：BE-008
+**Spec**：后端 §10
 
 - [x] 新增语音专用系统提示词。
 - [x] 限制语音回复长度。
@@ -386,9 +386,9 @@ tests/test_realtime_voice_prompts.py
 
 ## BE-010 Tool Registry 与 Policy Guard
 
-**优先级**：P0  
-**依赖**：BE-008  
-**Spec**：后端 §11.1、§11.4、§17  
+**优先级**：P0
+**依赖**：BE-008
+**Spec**：后端 §11.1、§11.4、§17
 
 - [x] 定义 Tool 注册结构。
 - [x] 定义 R0/R1/R2/R3。
@@ -419,9 +419,9 @@ tests/test_realtime_voice_tool_policy.py
 
 ## BE-011 Tool Call 审计与幂等
 
-**优先级**：P0  
-**依赖**：BE-002、BE-010  
-**Spec**：后端 §9.3、§13.2  
+**优先级**：P0
+**依赖**：BE-002、BE-010
+**Spec**：后端 §9.3、§13.2
 
 - [x] 收到 Function Call 立即创建审计记录。
 - [x] `(session, provider_call_id)` 幂等。
@@ -448,9 +448,9 @@ tests/test_realtime_voice_tool_audit.py
 
 ## BE-012 `search_personal_memory`
 
-**优先级**：P0  
-**依赖**：BE-010、BE-011  
-**Spec**：后端 §11.2  
+**优先级**：P0
+**依赖**：BE-010、BE-011
+**Spec**：后端 §11.2
 
 - [x] 包装 `retrieve_memories()`。
 - [x] `user_id` 只能取当前会话。
@@ -480,9 +480,9 @@ tests/test_realtime_voice_memory_tool.py
 
 ## BE-013 `get_memory_document`
 
-**优先级**：P0  
-**依赖**：BE-012  
-**Spec**：后端 §11.2  
+**优先级**：P0
+**依赖**：BE-012
+**Spec**：后端 §11.2
 
 - [x] 只允许读取本会话 RAG 返回过的 document ID。
 - [x] 校验 document 所属用户。
@@ -504,9 +504,9 @@ tests/test_realtime_voice_memory_tool.py
 
 ## BE-014 `draft_social_mission`
 
-**优先级**：P0  
-**依赖**：BE-010  
-**Spec**：后端 §11.2、§20.2、§20.3  
+**优先级**：P0
+**依赖**：BE-010
+**Spec**：后端 §11.2、§20.2、§20.3
 
 - [x] 包装 `parse_mission_text()`。
 - [x] 不写数据库。
@@ -534,9 +534,9 @@ tests/test_realtime_voice_mission_tools.py
 
 ## BE-015 `create_social_mission_draft`
 
-**优先级**：P0  
-**依赖**：BE-014  
-**Spec**：后端 §11.2  
+**优先级**：P0
+**依赖**：BE-014
+**Spec**：后端 §11.2
 
 - [x] 只接受当前 Voice Session 内的草稿 ID/hash。
 - [x] 复用 `create_mission()`。
@@ -556,9 +556,9 @@ tests/test_realtime_voice_mission_tools.py
 
 ## BE-016 Confirmation Manager
 
-**优先级**：P0  
-**依赖**：BE-011、BE-015  
-**Spec**：后端 §12  
+**优先级**：P0
+**依赖**：BE-011、BE-015
+**Spec**：后端 §12
 
 - [x] 实现确认对象、签名 Token、TTL。
 - [x] 绑定 user/session/action/resource/hash。
@@ -588,9 +588,9 @@ tests/test_realtime_voice_confirmations.py
 
 ## BE-017 `start_social_mission`
 
-**优先级**：P0  
-**依赖**：BE-016  
-**Spec**：后端 §11.2  
+**优先级**：P0
+**依赖**：BE-016
+**Spec**：后端 §11.2
 
 - [x] 风险等级 R2。
 - [x] 没有合法确认 Token 时不执行。
@@ -618,9 +618,9 @@ draft -> 确认 -> status searching/awaiting_user
 
 ## BE-018 任务查询与导航工具
 
-**优先级**：P0  
-**依赖**：BE-017  
-**Spec**：后端 §11.2  
+**优先级**：P0
+**依赖**：BE-017
+**Spec**：后端 §11.2
 
 - [x] `list_social_missions`。
 - [x] `get_social_mission_progress`。
@@ -644,9 +644,9 @@ draft -> 确认 -> status searching/awaiting_user
 
 ## BE-019 重连、超时与优雅关闭
 
-**优先级**：P0  
-**依赖**：BE-008、BE-011  
-**Spec**：后端 §15  
+**优先级**：P0
+**依赖**：BE-008、BE-011
+**Spec**：后端 §15
 
 - [x] 5xx 最多重连 2 次。
 - [x] 4xx 不重试。
@@ -667,9 +667,9 @@ draft -> 确认 -> status searching/awaiting_user
 
 ## BE-020 限流、背压和日志
 
-**优先级**：P0  
-**依赖**：BE-019  
-**Spec**：后端 §14、§16、§17  
+**优先级**：P0
+**依赖**：BE-019
+**Spec**：后端 §14、§16、§17
 
 - [x] 单进程全局并发 Session Registry（不是协程内临时 Semaphore）。
 - [x] 单用户一会话。
@@ -690,9 +690,9 @@ draft -> 确认 -> status searching/awaiting_user
 
 ## BE-021 Nginx 与 Docker
 
-**优先级**：P0  
-**依赖**：BE-020  
-**Spec**：后端 §18  
+**优先级**：P0
+**依赖**：BE-020
+**Spec**：后端 §18
 
 - [x] `/ws/` 增加 `proxy_buffering off`。
 - [x] read/send timeout 调整为 900 秒。
@@ -719,8 +719,8 @@ docker compose config
 
 ## BE-022 后端完整回归
 
-**优先级**：P0 Gate  
-**依赖**：BE-001 至 BE-021  
+**优先级**：P0 Gate
+**依赖**：BE-001 至 BE-021
 
 - [x] 新增实时语音测试全部通过。
 - [x] 原有完整测试通过。
@@ -746,9 +746,9 @@ docker compose config
 
 ## FE-001 前端协议类型与 REST API
 
-**优先级**：P0  
-**依赖**：BE-004 契约稳定  
-**Spec**：前端 §8  
+**优先级**：P0
+**依赖**：BE-004 契约稳定
+**Spec**：前端 §8
 
 - [x] 新增 Ticket/Health API。
 - [x] 定义全部 Client/Server Event 判别联合类型。
@@ -775,9 +775,9 @@ npm test
 
 ## FE-002 WebSocket Client
 
-**优先级**：P0  
-**依赖**：FE-001  
-**Spec**：前端 §8.2  
+**优先级**：P0
+**依赖**：FE-001
+**Spec**：前端 §8.2
 
 - [x] 获取 Ticket 后建立连接。
 - [x] Ticket 不落 Storage。
@@ -798,9 +798,9 @@ src/services/realtime/__tests__/voice-socket.test.ts
 
 ## FE-003 Realtime Voice Store
 
-**优先级**：P0  
-**依赖**：FE-001、FE-002  
-**Spec**：前端 §7  
+**优先级**：P0
+**依赖**：FE-001、FE-002
+**Spec**：前端 §7
 
 - [x] 实现完整状态。
 - [x] 实现合法状态转换。
@@ -827,9 +827,9 @@ npm test
 
 ## FE-004 Fake Audio Adapter
 
-**优先级**：P0  
-**依赖**：FE-003  
-**Spec**：前端 §9、§15.2  
+**优先级**：P0
+**依赖**：FE-003
+**Spec**：前端 §9、§15.2
 
 - [x] 定义 `RealtimeAudioAdapter`。
 - [x] 实现 Fake。
@@ -849,8 +849,8 @@ src/services/realtime/audio/fake-audio.ts
 
 ## FE-005 Fake 会话端到端
 
-**优先级**：P0 Gate  
-**依赖**：FE-002、FE-003、FE-004  
+**优先级**：P0 Gate
+**依赖**：FE-002、FE-003、FE-004
 
 - [x] 无页面情况下完成 Fake Socket + Fake Audio + Store。
 - [x] 覆盖连接、字幕、音频、打断、Tool、确认和关闭。
@@ -866,8 +866,8 @@ src/services/realtime/audio/fake-audio.ts
 
 ## FE-006 PCM 工具
 
-**优先级**：P0  
-**依赖**：FE-004  
+**优先级**：P0
+**依赖**：FE-004
 
 - [x] Float32 -> int16 PCM。
 - [x] Base64 编解码。
@@ -885,9 +885,9 @@ src/services/realtime/audio/pcm.ts
 
 ## FE-007 H5 麦克风采集
 
-**优先级**：P0  
-**依赖**：FE-006  
-**Spec**：前端 §9.1  
+**优先级**：P0
+**依赖**：FE-006
+**Spec**：前端 §9.1
 
 - [x] getUserMedia 权限。
 - [x] AudioWorklet。
@@ -908,9 +908,9 @@ src/static/audio-worklets/pcm-capture.js
 
 ## FE-008 H5 PCM 播放器
 
-**优先级**：P0  
-**依赖**：FE-006  
-**Spec**：前端 §9.1、§9.3  
+**优先级**：P0
+**依赖**：FE-006
+**Spec**：前端 §9.1、§9.3
 
 - [x] 24 kHz PCM 队列缓冲。
 - [x] 80-120 ms 预缓冲。
@@ -936,9 +936,9 @@ src/static/audio-worklets/pcm-playback.js
 
 ## FE-009 通话页壳与路由
 
-**优先级**：P0  
-**依赖**：FE-005  
-**Spec**：前端 §2、§3、§4  
+**优先级**：P0
+**依赖**：FE-005
+**Spec**：前端 §2、§3、§4
 
 - [x] 新增 `pages/chat/voice-call`。
 - [x] 注册 `pages.json`。
@@ -959,9 +959,9 @@ npm run build:h5
 
 ## FE-010 声音脉络与状态
 
-**优先级**：P0  
-**依赖**：FE-009  
-**Spec**：前端 §3、§4、§6.1  
+**优先级**：P0
+**依赖**：FE-009
+**Spec**：前端 §3、§4、§6.1
 
 - [x] 固定高度声音脉络。
 - [x] listening/speaking 使用不同语义。
@@ -974,9 +974,9 @@ npm run build:h5
 
 ## FE-011 实时字幕
 
-**优先级**：P0  
-**依赖**：FE-003、FE-009  
-**Spec**：前端 §5.2、§5.3、§6.2  
+**优先级**：P0
+**依赖**：FE-003、FE-009
+**Spec**：前端 §5.2、§5.3、§6.2
 
 - [x] 用户 ASR delta。
 - [x] 分身 Text delta。
@@ -989,9 +989,9 @@ npm run build:h5
 
 ## FE-012 记忆证据
 
-**优先级**：P0  
-**依赖**：BE-012、FE-011  
-**Spec**：前端 §5.5  
+**优先级**：P0
+**依赖**：BE-012、FE-011
+**Spec**：前端 §5.5
 
 - [x] 展示来源、标题、日期、摘要。
 - [x] 最多 3 条。
@@ -1004,9 +1004,9 @@ npm run build:h5
 
 ## FE-013 找人任务摘要与确认
 
-**优先级**：P0  
-**依赖**：BE-016、BE-017、FE-011  
-**Spec**：前端 §5.6、§6.3  
+**优先级**：P0
+**依赖**：BE-016、BE-017、FE-011
+**Spec**：前端 §5.6、§6.3
 
 - [x] 展示活动、时间、地点、人数、搜索范围。
 - [x] 有 questions 时不显示确认按钮。
@@ -1020,9 +1020,9 @@ npm run build:h5
 
 ## FE-014 通话控制与打断
 
-**优先级**：P0  
-**依赖**：FE-008、FE-009  
-**Spec**：前端 §5.4、§6.4  
+**优先级**：P0
+**依赖**：FE-008、FE-009
+**Spec**：前端 §5.4、§6.4
 
 - [x] 麦克风开关。
 - [x] 扬声器静音。
@@ -1036,9 +1036,9 @@ npm run build:h5
 
 ## FE-015 入口接入
 
-**优先级**：P0  
-**依赖**：FE-009  
-**Spec**：前端 §2.1  
+**优先级**：P0
+**依赖**：FE-009
+**Spec**：前端 §2.1
 
 - [x] AI 对话页增加语音通话入口。
 - [x] 找朋友页“语音说”进入 `mode=social_mission`。
@@ -1050,9 +1050,9 @@ npm run build:h5
 
 ## FE-016 生命周期、错误与摘要
 
-**优先级**：P0  
-**依赖**：FE-014  
-**Spec**：前端 §10、§11  
+**优先级**：P0
+**依赖**：FE-014
+**Spec**：前端 §10、§11
 
 - [x] onHide 暂停；30 秒后关闭。
 - [x] onUnload/dispose 无资源泄漏。
@@ -1067,8 +1067,8 @@ npm run build:h5
 
 ## FE-017 前端完整回归
 
-**优先级**：P0 Gate  
-**依赖**：FE-001 至 FE-016  
+**优先级**：P0 Gate
+**依赖**：FE-001 至 FE-016
 
 - [x] 协议、Store、Fake Audio 测试。
 - [x] TypeScript 通过。
@@ -1092,8 +1092,8 @@ npm run build:h5
 
 ## APP-001 UTS 插件骨架
 
-**优先级**：P1  
-**依赖**：FE-005  
+**优先级**：P1
+**依赖**：FE-005
 
 - [ ] 创建 `uni_modules/avalin-realtime-audio`。
 - [ ] 与 `RealtimeAudioAdapter` 接口一致。
@@ -1105,8 +1105,8 @@ npm run build:h5
 
 ## APP-002 AudioRecord
 
-**优先级**：P1  
-**依赖**：APP-001  
+**优先级**：P1
+**依赖**：APP-001
 
 - [ ] 16 kHz / mono / PCM 16-bit。
 - [ ] 20 ms 输出帧。
@@ -1118,8 +1118,8 @@ npm run build:h5
 
 ## APP-003 AudioTrack
 
-**优先级**：P1  
-**依赖**：APP-001  
+**优先级**：P1
+**依赖**：APP-001
 
 - [ ] 24 kHz / mono / PCM 16-bit / stream mode。
 - [ ] 播放缓冲。
@@ -1131,8 +1131,8 @@ npm run build:h5
 
 ## APP-004 vivo 真机音频场景
 
-**优先级**：P1 Gate  
-**依赖**：APP-002、APP-003  
+**优先级**：P1 Gate
+**依赖**：APP-002、APP-003
 
 - [ ] 内置麦克风与扬声器。
 - [ ] 蓝牙耳机。
@@ -1148,7 +1148,7 @@ npm run build:h5
 
 ## INT-001 Fake Provider 全链路
 
-**依赖**：BE-022、FE-017  
+**依赖**：BE-022、FE-017
 
 - [ ] Ticket -> WS -> 音频 -> 字幕 -> 音频。
 - [ ] 记忆证据。
@@ -1163,7 +1163,7 @@ npm run build:h5
 
 ## INT-002 真实豆包 API 基础通话
 
-**依赖**：INT-001、控制台权限  
+**依赖**：INT-001、控制台权限
 
 - [ ] Session Create。
 - [ ] PCM 输入。
@@ -1180,7 +1180,7 @@ npm run build:h5
 
 ## INT-003 真实记忆 RAG
 
-**依赖**：INT-002  
+**依赖**：INT-002
 
 使用 `avalin_demo`：
 
@@ -1194,7 +1194,7 @@ npm run build:h5
 
 ## INT-004 真实找电影搭子
 
-**依赖**：INT-002  
+**依赖**：INT-002
 
 - [ ] “今晚想找一个人看科幻电影”。
 - [ ] 正确解析短期 movie。
@@ -1208,7 +1208,7 @@ npm run build:h5
 
 ## INT-005 歧义与越权
 
-**依赖**：INT-004  
+**依赖**：INT-004
 
 - [ ] “每天想看电影”先追问。
 - [ ] “替我发帖”不执行。
@@ -1220,7 +1220,7 @@ npm run build:h5
 
 ## INT-006 部署验证
 
-**依赖**：BE-021、INT-005  
+**依赖**：BE-021、INT-005
 
 - [ ] 生产环境变量。
 - [ ] Nginx 15 分钟 WS。

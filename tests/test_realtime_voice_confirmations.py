@@ -128,4 +128,3 @@ def test_confirmation_expiry_and_token_tampering_are_rejected():
             resource_hash="hash-active",
             current_turn=2,
         )
-

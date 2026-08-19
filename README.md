@@ -217,6 +217,8 @@ curl http://127.0.0.1:8000/api/realtime-voice/health
 - 当前 Ticket 防重放、全局并发和单用户会话限制是进程内实现，后端固定使用一个 Uvicorn Worker。
 - 扩展到多个后端 Worker 前，必须把 Ticket 和会话注册表迁移到 Redis。
 - Nginx `/ws/` 必须关闭代理缓冲，并将读写超时设置为 900 秒。
+- TLS 证书分别放置在 `deploy/nginx/ssl/avalin.cn.pem` 和
+  `deploy/nginx/ssl/avalin.cn.key`；该目录内容已被 Git 和 Docker 构建上下文排除。
 - 后端容器需要能访问 `openspeech.bytedance.com:443`。
 - 原始 PCM、Ticket、JWT、API Key 和完整私密记忆不会写入日志。
 

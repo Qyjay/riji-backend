@@ -145,4 +145,3 @@ def test_memory_search_never_returns_another_users_document(client, db):
         )
     )
     assert json.loads(results[0].output)["data"]["items"] == []
-

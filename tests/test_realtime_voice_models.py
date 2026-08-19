@@ -50,4 +50,3 @@ def test_realtime_voice_models_and_provider_call_uniqueness(client, db):
     with pytest.raises(IntegrityError):
         db.commit()
     db.rollback()
-
