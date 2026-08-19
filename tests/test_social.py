@@ -1,6 +1,8 @@
 """
 社交模块测试
 """
+import json
+
 import pytest
 from app.config import settings
 from tests.conftest import create_test_user, get_auth_header
@@ -81,6 +83,39 @@ def test_list_matches_include_pending_shows_buddy(client):
     assert row is not None
     assert row["status"] == "pending"
     assert row["matchType"] == "buddy"
+
+
+def test_list_matches_renders_json_report_as_readable_reason(client, db):
+    """关系进度不应把结构化匹配报告的 JSON 原文直接展示给用户。"""
+    from app.models.social import Match
+
+    user1_data = create_test_user(client, username="reasonjson1")
+    user2_data = create_test_user(client, username="reasonjson2")
+    headers1 = get_auth_header(user1_data["token"])
+    target_id = user2_data["user"]["id"]
+
+    apply_resp = client.post(
+        "/api/social/buddy",
+        json={"target_user_id": target_id, "reason": "临时原因"},
+        headers=headers1,
+    )
+    request_id = apply_resp.json()["data"]["id"]
+    match = db.query(Match).filter(Match.id == request_id).one()
+    match.match_report = json.dumps(
+        {
+            "compatibility": 83,
+            "analysis": "双方表达方式互补，适合继续交流。",
+            "common_points": ["摄影", "校园生活"],
+            "differences": ["专业背景不同"],
+        },
+        ensure_ascii=False,
+    )
+    db.commit()
+
+    response = client.get("/api/social/matches?include_pending=true", headers=headers1)
+    row = next(item for item in response.json()["data"] if item["id"] == request_id)
+    assert row["reason"] == "双方表达方式互补，适合继续交流。"
+    assert not row["reason"].lstrip().startswith("{")
 
 
 def test_buddy_request_uses_target_user_id(client):

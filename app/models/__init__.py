@@ -17,6 +17,7 @@ from app.models.avatar import (
     AvatarMatch,
     AvatarProfile,
     AvatarStatus,
+    AvatarSurfJob,
     AvatarSurfLog,
     AvatarUsageStat,
 )
@@ -28,6 +29,7 @@ from app.models.memory import (
     MemoryFact,
     MemoryProfile,
 )
+from app.models.realtime_voice import RealtimeToolCall, RealtimeVoiceSession
 
 __all__ = [
     "User",
@@ -53,6 +55,7 @@ __all__ = [
     "AvatarMatch",
     "AvatarProfile",
     "AvatarUsageStat",
+    "AvatarSurfJob",
     "AvatarSurfLog",
     "MemoryDocument",
     "MemoryChunk",
@@ -60,4 +63,6 @@ __all__ = [
     "MemoryProfile",
     "AvatarCard",
     "AgentAction",
+    "RealtimeVoiceSession",
+    "RealtimeToolCall",
 ]

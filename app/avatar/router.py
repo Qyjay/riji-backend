@@ -29,6 +29,7 @@ from app.avatar.schemas import (
     MatchActionRequest,
     MutualMatchItemOut,
     ProbeLogItemOut,
+    SurfJobOut,
     SurfLogsOut,
     TriggerSurfResultOut,
     UsageEventOut,
@@ -202,6 +203,35 @@ def record_usage_event(
     """聚合用户 App 使用时间与页面习惯，用于生成个性化分身冲浪计划。"""
     result = service.record_usage_event(db, current_user.id, body.model_dump())
     return success(_serialize_usage_event(result))
+
+
+@router.post("/surf/jobs", status_code=202, summary="创建异步分身冲浪任务")
+def create_surf_job(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """将冲浪任务放入数据库队列，由独立 worker 串行执行。"""
+    result = service.create_surf_job(db, current_user.id, trigger="manual")
+    return success(SurfJobOut(**result).model_dump(by_alias=True))
+
+
+@router.get("/surf/jobs/latest", summary="最近一次异步冲浪任务")
+def get_latest_surf_job(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    result = service.get_latest_surf_job(db, current_user.id)
+    return success(SurfJobOut(**result).model_dump(by_alias=True) if result else None)
+
+
+@router.get("/surf/jobs/{job_id}", summary="查看异步冲浪任务")
+def get_surf_job(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    result = service.get_surf_job(db, current_user.id, job_id)
+    return success(SurfJobOut(**result).model_dump(by_alias=True))
 
 
 @router.post("/surf/trigger", summary="【调试】立即触发一次完整分身冲浪（跳过时间窗口限制）")

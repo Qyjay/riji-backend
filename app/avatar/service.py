@@ -7,6 +7,7 @@ Phase 3: UCB Bandit — 用 UCB1 算法在「利用」高奖励时段和「探�
 Phase 5: 规则宽召回 — 三路信号（行为/关系/画像）召回用户候选 + 多维度打分
 Phase 6: AI 精排 — 对规则 top-10 调用 MiniMax 生成精排分、自然理由、开场白
 """
+import asyncio
 import json
 import math
 import time
@@ -25,6 +26,7 @@ from app.models.avatar import (
     AvatarMatch,
     AvatarProfile,
     AvatarStatus,
+    AvatarSurfJob,
     AvatarSurfLog,
     AvatarUsageStat,
 )
@@ -615,6 +617,146 @@ async def run_avatar_surf_for_user(db: Session, user_id: str, trigger: str = "sc
         log.finished_at = _now_ms()
         status.surf_lock_until = 0
         status.next_surf_at = now + 30 * 60 * 1000
+        db.commit()
+        raise
+
+
+def _surf_job_to_dict(job: AvatarSurfJob) -> dict:
+    return {
+        "id": job.id,
+        "status": job.status or "pending",
+        "trigger": job.trigger or "manual",
+        "attempts": job.attempts or 0,
+        "result": _decode(job.result_json, {}),
+        "error_message": job.error_message or "",
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "updated_at": job.updated_at,
+    }
+
+
+def create_surf_job(db: Session, user_id: str, trigger: str = "manual") -> dict:
+    """创建冲浪任务；同一用户已有待执行任务时直接复用，避免重复排队。"""
+    existing = (
+        db.query(AvatarSurfJob)
+        .filter(
+            AvatarSurfJob.user_id == user_id,
+            AvatarSurfJob.status.in_(["pending", "running"]),
+        )
+        .order_by(AvatarSurfJob.created_at.desc())
+        .first()
+    )
+    if existing:
+        return _surf_job_to_dict(existing)
+
+    now = _now_ms()
+    job = AvatarSurfJob(
+        id=str(uuid4()),
+        user_id=user_id,
+        trigger=trigger,
+        status="pending",
+        attempts=0,
+        available_at=now,
+        result_json="{}",
+        error_message="",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return _surf_job_to_dict(job)
+
+
+def get_surf_job(db: Session, user_id: str, job_id: str) -> dict:
+    job = (
+        db.query(AvatarSurfJob)
+        .filter(AvatarSurfJob.id == job_id, AvatarSurfJob.user_id == user_id)
+        .first()
+    )
+    if not job:
+        raise ApiException(code=NOT_FOUND, message="冲浪任务不存在", status_code=404)
+    return _surf_job_to_dict(job)
+
+
+def get_latest_surf_job(db: Session, user_id: str) -> Optional[dict]:
+    job = (
+        db.query(AvatarSurfJob)
+        .filter(AvatarSurfJob.user_id == user_id)
+        .order_by(AvatarSurfJob.created_at.desc())
+        .first()
+    )
+    return _surf_job_to_dict(job) if job else None
+
+
+def claim_next_surf_job(db: Session) -> Optional[AvatarSurfJob]:
+    """领取一条可执行任务。生产仅运行一个 worker，数据库状态承担崩溃恢复。"""
+    now = _now_ms()
+    stale_before = now - 10 * 60 * 1000
+    stale_jobs = (
+        db.query(AvatarSurfJob)
+        .filter(
+            AvatarSurfJob.status == "running",
+            AvatarSurfJob.started_at != None,  # noqa: E711
+            AvatarSurfJob.started_at < stale_before,
+        )
+        .all()
+    )
+    for stale in stale_jobs:
+        stale.status = "pending"
+        stale.available_at = now
+        stale.error_message = "worker 超时，任务已重新排队"
+        stale.updated_at = now
+    if stale_jobs:
+        db.commit()
+
+    job = (
+        db.query(AvatarSurfJob)
+        .filter(
+            AvatarSurfJob.status == "pending",
+            AvatarSurfJob.available_at <= now,
+        )
+        .order_by(AvatarSurfJob.created_at.asc())
+        .first()
+    )
+    if not job:
+        return None
+
+    job.status = "running"
+    job.attempts = (job.attempts or 0) + 1
+    job.started_at = now
+    job.updated_at = now
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+async def process_surf_job(db: Session, job: AvatarSurfJob) -> dict:
+    """执行已领取任务，并按指数退避重试异常任务。"""
+    from app.config import settings
+
+    try:
+        result = await run_avatar_surf_for_user(db, job.user_id, trigger=job.trigger or "manual")
+        now = _now_ms()
+        job.status = "succeeded"
+        job.result_json = _encode(result)
+        job.error_message = ""
+        job.finished_at = now
+        job.updated_at = now
+        db.commit()
+        return result
+    except Exception as exc:
+        now = _now_ms()
+        max_attempts = max(1, int(getattr(settings, "ATOA_JOB_MAX_ATTEMPTS", 3)))
+        job.error_message = str(exc)[:500]
+        job.updated_at = now
+        if (job.attempts or 0) < max_attempts:
+            job.status = "pending"
+            job.available_at = now + min(60, 2 ** max(0, job.attempts or 1)) * 1000
+        else:
+            job.status = "failed"
+            job.finished_at = now
         db.commit()
         raise
 
@@ -1519,6 +1661,49 @@ def _apply_block_penalty(
         match_ba.match_score = max(0, (match_ba.match_score or 0) - _ATOA_BLOCK_PENALTY)
 
 
+def _build_safe_atoa_conversation(
+    card_a: AvatarCard,
+    card_b: AvatarCard,
+    max_rounds: int = 3,
+    prior_conversation: Optional[list[dict]] = None,
+) -> list[dict]:
+    """仅基于双方公开名片生成确定性探针对话，用作限流和非优先候选降级。"""
+    tags_a = _decode(card_a.interest_tags, [])
+    tags_b = _decode(card_b.interest_tags, [])
+    shared = [str(tag) for tag in tags_a if tag in set(tags_b)]
+    intents_a = _decode(card_a.social_intent, [])
+    topic = shared[0] if shared else (str(intents_a[0]) if intents_a else "最近的计划")
+    templates = [
+        (f"看到你也关注{topic}，你最近在这方面有什么计划？", f"我最近确实在关注{topic}，更希望先轻松交流、慢慢了解。"),
+        (f"如果从{topic}开始认识，你更喜欢线上聊还是一起参加活动？", "我比较看重节奏合适和边界清楚，可以先从共同话题聊起。"),
+        ("还有哪些相处方式会让你觉得更自在？", "尊重彼此时间、提前说清安排就很好，具体决定还是交给主人。"),
+    ]
+    start = (len(prior_conversation or []) // 2) % len(templates)
+    result: list[dict] = []
+    for offset in range(min(max_rounds, len(templates))):
+        a_text, b_text = templates[(start + offset) % len(templates)]
+        result.append({"role": "avatar_a", "content": a_text})
+        result.append({"role": "avatar_b", "content": b_text})
+    return result
+
+
+async def _chat_completion_with_retry(client, **kwargs) -> str:
+    """仅对明确的限流错误重试，其他错误立即交给安全降级逻辑。"""
+    from app.config import settings
+
+    max_retries = max(0, int(getattr(settings, "ATOA_AI_MAX_RETRIES", 2)))
+    base_delay = max(0.1, float(getattr(settings, "ATOA_AI_RETRY_BASE_SEC", 1.0)))
+    for attempt in range(max_retries + 1):
+        try:
+            return await client.chat_completion(**kwargs)
+        except Exception as exc:
+            is_rate_limited = "429" in str(exc) or "too many requests" in str(exc).lower()
+            if not is_rate_limited or attempt >= max_retries:
+                raise
+            await asyncio.sleep(base_delay * (2 ** attempt))
+    raise RuntimeError("AtoA AI retry exhausted")
+
+
 async def _simulate_atoa_conversation(
     card_a: AvatarCard,
     card_b: AvatarCard,
@@ -1543,22 +1728,12 @@ async def _simulate_atoa_conversation(
     is_continuation = bool(prior_conversation)
 
     if getattr(settings, "MINIMAX_MOCK", True):
-        rounds: list[dict] = []
-        topics = shared if shared else [intent_a]
-        mock_templates = [
-            (f"关于{topics[0]}，你平时怎么安排的？", f"我一般{topics[0]}这方面会花比较多时间，你呢？"),
-            (f"听起来不错，我们可以多交流一下{topics[0]}相关的。", f"好啊，感觉我们在这方面挺有共鸣的。"),
-            ("你有什么近期的计划吗？", "有的，我打算好好规划一下，希望能找到志同道合的朋友一起。"),
-        ]
-        start_idx = len(prior_conversation) // 2 if is_continuation else 0
-        for i in range(min(max_rounds, len(mock_templates))):
-            idx = (start_idx + i) % len(mock_templates)
-            a_text, b_text = mock_templates[idx]
-            if is_continuation and i == 0:
-                a_text = f"继续上次的话题，{a_text}"
-            rounds.append({"role": "avatar_a", "content": a_text})
-            rounds.append({"role": "avatar_b", "content": b_text})
-        return rounds[:max_messages]
+        return _build_safe_atoa_conversation(
+            card_a,
+            card_b,
+            max_rounds=max_rounds,
+            prior_conversation=prior_conversation,
+        )[:max_messages]
 
     client = get_minimax_client()
     summary_a = (card_a.public_summary or "").strip()[:80]
@@ -1600,11 +1775,9 @@ async def _simulate_atoa_conversation(
   ...
 ]"""
 
-    # fallback_topic 在 Mock 分支外也需要可用
-    fallback_topic = shared[0] if shared else intent_a
-
     try:
-        raw = await client.chat_completion(
+        raw = await _chat_completion_with_retry(
+            client,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=max_rounds * 150,
             temperature=0.75,
@@ -1619,12 +1792,12 @@ async def _simulate_atoa_conversation(
         pass
 
     # 降级 fallback（API 调用失败或返回格式不符时使用）
-    fallback = []
-    for i in range(min(max_rounds, 3)):
-        suffix = f"（续聊第{i+1}轮）" if is_continuation else ""
-        fallback.append({"role": "avatar_a", "content": f"你好{suffix}，想多了解一下你的{fallback_topic}经历。"})
-        fallback.append({"role": "avatar_b", "content": f"没问题，很高兴聊聊{fallback_topic}相关的话题。"})
-    return fallback[:max_messages]
+    return _build_safe_atoa_conversation(
+        card_a,
+        card_b,
+        max_rounds=max_rounds,
+        prior_conversation=prior_conversation,
+    )[:max_messages]
 
 
 def _prefilter_atoa_pair(
@@ -2113,7 +2286,9 @@ async def _refresh_matches_async(db: Session, user_id: str) -> dict:
 
             # 4. 对每位 Top-10 候选：规则预筛 → AI 分身对话 → 写 AtoaInteraction
             card_a = db.query(AvatarCard).filter(AvatarCard.user_id == user_id).first()
-            for item in top10:
+            from app.config import settings
+            live_candidate_limit = max(0, int(getattr(settings, "ATOA_LIVE_CANDIDATES", 3)))
+            for candidate_index, item in enumerate(top10):
                 candidate: User = item["user"]
                 card_b = db.query(AvatarCard).filter(AvatarCard.user_id == candidate.id).first()
 
@@ -2125,13 +2300,13 @@ async def _refresh_matches_async(db: Session, user_id: str) -> dict:
                     atoa_scanned -= 1
                     continue
 
-                # 生成分身对话（AI，最多 3 轮）
+                # 只为前三位候选调用真实模型，其余使用公开名片安全生成，避免瞬时限流。
                 conversation: list[dict] = []
                 if card_a and card_b:
-                    try:
+                    if candidate_index < live_candidate_limit:
                         conversation = await _simulate_atoa_conversation(card_a, card_b, max_rounds=3)
-                    except Exception:
-                        conversation = []
+                    else:
+                        conversation = _build_safe_atoa_conversation(card_a, card_b, max_rounds=3)
 
                 # 收集双向信号（用于写入 reasons_ba）
                 signals_ab = _collect_interaction_signals_for_pair(db, user_id, candidate.id)
@@ -2942,7 +3117,10 @@ def get_probe_log(
             "risk_flags": _decode(row.risk_flags, []),
             "interaction_phase": row.interaction_phase or 1,
             "user_decision": row.user_decision,
-            "is_mutual": row.outcome == "mutual",
+            "is_mutual": (
+                (row.score_a or 0) >= _ATOA_MUTUAL_THRESHOLD
+                and (row.score_b or 0) >= _ATOA_MUTUAL_THRESHOLD
+            ),
             "triggered_match_id": row.triggered_match_id,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
@@ -3070,8 +3248,14 @@ def get_mutual_matches(
 
 # ==================== Phase 8B: 继续聊 ====================
 
-# 交互状态不允许继续聊的 outcome 集合
-_ATOA_TERMINAL_OUTCOMES = {"blocked", "connected", "incompatible"}
+# 交互状态不允许继续聊或重复决策的 outcome 集合
+_ATOA_TERMINAL_OUTCOMES = {
+    "blocked",
+    "connected",
+    "connect_confirmed",
+    "connect_rejected",
+    "incompatible",
+}
 
 
 async def continue_atoa_conversation(
@@ -3134,6 +3318,77 @@ async def continue_atoa_conversation(
 
 # ==================== Phase 8C: 最终决策 ====================
 
+def _exclude_atoa_session_candidate(
+    db: Session,
+    interaction: AvatarAtoaInteraction,
+) -> Optional[AvatarAtoaSession]:
+    if not interaction.session_id:
+        return None
+    session = db.query(AvatarAtoaSession).filter(
+        AvatarAtoaSession.id == interaction.session_id,
+        AvatarAtoaSession.user_id == interaction.user_a_id,
+    ).first()
+    if not session:
+        return None
+    excluded_ids = _decode(session.excluded_ids, [])
+    if interaction.user_b_id not in excluded_ids:
+        excluded_ids.append(interaction.user_b_id)
+    session.excluded_ids = _encode(excluded_ids)
+    session.updated_at = _now_ms()
+    return session
+
+
+def _complete_atoa_session_if_finished(db: Session, session: Optional[AvatarAtoaSession]) -> None:
+    if not session:
+        return
+    pending_count = (
+        db.query(AvatarAtoaInteraction)
+        .filter(
+            AvatarAtoaInteraction.session_id == session.id,
+            AvatarAtoaInteraction.outcome == "pending_user_decision",
+        )
+        .count()
+    )
+    if pending_count == 0:
+        session.status = "completed"
+        session.updated_at = _now_ms()
+
+
+async def _replace_blocked_atoa_candidate(
+    db: Session,
+    interaction: AvatarAtoaInteraction,
+    session: Optional[AvatarAtoaSession],
+) -> Optional[str]:
+    """从原评分快照中补入下一位候选，保持待决策队列连续。"""
+    if not session:
+        return None
+    replacement = _get_replacement_candidate(db, session)
+    if not replacement:
+        _complete_atoa_session_if_finished(db, session)
+        return None
+
+    current_user = db.query(User).filter(User.id == interaction.user_a_id).first()
+    if not current_user:
+        return None
+    excluded_ids = set(_decode(session.excluded_ids, []))
+    score_data = await _score_atoa_pair(db, current_user, replacement, excluded_ids)
+    if not score_data:
+        return None
+
+    candidate_ids = _decode(session.candidate_ids, [])
+    candidate_ids.append(replacement.id)
+    session.candidate_ids = _encode(candidate_ids)
+    session.updated_at = _now_ms()
+    new_interaction = _write_atoa_interaction(
+        db,
+        interaction.user_a_id,
+        replacement.id,
+        score_data,
+        session_id=session.id,
+    )
+    return new_interaction.id
+
+
 async def decide_atoa_outcome(
     db: Session,
     user_id: str,
@@ -3156,7 +3411,7 @@ async def decide_atoa_outcome(
         raise ApiException(code=NOT_FOUND, message="AtoA 互动记录不存在", status_code=404)
     if interaction.user_a_id != user_id:
         raise ApiException(code=PARAM_INVALID, message="无权操作此互动记录", status_code=403)
-    if interaction.outcome in ("blocked", "connected"):
+    if interaction.outcome in _ATOA_TERMINAL_OUTCOMES:
         raise ApiException(
             code=PARAM_INVALID,
             message=f"该互动已经是终态 '{interaction.outcome}'，不可重复决策",
@@ -3169,6 +3424,8 @@ async def decide_atoa_outcome(
         interaction.user_decision = "block"
         interaction.is_visible_to_b = False
         interaction.updated_at = now
+        session = _exclude_atoa_session_candidate(db, interaction)
+        _apply_block_penalty(db, interaction.user_a_id, interaction.user_b_id)
 
         # 同步关联的 AtoA AvatarMatch → dismissed
         match = db.query(AvatarMatch).filter(
@@ -3181,60 +3438,40 @@ async def decide_atoa_outcome(
             match.status = "dismissed"
             _sync_atoa_mutual_flag(db, match.id, False)
 
+        from app.social.mission_service import mark_candidate_blocked
+
+        mark_candidate_blocked(db, interaction.id)
+        replacement_interaction_id = await _replace_blocked_atoa_candidate(db, interaction, session)
         db.commit()
-        return {"outcome": "blocked", "social_match_id": None}
+        return {
+            "outcome": "blocked",
+            "social_match_id": None,
+            "replacement_interaction_id": replacement_interaction_id,
+        }
 
-    # decision == "connect"
-    # 找关联的 AtoA AvatarMatch（mutual）
-    match = db.query(AvatarMatch).filter(
-        AvatarMatch.user_id == user_id,
-        AvatarMatch.target_user_id == interaction.user_b_id,
-        AvatarMatch.match_type == "atoa",
-        AvatarMatch.status != "dismissed",
-    ).first()
+    # decision == "connect"：直接基于用户与授权名片发起申请，不再依赖广场帖子。
+    from app.social.service import apply_buddy
 
-    if not match:
-        # 若对方还没互通（one_sided），仍允许主动发起搭子申请
-        post_b = (
-            db.query(PlazaPost)
-            .filter(PlazaPost.user_id == interaction.user_b_id)
-            .order_by(PlazaPost.created_at.desc())
-            .first()
-        )
-        if not post_b:
-            raise ApiException(
-                code=NOT_FOUND,
-                message="对方暂无帖子，无法发起搭子申请，可先继续聊",
-                status_code=400,
-            )
-        match_id_temp = str(uuid4())
-        match = AvatarMatch(
-            id=match_id_temp,
-            user_id=user_id,
-            post_id=post_b.id,
-            target_user_id=interaction.user_b_id,
-            match_score=interaction.score_a or 0,
-            their_score=interaction.score_b or 0,
-            match_reasons=interaction.reasons_a or "[]",
-            their_reasons=interaction.reasons_b or "[]",
-            agent_conversation=interaction.conversation or "[]",
-            status="new",
-            match_type="atoa",
-            intent_type="buddy",
-            created_at=now,
-        )
-        db.add(match)
-        db.flush()
+    reason = (opening_message or "").strip() or "我们的分身先聊过，发现彼此有值得继续了解的共同点。"
+    social_match = apply_buddy(db, user_id, interaction.user_b_id, reason)
+    social_match_id = social_match.id
+    from app.social.mission_service import mark_candidate_connection
 
-    result = start_chat_from_match(db, user_id, match.id, opening_message)
-    social_match_id = result.get("social_match_id") or ""
+    mark_candidate_connection(db, interaction.id, social_match_id)
 
     interaction.outcome = "connected"
     interaction.user_decision = "connect"
     interaction.is_visible_to_b = True
+    session = _exclude_atoa_session_candidate(db, interaction)
     # 存 social.Match.id，便于 §6.9 respond 后同步 connect_confirmed / connect_rejected
-    interaction.triggered_match_id = social_match_id or None
+    interaction.triggered_match_id = social_match_id
     interaction.updated_at = now
+    _complete_atoa_session_if_finished(db, session)
+    update_bandit_feedback(db, user_id, reward=10.0)
     db.commit()
 
-    return {"outcome": "connected", "social_match_id": social_match_id}
+    return {
+        "outcome": "connected",
+        "social_match_id": social_match_id,
+        "replacement_interaction_id": None,
+    }

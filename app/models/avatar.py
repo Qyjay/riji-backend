@@ -179,6 +179,29 @@ class AvatarSurfLog(Base):
     )
 
 
+class AvatarSurfJob(Base):
+    """异步分身冲浪任务，由独立 worker 串行消费以控制外部 AI 并发。"""
+    __tablename__ = "avatar_surf_jobs"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    trigger = Column(String, default="manual")
+    status = Column(String, default="pending")  # pending/running/succeeded/failed
+    attempts = Column(Integer, default=0)
+    available_at = Column(BigInteger, default=0)
+    result_json = Column(Text, default="{}")
+    error_message = Column(Text, default="")
+    created_at = Column(BigInteger, nullable=False)
+    started_at = Column(BigInteger, nullable=True)
+    finished_at = Column(BigInteger, nullable=True)
+    updated_at = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        Index("ix_avatar_surf_jobs_status_available", "status", "available_at"),
+        Index("ix_avatar_surf_jobs_user_time", "user_id", "created_at"),
+    )
+
+
 class AvatarAtoaSession(Base):
     """Phase 8A: Top-10 搭子模式候选池会话。
     每次冲浪触发 Top-10 粗筛后写一条记录，记录候选 ID 列表、排除列表和评分快照。

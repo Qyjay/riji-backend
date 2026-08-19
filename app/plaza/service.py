@@ -54,6 +54,22 @@ def _post_to_dict(post: PlazaPost, user: User) -> dict:
         "is_from_agent": post.is_from_agent or False,
         "allow_agent_reply": post.allow_agent_reply if post.allow_agent_reply is not None else True,
         "school_only": post.school_only or False,
+        "mission_id": post.mission_id,
+        "opportunity_mode": post.opportunity_mode,
+        "category": post.category,
+        "start_at": post.start_at,
+        "end_at": post.end_at,
+        "apply_deadline": post.apply_deadline,
+        "location_precision": post.location_precision or "district",
+        "slots_total": post.slots_total,
+        "slots_remaining": post.slots_remaining,
+        "allow_waitlist": bool(post.allow_waitlist),
+        "budget": _decode(post.budget, {}),
+        "requirements": _decode(post.requirements, []),
+        "opportunity_status": post.opportunity_status or "open",
+        "agent_probe_enabled": (
+            post.agent_probe_enabled if post.agent_probe_enabled is not None else True
+        ),
     }
 
 
@@ -176,6 +192,19 @@ def create_post(db: Session, current_user: User, data: dict) -> dict:
         is_from_agent=False,
         allow_agent_reply=data.get("allow_agent_reply", True),
         school_only=data.get("school_only", False),
+        opportunity_mode=data.get("opportunity_mode"),
+        category=data.get("category"),
+        start_at=data.get("start_at"),
+        end_at=data.get("end_at"),
+        apply_deadline=data.get("apply_deadline"),
+        location_precision=data.get("location_precision", "district"),
+        slots_total=data.get("slots_total"),
+        slots_remaining=data.get("slots_remaining"),
+        allow_waitlist=data.get("allow_waitlist", False),
+        budget=_encode(data.get("budget", {})),
+        requirements=_encode(data.get("requirements", [])),
+        opportunity_status=data.get("opportunity_status", "open"),
+        agent_probe_enabled=data.get("agent_probe_enabled", True),
         created_at=now,
     )
     db.add(post)
