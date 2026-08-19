@@ -85,6 +85,75 @@ def test_list_matches_include_pending_shows_buddy(client):
     assert row["matchType"] == "buddy"
 
 
+def test_list_matches_exposes_other_user_id(client):
+    """GET /social/matches 的 userId 必须是对方用户，两种 requestDirection 都不能返回自己的 id"""
+    user1_data = create_test_user(client, username="matchuid1", name="发起方甲")
+    user2_data = create_test_user(client, username="matchuid2", name="接收方乙")
+    headers1 = get_auth_header(user1_data["token"])
+    headers2 = get_auth_header(user2_data["token"])
+    user1_id = user1_data["user"]["id"]
+    user2_id = user2_data["user"]["id"]
+
+    req_resp = client.post("/api/social/match-requests", json={"toUid": user2_id}, headers=headers1)
+    request_id = req_resp.json()["data"]["id"]
+    client.post(
+        f"/api/social/match-requests/{request_id}/respond",
+        json={"accept": True},
+        headers=headers2,
+    )
+
+    outgoing = client.get("/api/social/matches", headers=headers1).json()["data"]
+    assert outgoing
+    assert all(item.get("userId") for item in outgoing)
+    mine = next(item for item in outgoing if item["id"] == request_id)
+    assert mine["requestDirection"] == "outgoing"
+    assert mine["userId"] == user2_id
+    assert mine["userId"] != user1_id
+    # userId 与 nickname / school 必须指向同一条 User 记录
+    assert mine["nickname"] == "接收方乙"
+    assert mine["school"] == "南开大学"
+
+    incoming = client.get("/api/social/matches", headers=headers2).json()["data"]
+    assert incoming
+    assert all(item.get("userId") for item in incoming)
+    theirs = next(item for item in incoming if item["id"] == request_id)
+    assert theirs["requestDirection"] == "incoming"
+    assert theirs["userId"] == user1_id
+    assert theirs["userId"] != user2_id
+    assert theirs["nickname"] == "发起方甲"
+
+
+def test_list_matches_exposes_other_user_id_for_pending_buddy(client):
+    """待处理搭子申请也要带 userId，前端不必等接受后才能精确关联"""
+    user1_data = create_test_user(client, username="buddyuid1", name="申请方甲")
+    user2_data = create_test_user(client, username="buddyuid2", name="被申请乙")
+    headers1 = get_auth_header(user1_data["token"])
+    headers2 = get_auth_header(user2_data["token"])
+    user1_id = user1_data["user"]["id"]
+    user2_id = user2_data["user"]["id"]
+
+    apply_resp = client.post(
+        "/api/social/buddy",
+        json={"target_user_id": user2_id, "reason": "测 userId"},
+        headers=headers1,
+    )
+    request_id = apply_resp.json()["data"]["id"]
+
+    sender_row = next(
+        item
+        for item in client.get("/api/social/matches?include_pending=true", headers=headers1).json()["data"]
+        if item["id"] == request_id
+    )
+    assert sender_row["userId"] == user2_id
+
+    receiver_row = next(
+        item
+        for item in client.get("/api/social/matches?include_pending=true", headers=headers2).json()["data"]
+        if item["id"] == request_id
+    )
+    assert receiver_row["userId"] == user1_id
+
+
 def test_list_matches_renders_json_report_as_readable_reason(client, db):
     """关系进度不应把结构化匹配报告的 JSON 原文直接展示给用户。"""
     from app.models.social import Match

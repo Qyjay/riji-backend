@@ -34,6 +34,7 @@ class BuddyRequest(BaseModel):
 class MatchOut(CamelModel):
     """匹配列表项（含用户信息）"""
     id: str
+    user_id: str = ""
     nickname: str
     avatar: str
     school: str

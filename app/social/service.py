@@ -67,6 +67,7 @@ def match_to_out(match: Match, current_user_id: str, db: Session) -> dict:
 
     return {
         "id": match.id,
+        "user_id": other_user.id if other_user else "",
         "nickname": other_user.name or other_user.username if other_user else "",
         "avatar": other_user.avatar or "" if other_user else "",
         "school": other_user.school or "" if other_user else "",

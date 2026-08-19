@@ -216,7 +216,9 @@ async def generate_derivative(
     db: Session = Depends(get_db),
 ):
     """生成衍生内容：漫画(comic) | 小说(novel) | 分享卡(share_card)"""
-    result = await service.generate_derivative(db, current_user.id, diary_id, body.type)
+    result = await service.generate_derivative(
+        db, current_user.id, diary_id, body.type, body.style
+    )
     return success(result)
 
 
@@ -228,7 +230,9 @@ async def generate_derivative_alias(
     db: Session = Depends(get_db),
 ):
     """兼容旧版前端复数路径：/diaries/{id}/derivatives。"""
-    result = await service.generate_derivative(db, current_user.id, diary_id, body.type)
+    result = await service.generate_derivative(
+        db, current_user.id, diary_id, body.type, body.style
+    )
     return success(result)
 
 

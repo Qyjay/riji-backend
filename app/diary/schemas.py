@@ -90,6 +90,7 @@ class BackfillTaskOut(CamelModel):
 class DerivativeRequest(BaseModel):
     """生成衍生内容请求"""
     type: str = "share_card"    # "comic" | "novel" | "share_card"
+    style: str = ""             # 漫画风格，仅 comic 使用；未知值回落到日漫清新
 
 
 class ShareRequest(BaseModel):

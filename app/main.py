@@ -7,6 +7,7 @@ FastAPI 应用入口
 """
 import asyncio
 import logging
+import mimetypes
 import os
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime
@@ -104,6 +105,13 @@ app.add_middleware(
 app.add_exception_handler(ApiException, api_exception_handler)
 
 # ==================== 静态文件 ====================
+
+# slim 镜像的 mimetypes 常不认识 webp/avif，StaticFiles 会回落成 text/plain，
+# 安卓原生 <image> 会拒载。必须在 mount 之前注册。
+mimetypes.add_type("image/webp", ".webp")
+mimetypes.add_type("image/avif", ".avif")
+mimetypes.add_type("image/heic", ".heic")
+mimetypes.add_type("image/heif", ".heif")
 
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")

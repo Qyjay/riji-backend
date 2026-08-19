@@ -1181,6 +1181,83 @@ class TestDiaryAI:
         rows = db.query(DiaryDerivative).filter(DiaryDerivative.diary_id == diary_id).all()
         assert rows == []
 
+    def test_sanitize_comic_source_text_strips_nude_sculpture(self):
+        from app.diary.service import _build_comic_image_prompt, sanitize_comic_source_text
+
+        raw = "今天在艺术空间看到一尊亮面镂空的裸女人形雕塑"
+        cleaned = sanitize_comic_source_text(raw)
+        assert "裸女" not in cleaned
+        prompt = _build_comic_image_prompt(raw, "多云", "平静", "pixel")
+        assert "裸女" not in prompt
+        assert "适合全年龄" in prompt
+        assert "像素" in prompt
+
+    def test_generate_derivative_comic_image_error_does_not_persist_placeholder(
+        self, client: TestClient, db, monkeypatch
+    ):
+        """文生图失败应返回错误，而不是把 placehold.co 当成功结果写入。"""
+        auth, headers = _create_user_with_material(client, "diary_der_comic_fail")
+
+        gen_resp = client.post("/api/diaries/generate", json={"date": "2026-03-25"}, headers=headers)
+        assert gen_resp.status_code == 200
+        diary_id = gen_resp.json()["data"]["id"]
+
+        class FailMiniMaxClient:
+            mock = False
+
+            async def generate_image(self, prompt: str, aspect_ratio: str = "1:1"):
+                raise RuntimeError("VIVO 图片生成失败 code=1003: content safety 审核未通过")
+
+        monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: FailMiniMaxClient())
+
+        resp = client.post(f"/api/diaries/{diary_id}/derivative", json={"type": "comic"}, headers=headers)
+        assert resp.status_code == 502
+        body = resp.json()
+        assert body["code"] == 50101
+        assert "审核" in body["message"] or "失败" in body["message"]
+
+        rows = db.query(DiaryDerivative).filter(
+            DiaryDerivative.diary_id == diary_id,
+            DiaryDerivative.type == "comic",
+        ).all()
+        assert rows == []
+
+    def test_generate_derivative_comic_uses_style_and_sanitized_prompt(
+        self, client: TestClient, db, monkeypatch
+    ):
+        auth, headers = _create_user_with_material(client, "diary_comic_st")
+
+        gen_resp = client.post("/api/diaries/generate", json={"date": "2026-03-25"}, headers=headers)
+        assert gen_resp.status_code == 200
+        diary_id = gen_resp.json()["data"]["id"]
+
+        diary = db.query(Diary).filter(Diary.id == diary_id).first()
+        diary.content = "艺术空间里的裸女人形雕塑，下午回家看了老电影"
+        db.commit()
+
+        captured = {"prompt": "", "calls": 0}
+
+        class FakeMiniMaxClient:
+            mock = False
+
+            async def generate_image(self, prompt: str, aspect_ratio: str = "1:1"):
+                captured["calls"] += 1
+                captured["prompt"] = prompt
+                return "https://img.example.com/comic.png"
+
+        monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: FakeMiniMaxClient())
+
+        resp = client.post(
+            f"/api/diaries/{diary_id}/derivative",
+            json={"type": "comic", "style": "pixel"},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["data"]["mediaUrl"] == "https://img.example.com/comic.png"
+        assert captured["calls"] == 1
+        assert "裸女" not in captured["prompt"]
+        assert "像素" in captured["prompt"]
+
     def test_generate_derivative_route_alias_plural_path(self, client: TestClient, db, monkeypatch):
         """兼容路径 /diaries/{id}/derivatives 应与 /derivative 行为一致。"""
         auth, headers = _create_user_with_material(client, "diary_der_alias")

@@ -5,6 +5,7 @@
 import asyncio
 from collections import Counter
 import json
+import logging
 import os
 import re
 import time
@@ -20,7 +21,9 @@ from app.config import settings
 from app.models.diary import Diary
 from app.models.material import RawMaterial
 from app.models.user import User
-from app.response import ApiException, NOT_FOUND, PARAM_ERROR
+from app.response import AI_SERVICE_ERROR, ApiException, NOT_FOUND, PARAM_ERROR
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_max_edits_default() -> int:
@@ -49,6 +52,34 @@ def _resolve_derivative_ai_timeout_sec() -> int:
 DERIVATIVE_AI_TIMEOUT_SEC = _resolve_derivative_ai_timeout_sec()
 DERIVATIVE_COMIC_FALLBACK_IMAGE = "https://placehold.co/1024x1024/EEE/31343C?text=Diary+Comic&font=roboto"
 DERIVATIVE_TASK_TTL_MS = 60 * 60 * 1000
+COMIC_STYLE_HINTS = {
+    "jp-fresh": "日漫清新治愈系，柔和暖色，细腻少女风线稿",
+    "jp-hot": "日漫热血少年漫，鲜明分镜与动感构图",
+    "cn-wuxia": "国漫水墨武侠风，留白与淡墨",
+    "watercolor": "手绘水彩治愈风，边缘柔和",
+    "pixel": "8bit 像素复古风",
+    "chibi": "Q版可爱 SD 比例，圆润造型",
+}
+_COMIC_NSFW_REPLACEMENTS = (
+    (re.compile(r"裸女人形雕塑|裸体雕塑|裸雕"), "艺术雕塑"),
+    (re.compile(r"全裸|裸露|裸体|裸女|裸男|裸身"), "人物"),
+    (re.compile(r"色情|性爱|性交|生殖器|阴[茎蒂]|下体"), "日常相处"),
+    (re.compile(r"\bnude\b|\bnaked\b|\bnsfw\b|\bporn\b", re.IGNORECASE), "figure"),
+)
+_COMIC_SAFETY_KEYWORDS = (
+    "safety",
+    "nsfw",
+    "sensitive",
+    "violat",
+    "audit",
+    "risk",
+    "illegal",
+    "审核",
+    "违规",
+    "色情",
+    "敏感",
+    "未通过",
+)
 _DERIVATIVE_TASKS: dict[str, dict] = {}
 AI_COMMENT_RAG_SOURCE_TYPES = [
     "diary",
@@ -629,6 +660,132 @@ def _build_derivative_text_fallback(
 
     # share_card
     return f"{weather_ctx}的一天里，我带着{emotion_ctx}走过这些片段：{snippet[:48]}。"
+
+
+def _is_placeholder_image_url(url: str) -> bool:
+    raw = str(url or "").strip().lower()
+    return "placehold.co" in raw or "placeholder.com" in raw
+
+
+def _is_image_safety_error(message: str) -> bool:
+    text = str(message or "").lower()
+    return any(keyword in text for keyword in _COMIC_SAFETY_KEYWORDS)
+
+
+def sanitize_comic_source_text(text: str) -> str:
+    """去掉文生图容易触发审核的措辞，只用于生图 prompt，不改日记正文。"""
+    cleaned = str(text or "")
+    for pattern, repl in _COMIC_NSFW_REPLACEMENTS:
+        cleaned = pattern.sub(repl, cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _comic_style_hint(style: str) -> str:
+    key = str(style or "").strip()
+    return COMIC_STYLE_HINTS.get(key, COMIC_STYLE_HINTS["jp-fresh"])
+
+
+def _comic_image_timeout_sec() -> int:
+    image_timeout = int(getattr(settings, "VIVO_IMAGE_TIMEOUT_SEC", 90) or 90)
+    return max(DERIVATIVE_AI_TIMEOUT_SEC, image_timeout + 15)
+
+
+def _build_comic_image_prompt(
+    diary_excerpt: str,
+    weather_ctx: str,
+    emotion_ctx: str,
+    style: str = "",
+) -> str:
+    safe_excerpt = sanitize_comic_source_text(diary_excerpt)[:420]
+    style_hint = _comic_style_hint(style)
+    return (
+        f"请生成一张多格剧情漫画（单张图内 4 格分镜），画风：{style_hint}。\n"
+        "要求：\n"
+        "1. 至少四格，按时间顺序：开场-发展-转折-收束，每格场景与动作都要变化。\n"
+        "2. 严格基于日记事实的日常现实向，不科幻、不魔幻。\n"
+        "3. 画面必须健康、适合全年龄：人物着衣；雕塑或人体用含蓄剪影或着衣造型，禁止裸露、色情、器官特写。\n"
+        "4. 不要出现文字、对白框、Logo、水印、边框、拼贴。\n"
+        f"天气：{weather_ctx}；主要情绪：{emotion_ctx}。\n"
+        f"日记内容：{safe_excerpt}"
+    )
+
+
+def _build_comic_retry_prompt(weather_ctx: str, emotion_ctx: str, style: str = "") -> str:
+    style_hint = _comic_style_hint(style)
+    return (
+        f"请生成一张健康向多格日常漫画（单张图内 4 格），画风：{style_hint}。\n"
+        "四格内容：艺术空间散步看展、回家翻看老电影、夜晚出门拍街景、安静收束。\n"
+        "人物着衣，禁止裸露与色情，不要文字和水印。\n"
+        f"天气：{weather_ctx}；情绪：{emotion_ctx}。"
+    )
+
+
+def _comic_user_error(exc: Exception) -> str:
+    if isinstance(exc, asyncio.TimeoutError):
+        return "漫画生成超时，请稍后重试"
+    msg = str(getattr(exc, "message", "") or exc)
+    if _is_image_safety_error(msg):
+        return "画面未通过安全审核，请换一篇日记再试"
+    if "未配置" in msg:
+        return "图片生成服务未配置"
+    return "漫画生成失败，请稍后重试"
+
+
+async def _generate_comic_media_url(
+    client,
+    diary_excerpt: str,
+    weather_ctx: str,
+    emotion_ctx: str,
+    style: str = "",
+) -> str:
+    """调用文生图；审核类快失败会换一版更安全的 prompt 再试一次。"""
+    timeout_sec = _comic_image_timeout_sec()
+    prompts = [
+        _build_comic_image_prompt(diary_excerpt, weather_ctx, emotion_ctx, style),
+        _build_comic_retry_prompt(weather_ctx, emotion_ctx, style),
+    ]
+    last_error: Optional[Exception] = None
+    allow_placeholder = bool(getattr(client, "mock", False))
+
+    for index, prompt in enumerate(prompts):
+        started = time.monotonic()
+        try:
+            media_url = await asyncio.wait_for(
+                client.generate_image(prompt, aspect_ratio="1:1"),
+                timeout=timeout_sec,
+            )
+            media_url = str(media_url or "").strip()
+            if media_url and (allow_placeholder or not _is_placeholder_image_url(media_url)):
+                return media_url
+            last_error = RuntimeError("图片生成未返回有效地址")
+        except Exception as exc:
+            last_error = exc
+            elapsed = time.monotonic() - started
+            logger.warning(
+                "comic image generation failed (attempt %s, %.2fs): %s",
+                index + 1,
+                elapsed,
+                exc,
+            )
+            if index == 0 and elapsed < 5:
+                continue
+            break
+        else:
+            elapsed = time.monotonic() - started
+            logger.warning(
+                "comic image generation returned unusable url (attempt %s, %.2fs)",
+                index + 1,
+                elapsed,
+            )
+            if index == 0 and elapsed < 5:
+                continue
+            break
+
+    raise ApiException(
+        code=AI_SERVICE_ERROR,
+        message=_comic_user_error(last_error or RuntimeError("漫画生成失败")),
+        status_code=502,
+    )
 
 
 def _parse_csv_values(raw: str) -> List[str]:
@@ -1408,7 +1565,7 @@ async def extract_diary_info(db: Session, user_id: str, diary_id: str) -> dict:
     }
 
 
-async def generate_derivative(db: Session, user_id: str, diary_id: str, dtype: str) -> dict:
+async def generate_derivative(db: Session, user_id: str, diary_id: str, dtype: str, style: str = "") -> dict:
     """生成衍生内容（漫画/小说/分享卡）"""
     d = db.query(Diary).filter(Diary.id == diary_id, Diary.user_id == user_id).first()
     # 兼容前端预览页兜底 diaryId='1' 的历史写法：回退到用户最近一篇日记。
@@ -1444,28 +1601,13 @@ async def generate_derivative(db: Session, user_id: str, diary_id: str, dtype: s
     diary_excerpt = (d.content or "").strip()
 
     if dtype == "comic":
-        prompt = (
-            "请根据以下日记生成一张“多格剧情漫画”图（单张图片内包含 4~6 格分镜），画风稳定为："
-            "治愈系青春日常、手绘线稿、柔和暖色、构图干净、真实生活感。\n"
-            "必须要求：\n"
-            "1. 必须是多格漫画（至少四格），并按时间顺序推进剧情：开场-发展-转折-收束。\n"
-            "2. 每一格都要有明确场景变化与动作，不可做成同一画面的重复切片。\n"
-            "3. 画面内容严格基于日记事实，不夸张魔幻、不科幻。\n"
-            "4. 强化当日主要情绪与氛围，让情绪随剧情有起伏。\n"
-            "5. 不要出现文字、对白框、Logo、水印、边框、拼贴。\n"
-            "6. 人物比例自然，场景细节清晰。\n"
-            f"天气：{weather_ctx}；主要情绪：{emotion_ctx}。\n"
-            f"日记内容：{diary_excerpt[:500]}"
+        media_url = await _generate_comic_media_url(
+            client,
+            diary_excerpt,
+            weather_ctx,
+            emotion_ctx,
+            style,
         )
-        try:
-            media_url = await asyncio.wait_for(
-                client.generate_image(prompt, aspect_ratio="1:1"),
-                timeout=DERIVATIVE_AI_TIMEOUT_SEC,
-            )
-        except Exception:
-            media_url = DERIVATIVE_COMIC_FALLBACK_IMAGE
-        if not media_url:
-            media_url = DERIVATIVE_COMIC_FALLBACK_IMAGE
     elif dtype == "novel":
         system_prompt = (
             "你是短篇小说改写编辑。"
