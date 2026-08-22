@@ -1987,7 +1987,7 @@ def _write_atoa_interaction(
         existing.reasons_b = _encode(score_data.get("reasons_ba", []))
         existing.risk_flags = _encode(score_data.get("risk_flags", []))
         existing.conversation = _encode(score_data.get("conversation", []))
-        existing.is_visible_to_b = False
+        # 不在 upsert 时强制隐藏 B；广场响应等路径可能已对 B 开放
         if triggered_match_id:
             existing.triggered_match_id = triggered_match_id
         existing.updated_at = now
@@ -3045,6 +3045,146 @@ def _latest_top10_session_id_from_surf(db: Session, user_id: str) -> Optional[st
     return log.top10_session_id
 
 
+_ATOA_OUTCOME_LABELS = {
+    "pending_user_decision": "等待你的决定",
+    "blocked": "已打断",
+    "connected": "已发出结交申请",
+    "connect_confirmed": "已成为搭子",
+    "connect_rejected": "对方拒绝了申请",
+    "mutual": "双向达标",
+    "one_sided": "单向感兴趣",
+    "incompatible": "不匹配",
+}
+
+
+def _can_access_atoa_interaction(interaction: AvatarAtoaInteraction, user_id: str) -> bool:
+    return bool(
+        (interaction.user_a_id == user_id and interaction.is_visible_to_a)
+        or (interaction.user_b_id == user_id and interaction.is_visible_to_b)
+    )
+
+
+def _serialize_probe_log_item(
+    db: Session,
+    row: AvatarAtoaInteraction,
+    user_id: str,
+) -> dict:
+    """序列化单条 AtoA；user_b 视角会反转对话角色与理由。"""
+    viewing_as_b = row.user_b_id == user_id
+    other_id = row.user_a_id if viewing_as_b else row.user_b_id
+    other = db.query(User).filter(User.id == other_id).first()
+    conversation = _decode(row.conversation, [])
+    if viewing_as_b:
+        conversation = [
+            {
+                **turn,
+                "role": (
+                    "avatar_b" if turn.get("role") == "avatar_a"
+                    else "avatar_a" if turn.get("role") == "avatar_b"
+                    else turn.get("role")
+                ),
+            }
+            for turn in conversation
+        ]
+    return {
+        "id": row.id,
+        "session_id": row.session_id,
+        "user_b_id": other_id,
+        "user_b_name": (other.name or other.username) if other else "",
+        "user_b_avatar": (other.avatar or "") if other else "",
+        "interaction_type": row.interaction_type,
+        "outcome": row.outcome,
+        "readable_outcome": _ATOA_OUTCOME_LABELS.get(row.outcome or "", row.outcome or ""),
+        "score_a": row.score_b if viewing_as_b else row.score_a,
+        "score_b": row.score_a if viewing_as_b else row.score_b,
+        "shared_topics": _decode(row.shared_topics, []),
+        "reasons_a": _decode(row.reasons_b if viewing_as_b else row.reasons_a, []),
+        "conversation": conversation,
+        "risk_flags": _decode(row.risk_flags, []),
+        "interaction_phase": row.interaction_phase or 1,
+        "user_decision": row.user_decision,
+        "is_mutual": (
+            (row.score_a or 0) >= _ATOA_MUTUAL_THRESHOLD
+            and (row.score_b or 0) >= _ATOA_MUTUAL_THRESHOLD
+        ),
+        "triggered_match_id": row.triggered_match_id,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def _resolve_current_atoa_interaction(
+    db: Session,
+    user_id: str,
+    interaction: AvatarAtoaInteraction,
+) -> Optional[AvatarAtoaInteraction]:
+    """
+    将请求的试聊解析为当前有效一轮：
+    1) 同 session + 同配对的最新可访问记录
+    2) 任务候选表当前挂载的 interaction（若可访问）
+    """
+    siblings = (
+        db.query(AvatarAtoaInteraction)
+        .filter(
+            AvatarAtoaInteraction.session_id == interaction.session_id,
+            AvatarAtoaInteraction.user_a_id == interaction.user_a_id,
+            AvatarAtoaInteraction.user_b_id == interaction.user_b_id,
+        )
+        .order_by(AvatarAtoaInteraction.created_at.desc())
+        .all()
+    ) if interaction.session_id else [interaction]
+
+    from app.models.social import MissionCandidate
+
+    sibling_ids = [row.id for row in siblings if row.id]
+    candidate = None
+    if sibling_ids:
+        candidate = (
+            db.query(MissionCandidate)
+            .filter(MissionCandidate.interaction_id.in_(sibling_ids))
+            .order_by(MissionCandidate.updated_at.desc())
+            .first()
+        )
+    if candidate and candidate.interaction_id:
+        linked = (
+            db.query(AvatarAtoaInteraction)
+            .filter(AvatarAtoaInteraction.id == candidate.interaction_id)
+            .first()
+        )
+        if linked and _can_access_atoa_interaction(linked, user_id):
+            return linked
+
+    for row in siblings:
+        if _can_access_atoa_interaction(row, user_id):
+            return row
+    if _can_access_atoa_interaction(interaction, user_id):
+        return interaction
+    return None
+
+
+def get_atoa_probe(
+    db: Session,
+    user_id: str,
+    interaction_id: str,
+) -> dict:
+    """
+    按 interaction id 打开试聊详情（不依赖 session_id / 冲浪最近一轮）。
+    若旧 id 已被同会话同配对的新一轮替代，自动落到最新可访问一轮。
+    """
+    interaction = (
+        db.query(AvatarAtoaInteraction)
+        .filter(AvatarAtoaInteraction.id == interaction_id)
+        .first()
+    )
+    if not interaction:
+        raise ApiException(code=NOT_FOUND, message="试聊记录不存在", status_code=404)
+
+    resolved = _resolve_current_atoa_interaction(db, user_id, interaction)
+    if not resolved:
+        raise ApiException(code=PARAM_INVALID, message="无权查看此试聊", status_code=403)
+    return _serialize_probe_log_item(db, resolved, user_id)
+
+
 def get_probe_log(
     db: Session,
     user_id: str,
@@ -3066,10 +3206,24 @@ def get_probe_log(
         return []
 
     query = db.query(AvatarAtoaInteraction).filter(
-        AvatarAtoaInteraction.user_a_id == user_id,
-        AvatarAtoaInteraction.is_visible_to_a == True,  # noqa: E712
         AvatarAtoaInteraction.session_id == target_sid,
     )
+    if session_id:
+        query = query.filter(or_(
+            (
+                (AvatarAtoaInteraction.user_a_id == user_id)
+                & (AvatarAtoaInteraction.is_visible_to_a == True)  # noqa: E712
+            ),
+            (
+                (AvatarAtoaInteraction.user_b_id == user_id)
+                & (AvatarAtoaInteraction.is_visible_to_b == True)  # noqa: E712
+            ),
+        ))
+    else:
+        query = query.filter(
+            AvatarAtoaInteraction.user_a_id == user_id,
+            AvatarAtoaInteraction.is_visible_to_a == True,  # noqa: E712
+        )
     if outcome:
         query = query.filter(AvatarAtoaInteraction.outcome == outcome)
 
@@ -3079,53 +3233,14 @@ def get_probe_log(
     seen_b: set[str] = set()
     deduped: list[AvatarAtoaInteraction] = []
     for row in rows:
-        if row.user_b_id in seen_b:
+        other_id = row.user_b_id if row.user_a_id == user_id else row.user_a_id
+        if other_id in seen_b:
             continue
-        seen_b.add(row.user_b_id)
+        seen_b.add(other_id)
         deduped.append(row)
 
     rows = deduped[offset : offset + limit]
-
-    _outcome_labels = {
-        "pending_user_decision": "等待你的决定",
-        "blocked": "已打断",
-        "connected": "已发出结交申请",
-        "connect_confirmed": "已成为搭子",
-        "connect_rejected": "对方拒绝了申请",
-        "mutual": "双向达标",
-        "one_sided": "单向感兴趣",
-        "incompatible": "不匹配",
-    }
-
-    result = []
-    for row in rows:
-        other = db.query(User).filter(User.id == row.user_b_id).first()
-        result.append({
-            "id": row.id,
-            "session_id": row.session_id,
-            "user_b_id": row.user_b_id,
-            "user_b_name": (other.name or other.username) if other else "",
-            "user_b_avatar": (other.avatar or "") if other else "",
-            "interaction_type": row.interaction_type,
-            "outcome": row.outcome,
-            "readable_outcome": _outcome_labels.get(row.outcome or "", row.outcome or ""),
-            "score_a": row.score_a,
-            "score_b": row.score_b,
-            "shared_topics": _decode(row.shared_topics, []),
-            "reasons_a": _decode(row.reasons_a, []),
-            "conversation": _decode(row.conversation, []),
-            "risk_flags": _decode(row.risk_flags, []),
-            "interaction_phase": row.interaction_phase or 1,
-            "user_decision": row.user_decision,
-            "is_mutual": (
-                (row.score_a or 0) >= _ATOA_MUTUAL_THRESHOLD
-                and (row.score_b or 0) >= _ATOA_MUTUAL_THRESHOLD
-            ),
-            "triggered_match_id": row.triggered_match_id,
-            "created_at": row.created_at,
-            "updated_at": row.updated_at,
-        })
-    return result
+    return [_serialize_probe_log_item(db, row, user_id) for row in rows]
 
 
 def get_atoa_sessions(
@@ -3265,14 +3380,18 @@ async def continue_atoa_conversation(
 ) -> dict:
     """
     Phase 8B：用户选择「继续聊」，触发分身续聊 ≤3 轮并追加到现有对话。
-    只有 user_a（发起方）可以操作。
+    参与试聊的任一用户都可操作；响应招募帖的 user_b 会得到自己的视角。
     """
     interaction = db.query(AvatarAtoaInteraction).filter(
         AvatarAtoaInteraction.id == interaction_id
     ).first()
     if not interaction:
         raise ApiException(code=NOT_FOUND, message="AtoA 互动记录不存在", status_code=404)
-    if interaction.user_a_id != user_id:
+    can_access = (
+        (interaction.user_a_id == user_id and interaction.is_visible_to_a)
+        or (interaction.user_b_id == user_id and interaction.is_visible_to_b)
+    )
+    if not can_access:
         raise ApiException(code=PARAM_INVALID, message="无权操作此互动记录", status_code=403)
     if interaction.outcome in _ATOA_TERMINAL_OUTCOMES:
         raise ApiException(
@@ -3303,15 +3422,32 @@ async def continue_atoa_conversation(
     interaction.updated_at = _now_ms()
     db.commit()
 
-    other = db.query(User).filter(User.id == interaction.user_b_id).first()
+    viewing_as_b = interaction.user_b_id == user_id
+    other_id = interaction.user_a_id if viewing_as_b else interaction.user_b_id
+    other = db.query(User).filter(User.id == other_id).first()
+    if viewing_as_b:
+        def reverse_turns(turns: list[dict]) -> list[dict]:
+            return [{
+                **turn,
+                "role": (
+                    "avatar_b" if turn.get("role") == "avatar_a"
+                    else "avatar_a" if turn.get("role") == "avatar_b"
+                    else turn.get("role")
+                ),
+            } for turn in turns]
+        visible_new_turns = reverse_turns(new_turns)
+        visible_conversation = reverse_turns(all_conversation)
+    else:
+        visible_new_turns = new_turns
+        visible_conversation = all_conversation
     return {
         "id": interaction.id,
-        "user_b_id": interaction.user_b_id,
+        "user_b_id": other_id,
         "user_b_name": (other.name or other.username) if other else "",
         "outcome": interaction.outcome,
         "interaction_phase": interaction.interaction_phase,
-        "new_turns": new_turns,
-        "conversation": all_conversation,
+        "new_turns": visible_new_turns,
+        "conversation": visible_conversation,
         "updated_at": interaction.updated_at,
     }
 
@@ -3409,7 +3545,11 @@ async def decide_atoa_outcome(
     ).first()
     if not interaction:
         raise ApiException(code=NOT_FOUND, message="AtoA 互动记录不存在", status_code=404)
-    if interaction.user_a_id != user_id:
+    can_access = (
+        (interaction.user_a_id == user_id and interaction.is_visible_to_a)
+        or (interaction.user_b_id == user_id and interaction.is_visible_to_b)
+    )
+    if not can_access:
         raise ApiException(code=PARAM_INVALID, message="无权操作此互动记录", status_code=403)
     if interaction.outcome in _ATOA_TERMINAL_OUTCOMES:
         raise ApiException(
@@ -3418,6 +3558,11 @@ async def decide_atoa_outcome(
         )
 
     now = _now_ms()
+    other_user_id = (
+        interaction.user_b_id
+        if interaction.user_a_id == user_id
+        else interaction.user_a_id
+    )
 
     if decision == "block":
         interaction.outcome = "blocked"
@@ -3425,12 +3570,12 @@ async def decide_atoa_outcome(
         interaction.is_visible_to_b = False
         interaction.updated_at = now
         session = _exclude_atoa_session_candidate(db, interaction)
-        _apply_block_penalty(db, interaction.user_a_id, interaction.user_b_id)
+        _apply_block_penalty(db, user_id, other_user_id)
 
         # 同步关联的 AtoA AvatarMatch → dismissed
         match = db.query(AvatarMatch).filter(
             AvatarMatch.user_id == user_id,
-            AvatarMatch.target_user_id == interaction.user_b_id,
+            AvatarMatch.target_user_id == other_user_id,
             AvatarMatch.match_type == "atoa",
             AvatarMatch.status != "dismissed",
         ).first()
@@ -3453,7 +3598,7 @@ async def decide_atoa_outcome(
     from app.social.service import apply_buddy
 
     reason = (opening_message or "").strip() or "我们的分身先聊过，发现彼此有值得继续了解的共同点。"
-    social_match = apply_buddy(db, user_id, interaction.user_b_id, reason)
+    social_match = apply_buddy(db, user_id, other_user_id, reason)
     social_match_id = social_match.id
     from app.social.mission_service import mark_candidate_connection
 

@@ -6,9 +6,12 @@
 """
 import asyncio
 import json
+import logging
 import os
+import re
 import time
 from typing import List, Optional
+from urllib.parse import unquote_plus, urlparse
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
@@ -20,6 +23,9 @@ from app.models.plaza import PlazaPost
 from app.models.memory import MemoryFact, MemoryProfile
 from app.models.derivative import DiaryDerivative
 from app.response import ApiException, NOT_FOUND, PARAM_ERROR
+
+
+logger = logging.getLogger(__name__)
 
 
 # 每累计这么多篇新日记可解锁/生成一章
@@ -43,7 +49,6 @@ def _resolve_ai_timeout_sec() -> int:
 
 CHAPTER_THRESHOLD = _resolve_chapter_threshold()
 AI_TIMEOUT_SEC = _resolve_ai_timeout_sec()
-COVER_FALLBACK_IMAGE = "https://placehold.co/1280x720/EEE/31343C?text=My+Story&font=roboto"
 TASK_TTL_MS = 60 * 60 * 1000
 _TASKS: dict[str, dict] = {}
 
@@ -67,6 +72,55 @@ def _decode(s: str, default=None):
         return json.loads(s) if s else default
     except Exception:
         return default
+
+
+def is_known_placeholder_media_url(url: str) -> bool:
+    """识别历史上曾被当成成功结果保存的远程文字占位图。"""
+    raw = str(url or "").strip()
+    if not raw:
+        return False
+    normalized = raw
+    for _ in range(2):
+        try:
+            normalized = unquote_plus(normalized)
+        except Exception:
+            break
+    normalized = re.sub(r"[\s_+-]+", " ", normalized).lower()
+    return (
+        "placehold.co" in normalized
+        or "placeholder.com" in normalized
+        or "my story" in normalized
+        or "diary comic" in normalized
+    )
+
+
+def _valid_generated_image_url(url: str) -> str:
+    """仅接受可展示的 http(s) 图片地址，拒绝空值、相对路径和占位图。"""
+    value = str(url or "").strip()
+    if not value or is_known_placeholder_media_url(value):
+        return ""
+    try:
+        parsed = urlparse(value)
+    except Exception:
+        return ""
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return value
+
+
+def _filter_illustrations(raw) -> List[dict]:
+    decoded = _decode(raw, []) if isinstance(raw, str) else raw
+    if not isinstance(decoded, list):
+        return []
+    result = []
+    for item in decoded:
+        if not isinstance(item, dict):
+            continue
+        image_url = str(item.get("image_url") or item.get("imageUrl") or "").strip()
+        if not image_url or is_known_placeholder_media_url(image_url):
+            continue
+        result.append(item)
+    return result
 
 
 # ==================== 任务管理 ====================
@@ -162,6 +216,9 @@ def get_progress(db: Session, user_id: str) -> dict:
 
 
 def _chapter_to_dict(ch: BiographyChapter) -> dict:
+    cover_url = str(ch.cover_image_url or "").strip()
+    if is_known_placeholder_media_url(cover_url):
+        cover_url = ""
     return {
         "id": ch.id,
         "chapter_index": ch.chapter_index,
@@ -170,8 +227,8 @@ def _chapter_to_dict(ch: BiographyChapter) -> dict:
         "preview": ch.preview or "",
         "word_count": ch.word_count or 0,
         "summary": ch.summary or "",
-        "cover_image_url": ch.cover_image_url or "",
-        "illustrations": _decode(ch.illustrations, []),
+        "cover_image_url": cover_url,
+        "illustrations": _filter_illustrations(ch.illustrations),
         "date_range_start": ch.date_range_start or "",
         "date_range_end": ch.date_range_end or "",
         "source_material_count": ch.source_material_count or 0,
@@ -295,6 +352,43 @@ def _build_context_block(db: Session, user_id: str, diaries: List[Diary]) -> str
     return "\n\n".join(parts)
 
 
+def _build_cover_retry_prompt(mood: str) -> str:
+    return (
+        "生成一张健康、全年龄的自传小说章节封面插画。"
+        "暖色手绘风景，安静日常氛围，不出现人物特写，不含文字、标志、水印或边框。"
+        f"整体情绪：{mood or '平静'}。"
+    )
+
+
+async def _generate_cover_image(client, prompt: str, mood: str) -> str:
+    """封面失败后用安全简化 prompt 重试；最终失败返回空串而非伪图。"""
+    prompts = [prompt, _build_cover_retry_prompt(mood)]
+    for index, current_prompt in enumerate(prompts):
+        started = time.monotonic()
+        try:
+            generated = await asyncio.wait_for(
+                client.generate_image(current_prompt, aspect_ratio="16:9"),
+                timeout=AI_TIMEOUT_SEC,
+            )
+            cover_url = _valid_generated_image_url(generated)
+            if cover_url:
+                return cover_url
+            logger.warning(
+                "biography cover returned unusable url (attempt %s, %.2fs)",
+                index + 1,
+                time.monotonic() - started,
+            )
+        except Exception as exc:
+            logger.warning(
+                "biography cover generation failed (attempt %s, %.2fs): %s",
+                index + 1,
+                time.monotonic() - started,
+                exc,
+            )
+    logger.error("biography cover generation exhausted retries; chapter will use no cover")
+    return ""
+
+
 async def generate_chapter(db: Session, user_id: str) -> dict:
     """生成下一章自传：聚合数据 -> LLM 写正文 -> 封面图 -> 复用漫画插图 -> 落库。"""
     consumed = _consumed_diary_ids(db, user_id)
@@ -336,6 +430,11 @@ async def generate_chapter(db: Session, user_id: str) -> dict:
 
     from app.ai.minimax_client import get_minimax_client
     client = get_minimax_client()
+    logger.info(
+        "biography chapter generate via provider=%s model=%s",
+        getattr(client, "provider", ""),
+        getattr(client, "vivo_model", "") or getattr(client, "model", ""),
+    )
 
     system_prompt = (
         "你是一位擅长写自传体长篇小说的作家。"
@@ -362,21 +461,40 @@ async def generate_chapter(db: Session, user_id: str) -> dict:
     title = f"第{chapter_index}章"
     content = ""
     summary = ""
+    messages = [{"role": "user", "content": user_prompt}]
+    call_kwargs = {
+        "system_prompt": system_prompt,
+        "temperature": 0.8,
+        "max_tokens": 4096,
+        "timeout_sec": float(AI_TIMEOUT_SEC),
+    }
     try:
-        raw = await asyncio.wait_for(
-            client.chat_completion(
-                [{"role": "user", "content": user_prompt}],
-                system_prompt=system_prompt,
-                temperature=0.8,
-                max_tokens=4096,
-            ),
-            timeout=AI_TIMEOUT_SEC,
-        )
+        try:
+            raw = await asyncio.wait_for(
+                client.chat_completion(
+                    messages,
+                    response_format={"type": "json_object"},
+                    **call_kwargs,
+                ),
+                timeout=AI_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            raise
+        except Exception as json_mode_error:
+            logger.warning(
+                "biography JSON mode unavailable, fallback plain completion: %s",
+                str(json_mode_error)[:200],
+            )
+            raw = await asyncio.wait_for(
+                client.chat_completion(messages, **call_kwargs),
+                timeout=AI_TIMEOUT_SEC,
+            )
         parsed = _parse_chapter_json(raw)
         title = parsed.get("title") or title
         content = parsed.get("content") or ""
         summary = parsed.get("summary") or ""
-    except Exception:
+    except Exception as exc:
+        logger.warning("biography chapter llm failed, falling back to diary text: %s", exc)
         content = ""
 
     if not content.strip():
@@ -398,16 +516,7 @@ async def generate_chapter(db: Session, user_id: str) -> dict:
         "有故事感与意境，画面干净、无文字无水印无边框。"
         f"主题情绪：{mood}。章节标题意境：{title}。"
     )
-    cover_url = ""
-    try:
-        cover_url = await asyncio.wait_for(
-            client.generate_image(cover_prompt, aspect_ratio="16:9"),
-            timeout=AI_TIMEOUT_SEC,
-        )
-    except Exception:
-        cover_url = ""
-    if not cover_url:
-        cover_url = COVER_FALLBACK_IMAGE
+    cover_url = await _generate_cover_image(client, cover_prompt, mood)
 
     now = _now_ms()
     material_count = (

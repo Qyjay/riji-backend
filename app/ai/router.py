@@ -7,6 +7,7 @@ from app.models.user import User
 from app.response import success
 from app.ai import service as ai_service
 from app.ai import model_service
+from app.ai import voice_intent
 from app.ai.schemas import (
     LlmModelCreateRequest,
     LlmModelListOut,
@@ -14,6 +15,8 @@ from app.ai.schemas import (
     LlmModelUpdateRequest,
     TtsRequest,
     FortuneOut,
+    VoiceIntentOut,
+    VoiceIntentRequest,
 )   # 注意 FortuneOut 现在在 schemas 中
 
 router = APIRouter(prefix="/ai", tags=["AI 功能"])
@@ -47,6 +50,17 @@ async def speech_to_text_short(
         end_vad_time=end_vad_time,
     )
     return success(data)
+
+
+@router.post("/voice-intent", summary="小 V 语音指令意图识别")
+async def parse_voice_intent(
+    req: VoiceIntentRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _ = db
+    data = await voice_intent.resolve_voice_intent(req.utterance)
+    return success(VoiceIntentOut(**data).model_dump(by_alias=True))
 
 
 @router.get("/fortune", summary="AI 今日运势")

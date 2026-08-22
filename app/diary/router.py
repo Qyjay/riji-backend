@@ -39,6 +39,7 @@ async def generate_diary(
         body.weather or "",
         body.weather_periods,
         body.allow_fallback,
+        body.regenerate,
     )
     return success(result)
 

@@ -1,6 +1,8 @@
 """找人任务 P0 链路测试。"""
 import time
+from uuid import uuid4
 
+from app.models.social import MissionCandidate
 from tests.conftest import create_test_user, get_auth_header
 
 
@@ -147,6 +149,22 @@ def test_short_mission_search_and_probe_existing_post(client):
     assert room["title"] == "本周末看电影"
     assert len(room["participants"]) == 2
 
+    # 活动房间的匹配报告：双方拿到同一份，分数已规范化到 0~100
+    seeker_report = client.get(
+        f"/api/social/matches/{match_id}/report",
+        headers=seeker_headers,
+    )
+    assert seeker_report.status_code == 200, seeker_report.json()
+    score = seeker_report.json()["data"]["compatibility"]
+    assert isinstance(score, int)
+    assert 0 <= score <= 100
+    host_report = client.get(
+        f"/api/social/matches/{match_id}/report",
+        headers=host_headers,
+    )
+    assert host_report.status_code == 200, host_report.json()
+    assert host_report.json()["data"]["compatibility"] == score
+
 
 def test_mission_post_draft_requires_user_publish(client):
     user = create_test_user(client, username="mission_publish")
@@ -197,6 +215,307 @@ def test_mission_post_draft_requires_user_publish(client):
     ).json()["data"]
     assert mission_after["linkedPostId"] == post["id"]
     assert mission_after["status"] == "posting"
+
+
+def test_agent_mission_post_is_public_by_default_and_keeps_explicit_school_scope(client):
+    """校园地点不应暗改为仅本校；用户明确写同校时仍保留可见性边界。"""
+    author = create_test_user(
+        client,
+        username="missionvisauthor",
+        school="南开大学",
+    )
+    outsider = create_test_user(
+        client,
+        username="missionvisoutside",
+        school="天津大学",
+    )
+    author_headers = get_auth_header(author["token"])
+    outsider_headers = get_auth_header(outsider["token"])
+
+    public_mission = _create_short_mission(client, author_headers)
+    public_draft = client.post(
+        f"/api/social/missions/{public_mission['id']}/post-draft",
+        headers=author_headers,
+    ).json()["data"]
+    assert public_draft["schoolOnly"] is False
+    public_post = client.post(
+        f"/api/social/missions/{public_mission['id']}/publish",
+        json={
+            "content": public_draft["content"],
+            "location": public_draft["location"],
+            "tags": public_draft["tags"],
+            "school_only": public_draft["schoolOnly"],
+            "allow_agent_reply": public_draft["allowAgentReply"],
+        },
+        headers=author_headers,
+    ).json()["data"]
+    outsider_ids = [
+        item["id"]
+        for item in client.get("/api/plaza/posts", headers=outsider_headers).json()["data"]["items"]
+    ]
+    assert public_post["id"] in outsider_ids
+    assert public_post["isFromAgent"] is True
+
+    school_mission = _create_short_mission(
+        client,
+        author_headers,
+        title="仅找同校电影搭子",
+        preferences=["科幻", "同校"],
+    )
+    school_draft = client.post(
+        f"/api/social/missions/{school_mission['id']}/post-draft",
+        headers=author_headers,
+    ).json()["data"]
+    assert school_draft["schoolOnly"] is True
+    school_post = client.post(
+        f"/api/social/missions/{school_mission['id']}/publish",
+        json={
+            "content": school_draft["content"],
+            "location": school_draft["location"],
+            "tags": school_draft["tags"],
+            "school_only": True,
+            "allow_agent_reply": True,
+        },
+        headers=author_headers,
+    ).json()["data"]
+    outsider_ids = [
+        item["id"]
+        for item in client.get("/api/plaza/posts", headers=outsider_headers).json()["data"]["items"]
+    ]
+    assert school_post["id"] not in outsider_ids
+
+
+def test_recent_candidates_dedupe_by_user_and_keep_actionable_record(client, db):
+    owner = create_test_user(client, username="candidateowner")
+    target = create_test_user(client, username="candidatetarget", name="同一个候选")
+    headers = get_auth_header(owner["token"])
+    mission = _create_short_mission(client, headers)
+    now = int(time.time() * 1000)
+    common = {
+        "mission_id": mission["id"],
+        "target_user_id": target["user"]["id"],
+        "source": "plaza_post",
+        "hard_constraint_result": "{}",
+        "conflicts": "[]",
+        "risk_flags": "[]",
+        "internal_score": 80,
+        "created_at": now,
+    }
+    db.add_all([
+        MissionCandidate(
+            id=str(uuid4()),
+            status="ready_for_user",
+            fit_reasons='[{"text":"报告完整"}]',
+            questions='["时间合适吗？"]',
+            interaction_id="interaction-existing",
+            updated_at=now,
+            **common,
+        ),
+        MissionCandidate(
+            id=str(uuid4()),
+            status="expired",
+            fit_reasons="[]",
+            questions="[]",
+            interaction_id=None,
+            updated_at=now + 1000,
+            **common,
+        ),
+    ])
+    db.commit()
+
+    response = client.get(
+        f"/api/social/missions/{mission['id']}/candidates",
+        headers=headers,
+    )
+    assert response.status_code == 200
+    candidates = response.json()["data"]
+    assert len(candidates) == 1
+    assert candidates[0]["status"] == "ready_for_user"
+    assert candidates[0]["interactionId"] == "interaction-existing"
+
+
+def test_candidates_and_recruitment_post_run_in_parallel_and_publish_is_idempotent(client):
+    owner = create_test_user(client, username="parallelowner")
+    candidate_user = create_test_user(client, username="parallelcandidate", name="候选用户")
+    owner_headers = get_auth_header(owner["token"])
+    candidate_headers = get_auth_header(candidate_user["token"])
+    client.post(
+        "/api/plaza/posts",
+        json={
+            "type": "buddy",
+            "content": "周末一起看科幻电影",
+            "location": "南开大学",
+            "tags": ["电影", "科幻", "周末"],
+        },
+        headers=candidate_headers,
+    )
+    mission = _create_short_mission(client, owner_headers)
+    search = client.post(
+        f"/api/social/missions/{mission['id']}/start",
+        headers=owner_headers,
+    ).json()["data"]
+    assert len(search["candidates"]) == 1
+
+    draft = client.post(
+        f"/api/social/missions/{mission['id']}/post-draft",
+        headers=owner_headers,
+    ).json()["data"]
+    payload = {
+        "content": draft["content"],
+        "location": draft["location"],
+        "tags": draft["tags"],
+        "school_only": draft["schoolOnly"],
+        "allow_agent_reply": draft["allowAgentReply"],
+    }
+    first = client.post(
+        f"/api/social/missions/{mission['id']}/publish",
+        json=payload,
+        headers=owner_headers,
+    ).json()["data"]
+    second = client.post(
+        f"/api/social/missions/{mission['id']}/publish",
+        json={**payload, "content": "不应重复发布"},
+        headers=owner_headers,
+    ).json()["data"]
+    assert first["id"] == second["id"]
+    candidates = client.get(
+        f"/api/social/missions/{mission['id']}/candidates",
+        headers=owner_headers,
+    ).json()["data"]
+    assert len(candidates) == 1
+    assert candidates[0]["targetUserId"] == candidate_user["user"]["id"]
+
+
+def test_post_response_reuses_source_mission_probe_and_rejects_owner(client, db):
+    owner = create_test_user(client, username="responseowner", name="招募者")
+    responder = create_test_user(client, username="responder", name="响应者")
+    owner_headers = get_auth_header(owner["token"])
+    responder_headers = get_auth_header(responder["token"])
+    mission = _create_short_mission(client, owner_headers)
+    draft = client.post(
+        f"/api/social/missions/{mission['id']}/post-draft",
+        headers=owner_headers,
+    ).json()["data"]
+    post = client.post(
+        f"/api/social/missions/{mission['id']}/publish",
+        json={
+            "content": draft["content"],
+            "location": draft["location"],
+            "tags": draft["tags"],
+            "school_only": False,
+            "allow_agent_reply": True,
+        },
+        headers=owner_headers,
+    ).json()["data"]
+    assert post["missionId"] == mission["id"]
+
+    self_response = client.post(
+        f"/api/social/mission-posts/{post['id']}/respond",
+        headers=owner_headers,
+    )
+    assert self_response.status_code == 403
+    assert client.get(
+        f"/api/social/missions/{mission['id']}/candidates",
+        headers=owner_headers,
+    ).json()["data"] == []
+
+    first = client.post(
+        f"/api/social/mission-posts/{post['id']}/respond",
+        headers=responder_headers,
+    )
+    assert first.status_code == 200, first.json()
+    first_data = first.json()["data"]
+    second = client.post(
+        f"/api/social/mission-posts/{post['id']}/respond",
+        headers=responder_headers,
+    )
+    assert second.status_code == 200, second.json()
+    second_data = second.json()["data"]
+    assert first_data["missionId"] == mission["id"]
+    assert first_data["interactionId"] == second_data["interactionId"]
+    assert first_data["sessionId"] == second_data["sessionId"]
+    assert first_data["candidate"]["id"] == second_data["candidate"]["id"]
+    assert second_data["candidate"]["status"] == "ready_for_user"
+
+    candidates = client.get(
+        f"/api/social/missions/{mission['id']}/candidates",
+        headers=owner_headers,
+    ).json()["data"]
+    assert len(candidates) == 1
+    assert candidates[0]["targetUserId"] == responder["user"]["id"]
+    assert candidates[0]["interactionId"] == first_data["interactionId"]
+    assert client.get("/api/social/missions", headers=responder_headers).json()["data"] == []
+
+    responder_view = client.get(
+        f"/api/avatar/probe-log?session_id={first_data['sessionId']}",
+        headers=responder_headers,
+    )
+    assert responder_view.status_code == 200
+    assert responder_view.json()["data"][0]["id"] == first_data["interactionId"]
+    assert responder_view.json()["data"][0]["userBId"] == owner["user"]["id"]
+
+    # 打开试聊不依赖 session_id（真机 query 丢 camelCase 时仍可打开）
+    by_id_b = client.get(
+        f"/api/avatar/atoa/{first_data['interactionId']}",
+        headers=responder_headers,
+    )
+    assert by_id_b.status_code == 200, by_id_b.json()
+    assert by_id_b.json()["data"]["id"] == first_data["interactionId"]
+    assert by_id_b.json()["data"]["userBId"] == owner["user"]["id"]
+
+    by_id_a = client.get(
+        f"/api/avatar/atoa/{first_data['interactionId']}",
+        headers=owner_headers,
+    )
+    assert by_id_a.status_code == 200, by_id_a.json()
+    assert by_id_a.json()["data"]["id"] == first_data["interactionId"]
+    assert by_id_a.json()["data"]["userBId"] == responder["user"]["id"]
+
+    # 只有这段 AtoA 的双方能看，其他人一律拒绝
+    outsider = create_test_user(client, username="atoaoutsider", name="旁观者")
+    outsider_view = client.get(
+        f"/api/avatar/atoa/{first_data['interactionId']}",
+        headers=get_auth_header(outsider["token"]),
+    )
+    assert outsider_view.status_code == 403, outsider_view.json()
+
+    # 旧 id 自动落到同会话同配对的最新可访问一轮
+    from app.models.avatar import AvatarAtoaInteraction
+
+    original = db.query(AvatarAtoaInteraction).filter(
+        AvatarAtoaInteraction.id == first_data["interactionId"]
+    ).first()
+    assert original is not None
+    stale = AvatarAtoaInteraction(
+        id=str(uuid4()),
+        initiator_id=original.user_a_id,
+        session_id=original.session_id,
+        user_a_id=original.user_a_id,
+        user_b_id=original.user_b_id,
+        interaction_type="card_exchange",
+        outcome="pending_user_decision",
+        score_a=10,
+        score_b=10,
+        shared_topics=original.shared_topics,
+        reasons_a=original.reasons_a,
+        reasons_b=original.reasons_b,
+        risk_flags=original.risk_flags,
+        conversation=original.conversation,
+        is_visible_to_a=True,
+        is_visible_to_b=True,
+        interaction_phase=1,
+        created_at=(original.created_at or 0) - 1000,
+        updated_at=(original.updated_at or 0) - 1000,
+    )
+    db.add(stale)
+    db.commit()
+
+    resolved = client.get(
+        f"/api/avatar/atoa/{stale.id}",
+        headers=responder_headers,
+    )
+    assert resolved.status_code == 200, resolved.json()
+    assert resolved.json()["data"]["id"] == first_data["interactionId"]
 
 
 def test_pause_resume_and_close_mission(client):

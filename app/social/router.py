@@ -23,6 +23,7 @@ from app.social.schemas import (
     MissionCandidateOut,
     MissionOut,
     MissionParseOut,
+    MissionPostResponseOut,
     MissionPostDraftOut,
     MissionProbeOut,
     MissionSearchOut,
@@ -210,28 +211,44 @@ def skip_mission_candidate(
 
 
 @router.post("/missions/{mission_id}/post-draft", summary="生成任务招募帖草稿")
-def create_mission_post_draft(
+async def create_mission_post_draft(
     mission_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    result = mission_service.build_post_draft(db, current_user.id, mission_id)
+    result = await mission_service.build_post_draft(db, current_user.id, mission_id)
     return success(MissionPostDraftOut(**result).model_dump(by_alias=True))
 
 
 @router.post("/missions/{mission_id}/publish", summary="确认并发布任务招募帖")
-def publish_mission_post(
+async def publish_mission_post(
     mission_id: str,
     body: PublishMissionPostRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    result = mission_service.publish_mission_post(
+    result = await mission_service.publish_mission_post(
         db, current_user, mission_id, body.model_dump()
     )
     from app.plaza.schemas import PlazaPostOut
 
     return success(PlazaPostOut(**result).model_dump(by_alias=True))
+
+
+@router.post("/mission-posts/{post_id}/respond", summary="响应既有任务招募帖并开始 AtoA")
+async def respond_to_mission_post(
+    post_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    result = await mission_service.respond_to_mission_post(db, current_user, post_id)
+    return success(MissionPostResponseOut(
+        candidate=MissionCandidateOut(**result["candidate"]),
+        interaction_id=result["interaction_id"],
+        session_id=result["session_id"],
+        mission_id=result["mission_id"],
+        post_id=result["post_id"],
+    ).model_dump(by_alias=True))
 
 
 @router.get("/matches", summary="已匹配列表（裸数组）")

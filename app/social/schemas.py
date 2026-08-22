@@ -44,6 +44,9 @@ class MatchOut(CamelModel):
     match_type: str = "long_term"
     request_direction: str = "outgoing"
     reason: str = ""
+    mission_id: Optional[str] = None
+    mission_title: Optional[str] = None
+    mission_mode: Optional[str] = None
 
 
 class MatchRequestOut(CamelModel):
@@ -64,12 +67,24 @@ class MessageOut(CamelModel):
     timestamp: int
 
 
+class MatchDimensionOut(CamelModel):
+    """匹配报告单维分析"""
+    key: str
+    label: str
+    score: int
+    reason: str = ""
+
+
 class MatchReportOut(CamelModel):
     """匹配报告响应"""
     compatibility: int
+    summary: str = ""
     analysis: str
+    dimensions: List[MatchDimensionOut] = Field(default_factory=list)
     common_points: List[str]
     differences: List[str]
+    suggestions: List[str] = Field(default_factory=list)
+    risks: List[str] = Field(default_factory=list)
 
 
 class BuddyRequestOut(CamelModel):
@@ -192,6 +207,11 @@ class MissionProbeOut(CamelModel):
     session_id: str
 
 
+class MissionPostResponseOut(MissionProbeOut):
+    mission_id: str
+    post_id: str
+
+
 class MissionPostDraftOut(CamelModel):
     type: str
     content: str
@@ -203,6 +223,7 @@ class MissionPostDraftOut(CamelModel):
 
 class PublishMissionPostRequest(BaseModel):
     content: str
+    type: Optional[str] = None          # 草稿里已判定的板块；留空则发布时重新判定
     location: str = ""
     tags: list[str] = Field(default_factory=list)
     allow_agent_reply: bool = True

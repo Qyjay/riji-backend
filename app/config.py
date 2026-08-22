@@ -83,6 +83,12 @@ class Settings(BaseSettings):
     VIVO_VISION_TIMEOUT_SEC: int = 50
     VIVO_VISION_CACHE_TTL_SEC: int = 21600
 
+    # 广场帖子板块分类：发帖时同步调一次，超时即走关键词兜底
+    PLAZA_CLASSIFY_TIMEOUT_SEC: int = 8
+
+    # 小 V 语音指令意图识别：只在语音入口触发，超时即走关键词兜底
+    VOICE_INTENT_TIMEOUT_SEC: int = 8
+
     # 联网搜索
     WEB_SEARCH_PROVIDER: str = "exa"  # exa | volcengine
 

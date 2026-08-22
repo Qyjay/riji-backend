@@ -175,17 +175,25 @@ def get_post(db: Session, current_user: User, post_id: str) -> dict:
     return _post_to_dict(post, user)
 
 
-def create_post(db: Session, current_user: User, data: dict) -> dict:
+async def create_post(db: Session, current_user: User, data: dict) -> dict:
     """创建帖子"""
+    from app.plaza.classifier import resolve_post_type
+
     now = _now_ms()
+    tags = data.get("tags", [])
+    post_type = await resolve_post_type(
+        data.get("content", ""),
+        tags,
+        requested=data.get("type"),
+    )
     post = PlazaPost(
         id=str(uuid4()),
         user_id=current_user.id,
-        type=data["type"],
+        type=post_type,
         content=data["content"],
         images=_encode(data.get("images", [])),
         location=data.get("location", ""),
-        tags=_encode(data.get("tags", [])),
+        tags=_encode(tags),
         likes=0,
         comments=0,
         agent_responses=0,

@@ -40,7 +40,7 @@ def _create_user_with_material(client, username):
 class TestDiaryGeneration:
     """日记 AI 生成测试"""
 
-    def test_generate_diary(self, client: TestClient):
+    def test_generate_diary(self, client: TestClient, db):
         """AI 生成日记"""
         auth, headers = _create_user_with_material(client, "diary_gen1")
 
@@ -57,6 +57,13 @@ class TestDiaryGeneration:
         assert data["status"] == "draft"
         assert data["editCount"] == 0
         assert data["maxEdits"] == DIARY_MAX_EDITS
+
+        share_cards = db.query(DiaryDerivative).filter(
+            DiaryDerivative.diary_id == data["id"],
+            DiaryDerivative.type == "share_card",
+        ).all()
+        assert len(share_cards) == 1
+        assert share_cards[0].content.strip()
 
     def test_generate_diary_no_materials(self, client: TestClient):
         """无素材时默认提示先记录素材"""
@@ -848,7 +855,9 @@ class TestDiaryEmotionTrend:
 
         gen_resp = client.post("/api/diaries/generate", json={"date": "2026-03-25"}, headers=headers)
         assert gen_resp.status_code == 200
-        diary_id = gen_resp.json()["data"]["id"]
+        generated_diary = gen_resp.json()["data"]
+        diary_id = generated_diary["id"]
+        assert generated_diary["shareCard"].strip()
 
         trend_resp = client.get(f"/api/diaries/{diary_id}/emotion-trend", headers=headers)
         assert trend_resp.status_code == 200
@@ -1089,7 +1098,6 @@ class TestDiaryAI:
         [
             ("comic", "", "https://mock.local/comic.png", 1, 0),
             ("novel", "这是小说版内容", "", 0, 1),
-            ("share_card", "这是分享卡文案", "", 0, 1),
         ],
     )
     def test_generate_derivative_all_types_and_persist(
@@ -1160,6 +1168,71 @@ class TestDiaryAI:
         assert row.media_url == expected_media_url
         assert row.share_scope == "private"
 
+    def test_share_card_is_ready_after_diary_generate(self, client: TestClient, db, monkeypatch):
+        """生成日记时已写好分享卡，再次点分享不应再调模型。"""
+        auth, headers = _create_user_with_material(client, "diary_share_ready")
+
+        gen_resp = client.post("/api/diaries/generate", json={"date": "2026-03-25"}, headers=headers)
+        assert gen_resp.status_code == 200
+        generated_diary = gen_resp.json()["data"]
+        diary_id = generated_diary["id"]
+        assert generated_diary["shareCard"].strip()
+
+        existing = (
+            db.query(DiaryDerivative)
+            .filter(DiaryDerivative.diary_id == diary_id, DiaryDerivative.type == "share_card")
+            .one()
+        )
+        assert existing.content.strip()
+        assert generated_diary["shareCard"] == existing.content
+
+        call_counts = {"chat": 0}
+
+        class FakeMiniMaxClient:
+            async def chat_completion(self, *args, **kwargs):
+                call_counts["chat"] += 1
+                return "这是分享卡文案"
+
+        monkeypatch.setattr(minimax_client, "get_minimax_client", lambda: FakeMiniMaxClient())
+
+        resp = client.post(f"/api/diaries/{diary_id}/derivative", json={"type": "share_card"}, headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["type"] == "share_card"
+        assert data["content"] == existing.content
+        assert data["id"] == existing.id
+        assert call_counts["chat"] == 0
+
+    def test_regenerate_updates_in_place_and_delete_cleans_share_card(self, client: TestClient, db):
+        """重写应原位更新日记，删除时应同步清理预生成分享卡。"""
+        auth, headers = _create_user_with_material(client, "diary_rewrite")
+
+        first_resp = client.post(
+            "/api/diaries/generate",
+            json={"date": "2026-03-25"},
+            headers=headers,
+        )
+        assert first_resp.status_code == 200
+        diary_id = first_resp.json()["data"]["id"]
+
+        rewrite_resp = client.post(
+            "/api/diaries/generate",
+            json={"date": "2026-03-25", "regenerate": True},
+            headers=headers,
+        )
+        assert rewrite_resp.status_code == 200
+        assert rewrite_resp.json()["data"]["id"] == diary_id
+        assert rewrite_resp.json()["data"]["shareCard"].strip()
+        assert db.query(Diary).filter(Diary.id == diary_id).count() == 1
+        assert db.query(DiaryDerivative).filter(
+            DiaryDerivative.diary_id == diary_id,
+            DiaryDerivative.type == "share_card",
+        ).count() == 1
+
+        delete_resp = client.delete(f"/api/diaries/{diary_id}", headers=headers)
+        assert delete_resp.status_code == 200
+        assert db.query(DiaryDerivative).filter(DiaryDerivative.diary_id == diary_id).count() == 0
+
     def test_generate_derivative_invalid_type_returns_param_error(self, client: TestClient, db):
         """非法衍生类型应返回参数错误，且不写入 diary_derivatives。"""
         auth, headers = _create_user_with_material(client, "diary_der_invalid")
@@ -1178,7 +1251,10 @@ class TestDiaryAI:
         assert body["code"] == 40102
         assert "仅支持 comic/novel/share_card" in body["message"]
 
-        rows = db.query(DiaryDerivative).filter(DiaryDerivative.diary_id == diary_id).all()
+        rows = db.query(DiaryDerivative).filter(
+            DiaryDerivative.diary_id == diary_id,
+            DiaryDerivative.type == "video",
+        ).all()
         assert rows == []
 
     def test_sanitize_comic_source_text_strips_nude_sculpture(self):

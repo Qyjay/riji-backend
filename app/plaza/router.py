@@ -62,13 +62,13 @@ def get_post(
 
 
 @router.post("/posts", summary="创建帖子")
-def create_post(
+async def create_post(
     body: schemas.CreatePostRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """创建一条广场帖子"""
-    result = service.create_post(db, current_user, body.model_dump())
+    """创建一条广场帖子；type 留空或传 auto 时由 AI 判定板块"""
+    result = await service.create_post(db, current_user, body.model_dump())
     return success(_serialize_post(result))
 
 

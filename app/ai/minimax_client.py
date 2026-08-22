@@ -243,6 +243,7 @@ class MiniMaxClient:
         max_tokens: int,
         stream: bool,
         request_id: str,
+        response_format: Optional[dict] = None,
     ) -> dict:
         payload = {
             "requestId": request_id,
@@ -260,6 +261,9 @@ class MiniMaxClient:
             payload["enable_thinking"] = self.vivo_enable_thinking
         elif self.vivo_enable_thinking:
             payload["thinking"] = {"type": "enabled"}
+
+        if response_format:
+            payload["response_format"] = response_format
 
         return payload
 
@@ -963,12 +967,16 @@ class MiniMaxClient:
         system_prompt: str = "",
         temperature: float = 0.8,
         max_tokens: int = 2048,
+        response_format: Optional[dict] = None,
+        timeout_sec: Optional[float] = None,
     ) -> str:
         """
         非流式对话，返回完整的回复文本
 
         Mock 模式：返回随机测试回复
         真实模式：调用 M2.7-highspeed Anthropic 兼容 API
+        response_format: 可选，如 {"type": "json_object"}，在 VIVO/OpenAI 兼容端启用 JSON 模式
+        timeout_sec: 可选 HTTP 超时；不传则用 provider 默认超时
         """
         if self.mock:
             await asyncio.sleep(0.3)  # 模拟网络延迟
@@ -997,10 +1005,14 @@ class MiniMaxClient:
                 max_tokens=max_tokens,
                 stream=False,
                 request_id=request_id,
+                response_format=response_format,
             )
 
+            vivo_http_timeout = float(
+                timeout_sec if timeout_sec is not None else self.vivo_timeout_sec
+            )
             try:
-                async with httpx.AsyncClient(timeout=float(self.vivo_timeout_sec), trust_env=False) as client:
+                async with httpx.AsyncClient(timeout=vivo_http_timeout, trust_env=False) as client:
                     resp = await client.post(
                         f"{self.vivo_api_base}/v1/chat/completions",
                         headers=self._build_vivo_headers(),
@@ -1047,9 +1059,12 @@ class MiniMaxClient:
             "temperature": temperature,
             "messages": full_messages,
         }
+        if response_format:
+            payload["response_format"] = response_format
 
         try:
-            async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
+            other_http_timeout = float(timeout_sec if timeout_sec is not None else 60.0)
+            async with httpx.AsyncClient(timeout=other_http_timeout, trust_env=False) as client:
                 resp = await client.post(
                     f"{self.api_base}/v1/chat/completions",
                     headers=self.headers,
@@ -1908,6 +1923,7 @@ class MiniMaxClient:
                     "distribution": {"平静": 1.0},
                 },
                 "ai_tags": ["日常记录", "校园生活", "今日心情"],
+                "share_card": "把今天的碎片收成一张卡片，平凡里也有自己的小确幸。",
             }
 
         style_hint = user_style or "自然、真诚"
@@ -1959,7 +1975,7 @@ class MiniMaxClient:
             "【输出格式】\n"
             "仅输出合法 JSON，不要输出 markdown 代码块，不要输出任何解释文字。\n"
             "JSON 结构如下：\n"
-            '{"title": "日记标题（<=18字）", "content": "完整正文", "emotion_summary": {"dominant": "主要情绪", "distribution": {"开心": 0.6, "平静": 0.4}}, "ai_tags": ["标签1", "标签2", "标签3"]}'
+            '{"title": "日记标题（<=18字）", "content": "完整正文", "emotion_summary": {"dominant": "主要情绪", "distribution": {"开心": 0.6, "平静": 0.4}}, "ai_tags": ["标签1", "标签2", "标签3"], "share_card": "30-80字朋友圈分享文案，单段，0-2个emoji，不换行不加标题"}'
         )
 
         user_prompt = (
@@ -1976,16 +1992,26 @@ class MiniMaxClient:
         )
         messages = [{"role": "user", "content": user_prompt}]
         try:
-            resp = await self.chat_completion(messages, system_prompt=system, temperature=0.85)
+            resp = await self.chat_completion(
+                messages,
+                system_prompt=system,
+                temperature=0.85,
+                response_format={"type": "json_object"},
+            )
             raw = resp.strip()
             try:
-                return json.loads(raw)
+                parsed = json.loads(raw)
             except json.JSONDecodeError:
                 import re
                 match = re.search(r"\{[\s\S]*\}", raw)
                 if match:
-                    return json.loads(match.group(0))
-                raise
+                    parsed = json.loads(match.group(0))
+                else:
+                    raise
+            if not isinstance(parsed, dict):
+                raise ValueError("日记生成响应不是 JSON 对象")
+            parsed["share_card"] = str(parsed.get("share_card") or "").strip()
+            return parsed
         except Exception:
             fallback_content = self._build_fallback_diary_content(
                 materials_text,
@@ -1998,6 +2024,7 @@ class MiniMaxClient:
                 "content": fallback_content,
                 "emotion_summary": {"dominant": dominant or "平静", "distribution": distribution},
                 "ai_tags": ["日常记录", "生活片段", "今日随记"],
+                "share_card": f"把今天认真收进记忆里：{fallback_content[:58].strip()}",
             }
 
     async def generate_diary_comment(self, user_prompt: str, system_prompt: str = "") -> str:

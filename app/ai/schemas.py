@@ -49,6 +49,33 @@ class TtsRequest(BaseModel):
     voice: Optional[str] = "male-qn-qingse"
 
 
+class VoiceIntentRequest(BaseModel):
+    """小 V 语音指令原话"""
+    utterance: str = ""
+
+    @field_validator("utterance", mode="before")
+    @classmethod
+    def strip_utterance(cls, value):
+        return str(value or "").strip()
+
+
+class VoiceIntentSlotsOut(CamelModel):
+    """六种意图共用一组槽位，用不到的填空字符串"""
+    target: str = ""
+    text: str = ""
+    requirement: str = ""
+
+
+class VoiceIntentOut(CamelModel):
+    """意图识别结果；action 恒为合法枚举，端侧照 deeplink 分发即可"""
+    action: str
+    confidence: float
+    slots: VoiceIntentSlotsOut
+    deeplink: str
+    speech: str
+    source: str
+
+
 class LlmModelCreateRequest(BaseModel):
     """创建用户自定义聊天模型"""
     name: str

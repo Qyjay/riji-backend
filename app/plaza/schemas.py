@@ -13,7 +13,7 @@ from app.serializers import CamelModel
 
 class CreatePostRequest(BaseModel):
     """创建帖子请求"""
-    type: str                           # buddy / help / share / dating
+    type: str = ""                      # buddy / help / share / dating；留空或 auto 交给 AI 判定
     content: str                        # 正文
     images: list[str] = []              # 图片 URL 列表
     location: str = ""                  # 位置

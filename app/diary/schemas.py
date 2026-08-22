@@ -18,6 +18,7 @@ class GenerateDiaryRequest(BaseModel):
     weather: Optional[str] = ""
     weather_periods: List[Dict[str, Any]] = Field(default_factory=list, alias="weatherPeriods")
     allow_fallback: bool = False
+    regenerate: bool = False
 
 
 class BackfillPhoto(BaseModel):

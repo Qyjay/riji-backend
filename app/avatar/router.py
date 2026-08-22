@@ -371,6 +371,20 @@ def get_mutual_matches(
     return success([MutualMatchItemOut(**item).model_dump(by_alias=True) for item in items])
 
 
+@router.get("/atoa/{interaction_id}", summary="按 id 打开 AtoA 试聊详情")
+def get_atoa_probe(
+    interaction_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    不依赖 session_id / 最近冲浪会话；参与双方在可见时均可打开。
+    若旧 id 已被同会话同配对的新一轮替代，返回最新可访问一轮。
+    """
+    result = service.get_atoa_probe(db, current_user.id, interaction_id)
+    return success(ProbeLogItemOut(**result).model_dump(by_alias=True))
+
+
 @router.post("/atoa/{interaction_id}/continue", summary="继续 AtoA 分身对话（Phase 8B）")
 async def continue_atoa_chat(
     interaction_id: str,

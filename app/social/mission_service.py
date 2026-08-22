@@ -9,6 +9,7 @@ from typing import Any, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.avatar import AvatarAtoaSession
@@ -211,6 +212,64 @@ def _candidate_to_dict(db: Session, candidate: MissionCandidate) -> dict:
         "created_at": candidate.created_at,
         "updated_at": candidate.updated_at,
     }
+
+
+_CANDIDATE_STATUS_PRIORITY = {
+    "peer_accepted": 70,
+    "request_sent": 60,
+    "ready_for_user": 50,
+    "discovered": 40,
+    "peer_rejected": 30,
+    "user_skipped": 20,
+    "blocked": 10,
+    "expired": 0,
+}
+
+
+def _candidate_identity_key(candidate: dict) -> str:
+    user_id = str(
+        candidate.get("target_user_id")
+        or (candidate.get("target_user") or {}).get("id")
+        or (candidate.get("target_post") or {}).get("authorId")
+        or ""
+    ).strip()
+    if user_id:
+        return f"user:{user_id}"
+    user = candidate.get("target_user") or {}
+    post = candidate.get("target_post") or {}
+    name = str(user.get("name") or post.get("authorName") or "").strip().lower()
+    school = str(user.get("school") or post.get("authorSchool") or "").strip().lower()
+    name = re.sub(r"\s+", "", name)
+    school = re.sub(r"\s+", "", school)
+    return f"legacy:{name}|{school}" if name else f"candidate:{candidate.get('id')}"
+
+
+def _candidate_quality(candidate: dict) -> tuple[int, int, int, str]:
+    """可操作状态优先，其次最新，再保留报告信息更完整的记录。"""
+    report_size = sum(
+        len(candidate.get(field) or [])
+        for field in ("fit_reasons", "questions", "conflicts", "risk_flags")
+    ) + (1 if candidate.get("interaction_id") else 0)
+    return (
+        _CANDIDATE_STATUS_PRIORITY.get(str(candidate.get("status") or ""), 0),
+        int(candidate.get("updated_at") or candidate.get("created_at") or 0),
+        report_size,
+        str(candidate.get("id") or ""),
+    )
+
+
+def _dedupe_candidate_dicts(candidates: list[dict]) -> list[dict]:
+    representatives: dict[str, dict] = {}
+    for candidate in candidates:
+        key = _candidate_identity_key(candidate)
+        current = representatives.get(key)
+        if current is None or _candidate_quality(candidate) > _candidate_quality(current):
+            representatives[key] = candidate
+    return sorted(
+        representatives.values(),
+        key=_candidate_quality,
+        reverse=True,
+    )
 
 
 def _detect_purpose(text: str) -> tuple[str, str]:
@@ -612,7 +671,10 @@ def _upsert_candidate(
     conflicts: Optional[list[dict]] = None,
 ) -> MissionCandidate:
     query = db.query(MissionCandidate).filter(MissionCandidate.mission_id == mission.id)
-    if target_post_id:
+    if target_user_id:
+        # 展示候选的身份是人，不是帖子；同一用户多个帖子只更新一条任务候选。
+        query = query.filter(MissionCandidate.target_user_id == target_user_id)
+    elif target_post_id:
         query = query.filter(MissionCandidate.target_post_id == target_post_id)
     else:
         query = query.filter(
@@ -633,8 +695,10 @@ def _upsert_candidate(
             updated_at=now,
         )
         db.add(candidate)
-    elif candidate.status in {"expired", "discovered", "ready_for_user"}:
+    elif candidate.status in {"expired", "discovered"}:
         candidate.status = "discovered"
+    if target_post_id:
+        candidate.target_post_id = target_post_id
     candidate.internal_score = max(0, min(int(score), 99))
     candidate.hard_constraint_result = _encode(hard)
     candidate.fit_reasons = _encode(reasons)
@@ -654,7 +718,11 @@ def _search_short_term(db: Session, current_user: User, mission: SocialMission) 
         .join(User, PlazaPost.user_id == User.id)
         .filter(
             PlazaPost.user_id != current_user.id,
-            PlazaPost.type.in_(["buddy", "dating"]),
+            # 招募帖的板块由内容判定，不再固定是 buddy/dating，按 mission_id 一并召回
+            or_(
+                PlazaPost.type.in_(["buddy", "dating"]),
+                PlazaPost.mission_id.isnot(None),
+            ),
         )
         .order_by(PlazaPost.created_at.desc())
         .limit(100)
@@ -827,7 +895,7 @@ def list_candidates(
         MissionCandidate.internal_score.desc(),
         MissionCandidate.updated_at.desc(),
     ).all()
-    return [_candidate_to_dict(db, row) for row in rows]
+    return _dedupe_candidate_dicts([_candidate_to_dict(db, row) for row in rows])
 
 
 def search_mission(db: Session, current_user: User, mission_id: str) -> dict:
@@ -858,9 +926,13 @@ def search_mission(db: Session, current_user: User, mission_id: str) -> dict:
         )
         .all()
     )
-    mission.candidate_count = len(active_candidates)
+    active_candidate_dicts = _dedupe_candidate_dicts([
+        _candidate_to_dict(db, candidate) for candidate in active_candidates
+    ])
+    mission.candidate_count = len(active_candidate_dicts)
     mission.pending_count = sum(
-        candidate.status in {"discovered", "ready_for_user"} for candidate in active_candidates
+        candidate["status"] in {"discovered", "ready_for_user"}
+        for candidate in active_candidate_dicts
     )
     if mission.pending_count:
         mission.status = "awaiting_user"
@@ -1073,12 +1145,10 @@ def skip_candidate(
     return _candidate_to_dict(db, candidate)
 
 
-def build_post_draft(db: Session, user_id: str, mission_id: str) -> dict:
+async def build_post_draft(db: Session, user_id: str, mission_id: str) -> dict:
+    from app.plaza.classifier import classify_post_type
+
     mission = _get_mission(db, user_id, mission_id)
-    if mission.mode != "short_term":
-        post_type = "dating"
-    else:
-        post_type = "buddy"
     time_window = _decode(mission.time_window, {})
     location = _decode(mission.location, {})
     headcount = _decode(mission.headcount, {})
@@ -1099,6 +1169,7 @@ def build_post_draft(db: Session, user_id: str, mission_id: str) -> dict:
         lines.append(f"预算：人均 {budget.get('min', 0)} 到 {budget.get('max', 0)} 元")
     must_haves = _decode(mission.must_haves, [])
     preferences = _decode(mission.preferences, [])
+    boundaries = _decode(mission.boundaries, [])
     if must_haves:
         lines.append(f"希望：{'、'.join(must_haves)}")
     if preferences:
@@ -1109,25 +1180,37 @@ def build_post_draft(db: Session, user_id: str, mission_id: str) -> dict:
         [_PURPOSE_LABELS.get(mission.purpose_type, mission.purpose_type), *preferences],
         5,
     )
+    # 地点精度只控制展示和搜索范围，不等于帖子可见性。
+    # 只有用户条件里明确要求“同校/仅本校”时，招募帖才默认限制为本校。
+    school_only = any(
+        keyword in str(value)
+        for value in [*must_haves, *preferences, *boundaries]
+        for keyword in ("同校", "仅本校")
+    )
+    content = "\n".join(line for line in lines if line is not None).strip()
+    post_type = await classify_post_type(content, tags, default="buddy")
     return {
         "type": post_type,
-        "content": "\n".join(line for line in lines if line is not None).strip(),
+        "content": content,
         "location": location_label,
         "tags": tags,
         "allow_agent_reply": True,
-        "school_only": location.get("precision") == "campus",
+        "school_only": school_only,
     }
 
 
-def publish_mission_post(
+async def publish_mission_post(
     db: Session,
     current_user: User,
     mission_id: str,
     data: dict,
 ) -> dict:
+    from app.plaza.classifier import resolve_post_type
     from app.plaza.service import _post_to_dict
 
     mission = _get_mission(db, current_user.id, mission_id)
+    if mission.status in {"completed", "cancelled", "expired"}:
+        raise ApiException(code=PARAM_INVALID, message="已结束任务不能发布招募帖")
     permissions = {**_DEFAULT_PERMISSIONS, **_decode(mission.permissions, {})}
     if not permissions.get("draftPost"):
         raise ApiException(code=PARAM_INVALID, message="这项任务没有授权分身协助发帖")
@@ -1136,14 +1219,22 @@ def publish_mission_post(
         if existing:
             return _post_to_dict(existing, current_user)
     now = _now_ms()
+    content = str(data.get("content") or "").strip()
+    tags = _clean_list(data.get("tags"), 8)
+    post_type = await resolve_post_type(
+        content,
+        tags,
+        requested=data.get("type"),
+        default="buddy",
+    )
     post = PlazaPost(
         id=str(uuid4()),
         user_id=current_user.id,
-        type="buddy" if mission.mode == "short_term" else "dating",
-        content=str(data.get("content") or "").strip(),
+        type=post_type,
+        content=content,
         images="[]",
         location=str(data.get("location") or ""),
-        tags=_encode(_clean_list(data.get("tags"), 8)),
+        tags=_encode(tags),
         likes=0,
         comments=0,
         agent_responses=0,
@@ -1194,6 +1285,87 @@ def publish_mission_post(
     db.commit()
     db.refresh(post)
     return _post_to_dict(post, current_user)
+
+
+async def respond_to_mission_post(
+    db: Session,
+    current_user: User,
+    post_id: str,
+) -> dict:
+    """响应既有招募帖，在来源任务下创建或复用候选和 AtoA 试聊。"""
+    post = db.query(PlazaPost).filter(PlazaPost.id == post_id).first()
+    if not post:
+        raise ApiException(code=NOT_FOUND, message="招募帖不存在", status_code=404)
+    if not post.mission_id:
+        raise ApiException(code=PARAM_INVALID, message="该帖未绑定找朋友任务")
+    mission = db.query(SocialMission).filter(SocialMission.id == post.mission_id).first()
+    if not mission:
+        raise ApiException(code=NOT_FOUND, message="来源找人任务不存在", status_code=404)
+    if current_user.id in {post.user_id, mission.user_id}:
+        raise ApiException(code=PARAM_INVALID, message="不能让分身响应自己的招募帖", status_code=403)
+    owner = db.query(User).filter(User.id == mission.user_id).first()
+    if not owner:
+        raise ApiException(code=NOT_FOUND, message="招募帖发布者不存在", status_code=404)
+    if post.school_only and (owner.school or "") != (current_user.school or ""):
+        raise ApiException(code=NOT_FOUND, message="招募帖不存在", status_code=404)
+    if mission.status in {"completed", "cancelled", "expired"}:
+        raise ApiException(code=PARAM_INVALID, message="该招募任务已经结束")
+    if post.opportunity_status in {"full", "completed", "expired", "cancelled"}:
+        raise ApiException(code=PARAM_INVALID, message="该招募帖当前不能响应")
+    if not post.agent_probe_enabled:
+        raise ApiException(code=PARAM_INVALID, message="该招募帖没有开放分身试聊")
+
+    candidate = _upsert_candidate(
+        db,
+        mission,
+        target_user_id=current_user.id,
+        target_post_id=None,
+        source="plaza_response",
+        score=75,
+        hard={
+            "activity": "pass",
+            "time": "unknown",
+            "location": "unknown",
+            "availability": "pass",
+        },
+        reasons=[{
+            "text": "对方主动响应了这条招募帖",
+            "source": "plaza_response",
+            "confidence": "confirmed",
+        }],
+        questions=["具体时间、地点和活动细节是否都合适？"],
+    )
+    if candidate.status in {"user_skipped", "blocked", "expired", "peer_rejected"}:
+        candidate.status = "discovered"
+    db.flush()
+
+    result = await probe_candidate(db, owner, mission.id, candidate.id)
+    from app.models.avatar import AvatarAtoaInteraction
+
+    interaction = db.query(AvatarAtoaInteraction).filter(
+        AvatarAtoaInteraction.id == result["interaction_id"]
+    ).first()
+    if interaction:
+        interaction.is_visible_to_b = True
+        interaction.reasons_b = _encode(["你主动响应了这条招募帖"])
+        interaction.score_b = max(interaction.score_b or 0, 75)
+    active_candidates = list_candidates(db, mission.user_id, mission.id)
+    mission.candidate_count = len([
+        item for item in active_candidates
+        if item["status"] not in {"user_skipped", "blocked", "expired"}
+    ])
+    mission.pending_count = len([
+        item for item in active_candidates
+        if item["status"] in {"discovered", "ready_for_user"}
+    ])
+    mission.status = "awaiting_user"
+    mission.updated_at = _now_ms()
+    db.commit()
+    return {
+        **result,
+        "mission_id": mission.id,
+        "post_id": post.id,
+    }
 
 
 def mark_candidate_connection(

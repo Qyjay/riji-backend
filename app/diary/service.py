@@ -662,6 +662,93 @@ def _build_derivative_text_fallback(
     return f"{weather_ctx}的一天里，我带着{emotion_ctx}走过这些片段：{snippet[:48]}。"
 
 
+def _share_card_copy_from_result(result: dict) -> str:
+    if not isinstance(result, dict):
+        return ""
+    for key in ("share_card", "shareCard", "share_copy"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _normalize_share_card_copy(
+    raw: str,
+    diary_excerpt: str,
+    weather_ctx: str,
+    emotion_ctx: str,
+) -> str:
+    text = re.sub(r"\s+", " ", str(raw or "").strip()).strip("\"“”")
+    if not text:
+        text = _build_derivative_text_fallback(
+            "share_card",
+            diary_excerpt,
+            weather_ctx,
+            emotion_ctx,
+        )
+    if len(text) > 120:
+        text = text[:120].rstrip()
+    return text
+
+
+def _persist_share_card_for_diary(db: Session, diary: Diary, result: Optional[dict] = None) -> None:
+    """生成日记时同步落库分享卡，避免用户点分享时再等一轮模型。"""
+    try:
+        from app.models.derivative import DiaryDerivative
+
+        emotion_ctx = _decode_dict(diary.emotion_summary).get("dominant", "") or "平静"
+        weather_ctx = diary.weather or "未记录天气"
+        copy = _normalize_share_card_copy(
+            _share_card_copy_from_result(result or {}),
+            diary.content or "",
+            weather_ctx,
+            emotion_ctx,
+        )
+        existing = (
+            db.query(DiaryDerivative)
+            .filter(
+                DiaryDerivative.diary_id == diary.id,
+                DiaryDerivative.type == "share_card",
+            )
+            .order_by(DiaryDerivative.created_at.desc())
+            .first()
+        )
+        if existing:
+            existing.content = copy
+            db.commit()
+            return
+
+        db.add(
+            DiaryDerivative(
+                id=_uuid(),
+                diary_id=diary.id,
+                type="share_card",
+                content=copy,
+                media_url="",
+                share_scope="private",
+                created_at=_now_ms(),
+            )
+        )
+        db.commit()
+    except Exception:
+        logger.exception("persist share card failed diary_id=%s", getattr(diary, "id", ""))
+        db.rollback()
+
+
+def _existing_share_card(db: Session, diary_id: str):
+    from app.models.derivative import DiaryDerivative
+
+    return (
+        db.query(DiaryDerivative)
+        .filter(
+            DiaryDerivative.diary_id == diary_id,
+            DiaryDerivative.type == "share_card",
+        )
+        .order_by(DiaryDerivative.created_at.desc())
+        .first()
+    )
+
+
 def _is_placeholder_image_url(url: str) -> bool:
     raw = str(url or "").strip().lower()
     return "placehold.co" in raw or "placeholder.com" in raw
@@ -957,6 +1044,18 @@ def _diary_response(d: Diary) -> dict:
     return DiaryOut(**diary_to_dict(d)).model_dump(by_alias=True)
 
 
+def _diary_response_with_share_card(db: Session, d: Diary) -> dict:
+    """返回日记及生成阶段已准备好的分享卡；旧数据缺失时仅做本地兜底，不调用 AI。"""
+    prepared = _existing_share_card(db, d.id)
+    if not prepared or not str(prepared.content or "").strip():
+        _persist_share_card_for_diary(db, d)
+        prepared = _existing_share_card(db, d.id)
+
+    result = _diary_response(d)
+    result["shareCard"] = str(getattr(prepared, "content", "") or "").strip()
+    return result
+
+
 async def _generate_ai_comment_for_diary(
     db: Session,
     user_id: str,
@@ -1196,8 +1295,7 @@ def get_diary(db: Session, user_id: str, diary_id: str) -> dict:
     d = db.query(Diary).filter(Diary.id == diary_id, Diary.user_id == user_id).first()
     if not d:
         raise ApiException(code=NOT_FOUND, message="日记不存在", status_code=404)
-    from app.diary.schemas import DiaryOut
-    return DiaryOut(**diary_to_dict(d)).model_dump(by_alias=True)
+    return _diary_response_with_share_card(db, d)
 
 
 def update_diary(db: Session, user_id: str, diary_id: str, data: dict) -> dict:
@@ -1235,6 +1333,7 @@ async def generate_diary(
     weather: str = "",
     weather_periods: Optional[List[dict]] = None,
     allow_fallback: bool = False,
+    regenerate: bool = False,
 ) -> dict:
     """AI 生成当日日记"""
     normalized_weather_periods = _normalize_weather_periods(weather_periods)
@@ -1245,8 +1344,8 @@ async def generate_diary(
         .filter(Diary.user_id == user_id, Diary.date == date)
         .first()
     )
-    if existing:
-        return _diary_response(existing)
+    if existing and not regenerate:
+        return _diary_response_with_share_card(db, existing)
 
     materials_query = db.query(RawMaterial).filter(RawMaterial.user_id == user_id)
     materials = (
@@ -1305,31 +1404,48 @@ async def generate_diary(
         .first()
     )
 
-    if existing:
-        return _diary_response(existing)
+    if existing and not regenerate:
+        return _diary_response_with_share_card(db, existing)
 
-    d = Diary(
-        id=_uuid(),
-        user_id=user_id,
-        content=result.get("content", ""),
-        title=result.get("title", "今日日记"),
-        images=_encode(diary_images),
-        image_understandings=_encode(image_understandings),
-        emotion=_encode(emotion_payload),
-        tags=_encode(diary_tags),
-        weather=normalized_weather,
-        date=date,
-        material_ids=_encode(material_ids),
-        emotion_summary=_encode(emotion_summary),
-        status="draft",
-        edit_count=0,
-        max_edits=DIARY_MAX_EDITS,
-        created_at=now,
-        updated_at=now,
-    )
-    db.add(d)
-    if user:
-        user.diary_count = (user.diary_count or 0) + 1
+    if existing and regenerate:
+        d = existing
+        d.content = result.get("content", "")
+        d.title = result.get("title", "今日日记")
+        d.images = _encode(diary_images)
+        d.image_understandings = _encode(image_understandings)
+        d.emotion = _encode(emotion_payload)
+        d.tags = _encode(diary_tags)
+        d.weather = normalized_weather
+        d.material_ids = _encode(material_ids)
+        d.emotion_summary = _encode(emotion_summary)
+        d.ai_comment = ""
+        d.status = "draft"
+        d.edit_count = 0
+        d.max_edits = DIARY_MAX_EDITS
+        d.updated_at = now
+    else:
+        d = Diary(
+            id=_uuid(),
+            user_id=user_id,
+            content=result.get("content", ""),
+            title=result.get("title", "今日日记"),
+            images=_encode(diary_images),
+            image_understandings=_encode(image_understandings),
+            emotion=_encode(emotion_payload),
+            tags=_encode(diary_tags),
+            weather=normalized_weather,
+            date=date,
+            material_ids=_encode(material_ids),
+            emotion_summary=_encode(emotion_summary),
+            status="draft",
+            edit_count=0,
+            max_edits=DIARY_MAX_EDITS,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(d)
+        if user:
+            user.diary_count = (user.diary_count or 0) + 1
     try:
         db.commit()
     except IntegrityError:
@@ -1340,7 +1456,7 @@ async def generate_diary(
             .first()
         )
         if existing:
-            return _diary_response(existing)
+            return _diary_response_with_share_card(db, existing)
         raise
 
     # 通过“当日情绪趋势”逻辑再次聚合，作为最终 emotion/emotion_summary。
@@ -1353,6 +1469,7 @@ async def generate_diary(
     db.commit()
 
     db.refresh(d)
+    _persist_share_card_for_diary(db, d, result)
     ai_comment = await _generate_ai_comment_for_diary(
         db,
         user_id,
@@ -1369,7 +1486,7 @@ async def generate_diary(
     from app.memory.ingestion import ingest_diary
 
     ingest_diary(db, d)
-    return _diary_response(d)
+    return _diary_response_with_share_card(db, d)
 
 
 def _list_material_user_ids_by_date(db: Session, date: str) -> List[str]:
@@ -1588,6 +1705,20 @@ async def generate_derivative(db: Session, user_id: str, diary_id: str, dtype: s
             message=f"不支持的衍生类型: {dtype}，仅支持 comic/novel/share_card",
             status_code=400,
         )
+
+    if dtype == "share_card":
+        existing_share = _existing_share_card(db, target_diary_id)
+        if existing_share and str(existing_share.content or "").strip():
+            from app.diary.schemas import DerivativeOut
+            return DerivativeOut(
+                id=existing_share.id,
+                diary_id=target_diary_id,
+                type="share_card",
+                content=existing_share.content or "",
+                media_url=existing_share.media_url or "",
+                share_scope=existing_share.share_scope or "private",
+                created_at=existing_share.created_at,
+            ).model_dump(by_alias=True)
 
     from app.ai.minimax_client import get_minimax_client
     client = get_minimax_client()
@@ -2066,6 +2197,7 @@ async def _create_backfill_diary(
             ingest_diary(db, existing)
         except Exception:
             pass
+        _persist_share_card_for_diary(db, existing, result)
         return {"date": date, "diary_id": existing.id, "merged": True}
 
     # ── 新建分支 ──
@@ -2149,6 +2281,7 @@ async def _create_backfill_diary(
     except Exception:
         pass
 
+    _persist_share_card_for_diary(db, d, result)
     return {"date": date, "diary_id": d.id, "merged": False}
 
 
@@ -2399,5 +2532,21 @@ def delete_diary(db: Session, user_id: str, diary_id: str) -> None:
     ).first()
     if not d:
         raise ApiException(code=NOT_FOUND, message="日记不存在", status_code=404)
+    from app.models.anniversary import Anniversary
+    from app.models.derivative import DiaryDerivative
+
+    # 分享卡、漫画等衍生内容有外键关联，必须先清理。
+    db.query(DiaryDerivative).filter(DiaryDerivative.diary_id == diary_id).delete(
+        synchronize_session=False
+    )
+    # AI 提取的纪念日随日记删除；手动纪念日仅解除关联。
+    db.query(Anniversary).filter(
+        Anniversary.diary_id == diary_id,
+        Anniversary.source == "ai_extracted",
+    ).delete(synchronize_session=False)
+    db.query(Anniversary).filter(Anniversary.diary_id == diary_id).update(
+        {Anniversary.diary_id: None},
+        synchronize_session=False,
+    )
     db.delete(d)
     db.commit()
